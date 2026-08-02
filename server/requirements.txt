@@ -1,0 +1,9 @@
+# Conversion server. Install into the same virtualenv as audiblez -- the worker
+# imports audiblez.core directly, and audiblez pins python >=3.10,<3.13.
+#
+#     pip install -r server/requirements.txt
+#     pip install -e audiblez          # if not already installed
+fastapi>=0.115
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9
+celery[redis]>=5.4
