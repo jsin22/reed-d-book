@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- An open book with an audio waveform across the pages. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#F2F6F5"
+        android:pathData="M28,36 L52,41 L52,76 L28,71 Z M56,41 L80,36 L80,71 L56,76 Z" />
+    <group>
+        <path
+            android:strokeColor="#1B4B54"
+            android:strokeWidth="2.6"
+            android:strokeLineCap="round"
+            android:pathData="M34,58 L34,54 M39,61 L39,51 M44,64 L44,48 M64,64 L64,48 M69,61 L69,51 M74,58 L74,54" />
+    </group>
+    <path
+        android:fillColor="#7FD4C1"
+        android:pathData="M54,40 L54,77 L52,77 L52,40 Z" />
+</vector>

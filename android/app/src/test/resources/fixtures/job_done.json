@@ -1,0 +1,23 @@
+{
+  "job_id": "31ad3ad3-2f6e-43ea-919f-69e608f52d67",
+  "status": "done",
+  "filename": "A_Brief_Guide_to_Digital_Formats.epub",
+  "voice": "af_heart",
+  "speed": 1.0,
+  "created_at": "2026-08-07T16:37:04+00:00",
+  "started_at": "2026-08-07T16:37:04+00:00",
+  "finished_at": "2026-08-07T16:37:04+00:00",
+  "progress": 100,
+  "eta": null,
+  "chapters_done": 2,
+  "error": null,
+  "celery_task_id": "1111aaaa-2222-bbbb-3333-ccccdddd4444",
+  "audiobook": {
+    "file": "A_Brief_Guide_to_Digital_Formats.m4b",
+    "bytes": 543210987
+  },
+  "sync": {
+    "file": "A_Brief_Guide_to_Digital_Formats.json",
+    "bytes": 2481
+  }
+}

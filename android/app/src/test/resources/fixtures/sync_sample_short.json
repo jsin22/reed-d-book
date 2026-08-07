@@ -1,0 +1,98 @@
+{
+ "version": 1,
+ "title": "A Brief Guide to Digital Formats",
+ "author": "Sample Generator",
+ "audio_file": "sample-short.m4b",
+ "sample_rate": 24000,
+ "duration": 66.325,
+ "chapters": [
+  {
+   "index": 1,
+   "title": "Chapter 1",
+   "source": "understanding_digital_formats.xhtml",
+   "start": 0.0,
+   "end": 61.5
+  },
+  {
+   "index": 2,
+   "title": "Chapter 2",
+   "source": "nav.xhtml",
+   "start": 61.5,
+   "end": 66.325
+  }
+ ],
+ "chunks": [
+  {
+   "text": "A Brief Guide to Digital Formats – Sample Generator.",
+   "start": 0.0,
+   "end": 3.725,
+   "chapter": 1
+  },
+  {
+   "text": "\n\nUnderstanding Digital Formats.",
+   "start": 3.725,
+   "end": 6.1,
+   "chapter": 1
+  },
+  {
+   "text": "\nDigital file formats are the foundation of modern computing.",
+   "start": 6.1,
+   "end": 10.375,
+   "chapter": 1
+  },
+  {
+   "text": "Every document, image, audio track, and video is stored in a specific format that determines how the data is organized and accessed.",
+   "start": 10.375,
+   "end": 19.3,
+   "chapter": 1
+  },
+  {
+   "text": "\nFile formats can be broadly categorized into several types: document formats like PDF and DOCX, image formats like PNG and JPG, audio formats like MP3 and WAV, and video formats like MP4 and MKV.",
+   "start": 19.3,
+   "end": 36.45,
+   "chapter": 1
+  },
+  {
+   "text": "\nEach format has its own strengths and weaknesses.",
+   "start": 36.45,
+   "end": 39.6,
+   "chapter": 1
+  },
+  {
+   "text": "Some prioritize file size through compression, while others focus on preserving quality at the expense of larger files.",
+   "start": 39.6,
+   "end": 47.65,
+   "chapter": 1
+  },
+  {
+   "text": "\nThe choice of file format depends on the intended use case.",
+   "start": 47.65,
+   "end": 51.775,
+   "chapter": 1
+  },
+  {
+   "text": "For archival purposes, lossless formats are preferred.",
+   "start": 51.775,
+   "end": 55.6,
+   "chapter": 1
+  },
+  {
+   "text": "For sharing online, compressed formats that balance quality and size are more practical.",
+   "start": 55.6,
+   "end": 61.5,
+   "chapter": 1
+  },
+  {
+   "text": "A Brief Guide to Digital Formats.",
+   "start": 61.5,
+   "end": 63.95,
+   "chapter": 2
+  },
+  {
+   "text": "\nUnderstanding Digital Formats.",
+   "start": 63.95,
+   "end": 66.325,
+   "chapter": 2
+  }
+ ]
+}

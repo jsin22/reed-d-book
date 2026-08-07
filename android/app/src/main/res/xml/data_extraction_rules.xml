@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+Nothing here should leave the device. The library holds whole epubs and
+multi-hundred-megabyte audiobooks; backing those up to the cloud or transferring
+them to a new phone would be slow, large, and pointless when both files can be
+regenerated from the conversion server.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="root" path="." />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="root" path="." />
+    </device-transfer>
+</data-extraction-rules>

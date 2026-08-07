@@ -1,0 +1,144 @@
+package dev.reedd.data
+
+import dev.reedd.data.db.BookDao
+import dev.reedd.data.db.BookEntity
+import dev.reedd.data.db.DownloadState
+import dev.reedd.data.db.SyncDao
+import dev.reedd.data.remote.ApiException
+import dev.reedd.data.remote.ApiProvider
+import dev.reedd.data.remote.JobDto
+import dev.reedd.data.remote.JobStatus
+import kotlinx.coroutines.flow.Flow
+import java.io.File
+
+/**
+ * The one place that writes a book's row.
+ *
+ * Everything else -- the upload, the pollers, the download workers, the reader --
+ * goes through here, and the UI observes [books] / [book]. Keeping the writes in
+ * a single type is what stops two components disagreeing about what "done" means.
+ */
+class BookRepository(
+    private val bookDao: BookDao,
+    private val syncDao: SyncDao,
+    private val api: ApiProvider,
+) {
+    fun books(): Flow<List<BookEntity>> = bookDao.observeAll()
+
+    fun book(id: String): Flow<BookEntity?> = bookDao.observe(id)
+
+    suspend fun get(id: String): BookEntity? = bookDao.get(id)
+
+    suspend fun allBooks(): List<BookEntity> = bookDao.all()
+
+    suspend fun insert(book: BookEntity) = bookDao.insert(book)
+
+    suspend fun awaitingConversion(): List<BookEntity> = bookDao.awaitingConversion()
+
+    suspend fun awaitingDownload(): List<BookEntity> = bookDao.awaitingDownload()
+
+    suspend fun attachJob(bookId: String, job: JobDto) {
+        bookDao.attachJob(
+            id = bookId,
+            jobId = job.jobId,
+            status = JobStatus.fromWire(job.status),
+            voice = job.voice,
+            speed = job.speed,
+        )
+    }
+
+    suspend fun updateUploadedBytes(bookId: String, bytes: Long) =
+        bookDao.updateUploadedBytes(bookId, bytes)
+
+    suspend fun setUploadError(bookId: String, error: String?) =
+        bookDao.setUploadError(bookId, error)
+
+    /**
+     * Write what a poll returned.
+     *
+     * `audiobookBytes` is taken from the manifest here rather than at download
+     * time so the UI can show the expected size while the download is queued.
+     */
+    suspend fun applyJobState(bookId: String, job: JobDto) {
+        bookDao.updateJobState(
+            id = bookId,
+            status = JobStatus.fromWire(job.status),
+            progress = job.progress,
+            eta = job.eta,
+            chaptersDone = job.chaptersDone,
+            error = job.error,
+            startedAt = job.startedAt,
+            finishedAt = job.finishedAt,
+            audiobookBytes = job.audiobook?.bytes,
+            audiobookRemoteName = job.audiobook?.file,
+            syncRemoteName = job.sync?.file,
+        )
+    }
+
+    /** The server 404'd this job; stop polling it. */
+    suspend fun markJobMissing(bookId: String) = bookDao.markJobMissing(bookId)
+
+    suspend fun clearJob(bookId: String) = bookDao.clearJob(bookId)
+
+    suspend fun updateDownload(
+        bookId: String,
+        state: DownloadState,
+        downloadedBytes: Long = 0,
+        totalBytes: Long = 0,
+        error: String? = null,
+    ) = bookDao.updateDownload(bookId, state, downloadedBytes, totalBytes, error)
+
+    suspend fun updateDownloadState(bookId: String, state: DownloadState, error: String? = null) =
+        bookDao.updateDownloadState(bookId, state, error)
+
+    suspend fun setAudiobook(bookId: String, file: File?) =
+        bookDao.setAudiobook(bookId, file?.absolutePath, file?.length())
+
+    suspend fun setSync(bookId: String, file: File?, durationMs: Long?) =
+        bookDao.setSync(bookId, file?.absolutePath, durationMs)
+
+    suspend fun updateMetadata(bookId: String, title: String, author: String?, coverPath: String?) =
+        bookDao.updateMetadata(bookId, title, author, coverPath)
+
+    suspend fun updateReadingPosition(bookId: String, locator: String?) =
+        bookDao.updateReadingPosition(bookId, locator, System.currentTimeMillis())
+
+    suspend fun syncChunkCount(bookId: String): Int = syncDao.chunkCount(bookId)
+
+    /**
+     * Delete the book locally, and its job on the server if it still has one.
+     *
+     * A server-side failure is swallowed: the user asked to remove a book, and
+     * refusing because an unreachable machine still holds a directory would be
+     * the wrong answer. The job is left for the next `DELETE` or a manual sweep.
+     */
+    suspend fun deleteBook(bookId: String, deleteServerJob: Boolean = true) {
+        val book = bookDao.get(bookId) ?: return
+        if (deleteServerJob && book.jobId != null && !book.jobMissing) {
+            runCatching { api.service().deleteJob(book.jobId) }
+        }
+        listOfNotNull(book.epubPath, book.coverPath, book.audiobookPath, book.syncPath)
+            .forEach { runCatching { File(it).delete() } }
+        // sync_chunks and sync_chapters cascade with the row.
+        bookDao.delete(bookId)
+    }
+
+    /**
+     * Ask the server to forget a finished job, once both files are local.
+     *
+     * The server has no cleanup policy of its own -- `server/README.md` says the
+     * app is expected to do this. A 404 means someone got there first, which is
+     * success, not an error.
+     */
+    suspend fun releaseServerJob(bookId: String) {
+        val book = bookDao.get(bookId) ?: return
+        val jobId = book.jobId ?: return
+        if (!book.isPlayable) return
+        try {
+            api.service().deleteJob(jobId)
+        } catch (e: ApiException) {
+            if (!e.isNotFound) throw e
+        }
+        bookDao.markJobMissing(bookId)
+    }
+}

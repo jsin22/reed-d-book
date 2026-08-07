@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+An AppCompat theme, not a bare Compose one: Readium's EpubNavigatorFragment is
+an AppCompat fragment and crashes under a non-AppCompat host. Compose colours
+come from ui/theme/Theme.kt; this only has to keep the window chrome out of the
+way.
+-->
+<resources>
+    <style name="Theme.Reedd" parent="Theme.AppCompat.DayNight.NoActionBar">
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowBackground">?android:attr/colorBackground</item>
+    </style>
+</resources>

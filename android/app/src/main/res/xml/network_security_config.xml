@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+The conversion server is a FastAPI process on the user's own machine, reached
+over the LAN (or Tailscale) as plain http. Since the host is typed in by the
+user at runtime, there is no domain list to enumerate here, so cleartext has to
+be permitted at the base config.
+
+This is a deliberate trade, not an oversight: the alternative is terminating TLS
+on a handheld with a self-signed certificate and shipping a custom trust anchor,
+which is strictly worse for a link that never leaves the user's own network.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

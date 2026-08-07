@@ -1,6 +1,7 @@
 # How the backend works
 
-Notes on the Phase 1 conversion server in [`server/`](server/README.md).
+Notes on the Phase 1 conversion server in [`server/`](server/README.md). The
+client half is at the end, under [How the app works](#how-the-app-works).
 
 ## The problem it solves
 
@@ -119,3 +120,76 @@ cd server
 ```
 
 Endpoints, configuration and known gaps are in [`server/README.md`](server/README.md).
+
+# How the app works
+
+Notes on the Phase 3 Android app in [`android/`](android/README.md).
+
+## It is the other half of the same decision
+
+The backend keeps job state in `job.json` on disk instead of Celery's result
+backend so that an id polled hours later still answers. The app is what that was
+for. Its half of the bargain is the same idea one level up: **the phone's
+database is the source of truth for the UI, and nothing the UI reads lives in
+memory.**
+
+Every screen observes Room. Four different things write to it — the upload, the
+foreground poll, the background poll, the download workers — and none of them
+tell the UI anything directly. Close the app mid-conversion, reopen it an hour
+later, and the library renders from rows that were updated by a worker while it
+was dead. There is no "restore my state" path because there was never any state
+to lose.
+
+## Watching a conversion, twice
+
+The same `ConversionWatcher.pollOnce` runs in three situations:
+
+| when | who calls it | how often |
+|---|---|---|
+| a screen is open | the ViewModel's loop | every 4 s |
+| the app is closed | `PollWorker` (WorkManager) | every 15 min |
+| the app just opened | `reconcile()` | once |
+
+Fifteen minutes is the floor Android allows for periodic work. That is useless
+for a progress bar somebody is watching and perfectly adequate for noticing that
+a book finished — hence both. Because they share one function and one set of
+rows, they cannot disagree; the fast one just makes the same writes more often.
+
+When nothing is pending, the periodic worker **cancels itself**. A library where
+every book is already converted should not wake the device four times an hour
+forever. Uploading something registers it again.
+
+## The three things that go wrong
+
+**The server forgot the job.** Its data directory was cleared while the app was
+closed, so a poll comes back 404. That is a state, not an error: the row is
+flagged, polling stops, and the book offers a re-upload. Without it the app would
+show "queued, please wait" for a job that will never run — the exact failure the
+backend's design notes set out to avoid, reintroduced on the client.
+
+**The download broke halfway.** An `.m4b` is hundreds of megabytes over wifi from
+a machine in the next room. Bytes go into a `.part` file, the next attempt sends
+`Range: bytes=<what we have>-`, and the file is only renamed once its size
+matches the manifest. A phone that walks out of range costs seconds, not a
+restart. The server already supported this — `FileResponse` honours `Range` — and
+it was checked against the live server rather than assumed: a resumed transfer
+stitched from two range requests is byte-identical to a single download.
+
+**The files vanished but the database says otherwise.** Someone cleared the app's
+storage. On launch, any book claiming to be downloaded is checked against the
+filesystem, and a row whose files are gone is demoted and re-queued rather than
+believed. Opening a reader onto a missing file is worse than downloading again.
+
+## Timestamps become milliseconds once
+
+The sync file stores float seconds because that is what falls out of dividing
+frame counts by 24000. A player reports integer milliseconds. So the conversion
+happens exactly once, when the file is parsed into `sync_chunks` at download
+time, into a column the database indexes — not on every playback tick in Phase 4.
+
+Rounding each boundary independently is what keeps audiblez' guarantee that one
+chunk ends exactly where the next begins, so the highlight in Phase 4 can never
+flicker through a one-millisecond gap between two sentences.
+
+Screens, versions, storage layout and known gaps are in
+[`android/README.md`](android/README.md).
