@@ -9,3 +9,8 @@ android/.kotlin/
 android/build/
 android/app/build/
 *.apk
+
+# Claude Code writes settings.local.json via a transient temp file; the settings
+# file itself is covered by the global gitignore, but these are not.
+.claude/*.tmp.*
+.claude/settings.local.json
