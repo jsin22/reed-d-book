@@ -8,8 +8,10 @@ package dev.reedd
  * failing test here rather than as a field that silently reads null on device.
  */
 object Fixtures {
-    fun read(name: String): String =
+    fun read(name: String): String = readBytes(name).decodeToString()
+
+    fun readBytes(name: String): ByteArray =
         requireNotNull(javaClass.classLoader?.getResourceAsStream("fixtures/$name")) {
             "missing fixture: fixtures/$name"
-        }.use { it.readBytes().decodeToString() }
+        }.use { it.readBytes() }
 }

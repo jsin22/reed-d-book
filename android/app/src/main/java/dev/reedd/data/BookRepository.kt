@@ -97,13 +97,25 @@ class BookRepository(
     suspend fun setSync(bookId: String, file: File?, durationMs: Long?) =
         bookDao.setSync(bookId, file?.absolutePath, durationMs)
 
+    suspend fun setAlignment(bookId: String, aligned: Int, total: Int) =
+        bookDao.updateAlignment(bookId, aligned, total)
+
+    suspend fun updatePlaybackPosition(bookId: String, positionMs: Long) =
+        bookDao.updatePlaybackPosition(bookId, positionMs)
+
+    suspend fun updateSyncOffset(bookId: String, offsetMs: Long) =
+        bookDao.updateSyncOffset(bookId, offsetMs)
+
+    /** The read-along mapping, in playback order. */
+    suspend fun syncChunks(bookId: String): List<dev.reedd.data.db.SyncChunkEntity> =
+        syncDao.chunks(bookId)
+
     suspend fun updateMetadata(bookId: String, title: String, author: String?, coverPath: String?) =
         bookDao.updateMetadata(bookId, title, author, coverPath)
 
     suspend fun updateReadingPosition(bookId: String, locator: String?) =
         bookDao.updateReadingPosition(bookId, locator, System.currentTimeMillis())
 
-    suspend fun syncChunkCount(bookId: String): Int = syncDao.chunkCount(bookId)
 
     /**
      * Delete the book locally, and its job on the server if it still has one.

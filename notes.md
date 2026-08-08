@@ -193,3 +193,97 @@ flicker through a one-millisecond gap between two sentences.
 
 Screens, versions, storage layout and known gaps are in
 [`android/README.md`](android/README.md).
+
+# How read-along works
+
+Notes on Phase 4, the part that makes the text follow the voice.
+
+## Two questions, two completely different answers
+
+Highlighting the sentence being spoken sounds like one feature. It is two, and they
+have almost nothing in common.
+
+**Which sentence is being spoken** is easy and happens constantly. The player is
+polled every 100 ms, and the position is binary-searched against the mapping held
+in memory. The only real decisions were to keep the mapping in memory rather than
+querying the database ten times a second, and to binary-search rather than walk
+forward from the last sentence — a scrub can move the position anywhere, in either
+direction, so "the next one along" is not good enough.
+
+**Where that sentence is on the page** is hard and happens once. It is the whole
+reason Phase 3 chose Readium.
+
+## The thing worth knowing about Readium
+
+Readium highlights by resolving a *locator* into a DOM range. Reading its
+JavaScript settles what a locator has to contain:
+
+```js
+if (text && text.highlight) {
+  scope = locations.cssSelector ? document.querySelector(...) : document.body
+  return new TextQuoteAnchor(scope, text.highlight, {prefix: text.before, suffix: text.after}).toRange()
+}
+```
+
+That is a text-quote anchor: hand it the sentence and some context either side and
+it finds the passage itself. No character offsets, no CSS selectors, no cooperation
+needed from the epub. So the entire alignment problem reduces to: *for each spoken
+sentence, what exact string is on the page, and what surrounds it?*
+
+## Why the text does not simply match
+
+`SYNC.md` documents three reasons audiblez' sentence text is not what the epub
+contains:
+
+- a `.` is appended to anything that does not end in one, so a heading's spoken
+  text has a period the page does not;
+- whitespace is whatever the author's XHTML indentation happened to be;
+- only `title/p/h1-h4/li` is extracted, so the page holds text — tables, captions,
+  blockquotes — that is never spoken.
+
+So matching happens on a normalised projection of both sides: whitespace collapsed,
+typographic quotes and dashes folded to ASCII, case folded. The projection keeps an
+index back to the original for every character, because **what gets stored is the
+epub's own substring, not audiblez'**. Storing the spoken version would hand
+Readium a string that is not on the page, and it would find nothing.
+
+Sentences are matched by advancing a cursor through the chapter rather than
+searching for each one. They are in reading order, so one pass suffices — and a
+per-sentence search would not only be quadratic on a novel, it would cheerfully
+match the wrong occurrence of "He nodded."
+
+None of this is required to succeed. Chunk 0 is audiblez' injected
+`"<title> – <author>."`, which is in no epub by construction. Any other sentence
+that cannot be found keeps its timings and just does not highlight; the audio plays
+regardless, and the match rate is recorded and shown, so a badly aligned book
+admits it instead of behaving strangely. On the sample book, 11 of 12 sentences
+align — the miss being exactly that injected line.
+
+## The two decisions that are about people, not code
+
+**Auto-advancing the page fights the reader.** If the page always follows the
+audio, anyone who scrolls back to re-read a paragraph gets yanked forward a second
+later. So dragging the page stops it following, with an obvious way back; and an
+*intentional* jump — tapping a sentence, scrubbing the bar — resumes following,
+because that is a request to be taken somewhere. Those rules are a small state
+machine with no Android in it, which is why they are the one part of the follow
+behaviour that is genuinely tested.
+
+**Skipping by sentence beats skipping by seconds.** Every audio player has "back
+15 seconds". With a sentence map, "play that line again" is exact, and tapping a
+line on the page starts the voice there. The tap works by covering the page's
+sentences with transparent-but-tappable decorations and letting Readium report
+which one was hit, so the tap resolves to an exact sentence rather than being
+guessed from coordinates.
+
+## What is not proven
+
+Phase 3 could be tested hard because its logic was text, HTTP and SQL. Phase 4 is
+mostly runtime: a WebView's JavaScript resolving anchors, a media session surviving
+a locked screen, a foreground service under Doze. The alignment is tested against
+the real book and the position lookup and follow rules are tested exhaustively, but
+whether the highlight actually lands in the right place on a screen is a question
+only a device can answer — and the emulator does not run on this machine.
+
+Details, including the exact list of unverified behaviour, are in
+[`android/README.md`](android/README.md).

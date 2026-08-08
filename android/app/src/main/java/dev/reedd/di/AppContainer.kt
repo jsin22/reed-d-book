@@ -11,6 +11,7 @@ import dev.reedd.data.readium.ReadiumComponents
 import dev.reedd.data.remote.ApiProvider
 import dev.reedd.data.settings.SettingsStore
 import dev.reedd.domain.ConversionWatcher
+import dev.reedd.domain.ReadAlongAligner
 import dev.reedd.notify.Notifications
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -29,7 +30,7 @@ import kotlinx.coroutines.SupervisorJob
  */
 class AppContainer(context: Context) {
 
-    private val appContext: Context = context.applicationContext
+    val appContext: Context = context.applicationContext
 
     /** Outlives every screen; used for work that must not die with a ViewModel. */
     val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -72,4 +73,6 @@ class AppContainer(context: Context) {
     val watcher: ConversionWatcher by lazy {
         ConversionWatcher(appContext, repository, api, notifications)
     }
+
+    val readAlongAligner: ReadAlongAligner by lazy { ReadAlongAligner(syncStore) }
 }

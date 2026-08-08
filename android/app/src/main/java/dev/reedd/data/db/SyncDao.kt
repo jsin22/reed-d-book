@@ -40,6 +40,50 @@ interface SyncDao {
     )
     suspend fun chunkAt(bookId: String, positionMs: Long): SyncChunkEntity?
 
+    /**
+     * Attach a located sentence to its chunk.
+     *
+     * One statement per chunk, called inside a transaction by the aligner: a book
+     * can have tens of thousands of chunks, and a transaction turns that from tens
+     * of thousands of disk syncs into one.
+     */
+    @Query(
+        """
+        UPDATE sync_chunks SET
+            resourceHref = :resourceHref,
+            textHighlight = :textHighlight,
+            textBefore = :textBefore,
+            textAfter = :textAfter,
+            progression = :progression
+        WHERE rowId = :rowId
+        """
+    )
+    suspend fun setLocator(
+        rowId: Long,
+        resourceHref: String?,
+        textHighlight: String?,
+        textBefore: String?,
+        textAfter: String?,
+        progression: Double?,
+    )
+
+    @Query("SELECT COUNT(*) FROM sync_chunks WHERE bookId = :bookId AND textHighlight IS NOT NULL")
+    suspend fun alignedCount(bookId: String): Int
+
+    @Transaction
+    suspend fun saveAlignment(chunks: List<SyncChunkEntity>) {
+        for (chunk in chunks) {
+            setLocator(
+                rowId = chunk.rowId,
+                resourceHref = chunk.resourceHref,
+                textHighlight = chunk.textHighlight,
+                textBefore = chunk.textBefore,
+                textAfter = chunk.textAfter,
+                progression = chunk.progression,
+            )
+        }
+    }
+
     @Query("DELETE FROM sync_chunks WHERE bookId = :bookId")
     suspend fun clearChunks(bookId: String)
 

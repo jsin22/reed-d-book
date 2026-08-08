@@ -48,7 +48,42 @@ data class SyncChunkEntity(
     val endMs: Long,
     /** 1-based chapter number, matching [SyncChapterEntity.chapterIndex]. */
     val chapter: Int,
-)
+
+    // -- where this sentence sits on the page (filled in by the aligner) ------
+    /**
+     * The epub resource this sentence is in, e.g. `chap_01.xhtml`. Becomes the
+     * `href` of the Readium `Locator` used to highlight it.
+     */
+    val resourceHref: String? = null,
+    /**
+     * The sentence **as it appears in the epub**, which is not always
+     * [text]: audiblez appends a `.` to anything that does not end in one, and
+     * normalises whitespace. Readium's JS resolves a locator by searching the
+     * rendered DOM for this string, so it has to be the text really on the page.
+     *
+     * Null when the aligner could not find the sentence; that chunk simply is not
+     * highlighted, and the audio still plays.
+     */
+    val textHighlight: String? = null,
+    /**
+     * Context either side, used as the text-quote anchor's prefix and suffix so a
+     * sentence that occurs more than once in a chapter resolves to the right
+     * occurrence rather than the first.
+     */
+    val textBefore: String? = null,
+    val textAfter: String? = null,
+    /**
+     * Roughly how far through the resource this sentence is, 0..1.
+     *
+     * Belt and braces for navigation: Readium resolves a locator from the text
+     * anchor, but `go()` can also work from a progression, so a sentence whose text
+     * anchor fails can still be scrolled to approximately rather than not at all.
+     */
+    val progression: Double? = null,
+) {
+    /** True when this sentence can be located on the page. */
+    val isAligned: Boolean get() = resourceHref != null && textHighlight != null
+}
 
 /**
  * Chapter boundaries from the same file, so the reader can flip pages on a

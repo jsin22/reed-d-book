@@ -8,7 +8,7 @@ import androidx.room.TypeConverters
 
 @Database(
     entities = [BookEntity::class, SyncChunkEntity::class, SyncChapterEntity::class],
-    version = 1,
+    version = 2,
     exportSchema = true,
 )
 @TypeConverters(Converters::class)
@@ -18,13 +18,15 @@ abstract class ReeddDatabase : RoomDatabase() {
 
     companion object {
         /**
-         * No migrations are registered yet, and no destructive fallback either:
-         * at version 1 there is nothing to migrate from, and silently wiping a
-         * user's library on a future schema bump is worse than a crash that says
-         * a migration is missing. `app/schemas/` is checked in so the next
-         * version has something to diff against.
+         * Migrations are declared explicitly and there is still no destructive
+         * fallback: wiping a library of converted audiobooks on a schema bump
+         * would be far worse than a crash naming the missing migration.
+         * `app/schemas/` is checked in so each version has something to diff
+         * against.
          */
         fun create(context: Context): ReeddDatabase =
-            Room.databaseBuilder(context, ReeddDatabase::class.java, "reedd.db").build()
+            Room.databaseBuilder(context, ReeddDatabase::class.java, "reedd.db")
+                .addMigrations(MIGRATION_1_2)
+                .build()
     }
 }

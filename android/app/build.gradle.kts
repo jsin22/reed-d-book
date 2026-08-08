@@ -53,6 +53,15 @@ android {
         }
     }
 
+    sourceSets {
+        // Puts the exported Room schemas on the unit-test classpath, so the
+        // migration test builds its "old" database from the real version 1 schema
+        // rather than a hand-copied one that could drift from it.
+        getByName("test") {
+            resources.srcDir("schemas")
+        }
+    }
+
     packaging {
         resources.excludes += setOf(
             "/META-INF/{AL2.0,LGPL2.1}",
@@ -112,6 +121,12 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
 
     implementation(libs.coil.compose)
+    // Reads epub resource text for the read-along aligner.
+    implementation(libs.jsoup)
+
+    implementation(libs.media3.exoplayer)
+    implementation(libs.media3.session)
+    implementation(libs.media3.common)
 
     implementation(libs.readium.shared)
     implementation(libs.readium.streamer)

@@ -58,7 +58,6 @@ fun BookDetailScreen(
     val book by viewModel.book.collectAsStateWithLifecycle()
     val log by viewModel.log.collectAsStateWithLifecycle()
     val loadingLog by viewModel.loadingLog.collectAsStateWithLifecycle()
-    val chunkCount by viewModel.chunkCount.collectAsStateWithLifecycle()
 
     Scaffold(
         topBar = {
@@ -88,7 +87,7 @@ fun BookDetailScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            StatusCard(current, chunkCount)
+            StatusCard(current)
 
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (current.isPlayable) {
@@ -141,7 +140,7 @@ fun BookDetailScreen(
 }
 
 @Composable
-private fun StatusCard(book: BookEntity, chunkCount: Int) {
+private fun StatusCard(book: BookEntity) {
     Card {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(statusHeadline(book), style = MaterialTheme.typography.titleMedium)
@@ -188,10 +187,24 @@ private fun StatusCard(book: BookEntity, chunkCount: Int) {
                     )
                 }
 
-                BookStage.READY -> Text(
-                    "$chunkCount sentences mapped to the audio.",
-                    style = MaterialTheme.typography.bodySmall,
-                )
+                BookStage.READY -> Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(
+                        "${book.totalChunks} sentences mapped to the audio.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    // Surfaced rather than hidden: a book that highlights badly
+                    // should say so instead of just behaving oddly.
+                    if (book.totalChunks > 0) {
+                        val percent = book.alignedChunks * 100 / book.totalChunks
+                        Text(
+                            "$percent% of them could be matched to a place on the page" +
+                                if (percent < 90) " — the rest will play without highlighting." else ".",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (percent < 90) MaterialTheme.colorScheme.error
+                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
 
                 else -> Unit
             }

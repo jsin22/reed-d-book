@@ -12,6 +12,7 @@ import dev.reedd.ui.detail.BookDetailScreen
 import dev.reedd.ui.detail.BookDetailViewModel
 import dev.reedd.ui.library.LibraryScreen
 import dev.reedd.ui.library.LibraryViewModel
+import dev.reedd.ui.reader.ReadAlongViewModel
 import dev.reedd.ui.reader.ReaderScreen
 import dev.reedd.ui.reader.ReaderViewModel
 import dev.reedd.ui.settings.SettingsScreen
@@ -81,7 +82,15 @@ fun ReeddNavHost(navController: NavHostController = rememberNavController()) {
             val bookId = entry.toRoute<ReaderRoute>().bookId
             val viewModel: ReaderViewModel =
                 viewModel(factory = ReaderViewModel.factory(container, bookId))
-            ReaderScreen(viewModel = viewModel, onBack = { navController.popBackStack() })
+            // Separate ViewModel: one owns the open publication, the other the
+            // audio. They have different lifetimes and different reasons to change.
+            val readAlongViewModel: ReadAlongViewModel =
+                viewModel(factory = ReadAlongViewModel.factory(container, bookId))
+            ReaderScreen(
+                viewModel = viewModel,
+                readAlongViewModel = readAlongViewModel,
+                onBack = { navController.popBackStack() },
+            )
         }
 
         composable<SettingsRoute> {

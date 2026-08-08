@@ -72,9 +72,6 @@ interface BookDao {
     )
     suspend fun awaitingDownload(): List<BookEntity>
 
-    @Query("SELECT COUNT(*) FROM books WHERE jobId IS NOT NULL AND jobMissing = 0 AND (jobStatus IS NULL OR jobStatus NOT IN ('DONE', 'ERROR'))")
-    fun observeAwaitingConversionCount(): Flow<Int>
-
     /** Called once the upload has returned a job id. Clears any previous attempt. */
     @Query(
         """
@@ -184,6 +181,19 @@ interface BookDao {
 
     @Query("UPDATE books SET readingLocator = :locator, lastOpenedAt = :openedAt WHERE id = :id")
     suspend fun updateReadingPosition(id: String, locator: String?, openedAt: Long)
+
+    /**
+     * Written while audio plays, so it is deliberately the narrowest statement
+     * here: it fires every few seconds and must not touch anything else.
+     */
+    @Query("UPDATE books SET playbackPositionMs = :positionMs WHERE id = :id")
+    suspend fun updatePlaybackPosition(id: String, positionMs: Long)
+
+    @Query("UPDATE books SET syncOffsetMs = :offsetMs WHERE id = :id")
+    suspend fun updateSyncOffset(id: String, offsetMs: Long)
+
+    @Query("UPDATE books SET alignedChunks = :aligned, totalChunks = :total WHERE id = :id")
+    suspend fun updateAlignment(id: String, aligned: Int, total: Int)
 
     @Query("UPDATE books SET title = :title, author = :author, coverPath = :coverPath WHERE id = :id")
     suspend fun updateMetadata(id: String, title: String, author: String?, coverPath: String?)

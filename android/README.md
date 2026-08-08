@@ -1,13 +1,9 @@
-# Android app (project_plan Phase 3)
+# Android app (project_plan Phases 3 and 4)
 
 The reader. Imports an `.epub`, sends it to the [conversion server](../server/README.md)
 over wifi, waits out a conversion that takes minutes to hours, downloads the
-`.m4b` and the timing `.json`, and displays the book.
-
-Phase 3 is the plumbing and the UI. Playback and text highlighting are Phase 4;
-the pieces they need are already in place (the timings are parsed into the
-database at download time, and the reader is rendered by a navigator that
-supports highlight decorations).
+`.m4b` and the timing `.json`, plays the audiobook, and highlights each sentence
+as it is spoken.
 
 ```
 pick .epub ──▶ copy to app storage ──▶ POST /api/jobs ──▶ job_id in Room
@@ -105,6 +101,86 @@ alternative — terminating TLS on a handheld with a self-signed certificate and
 shipping a custom trust anchor — is strictly worse for a link that never leaves
 the user's own network.
 
+## How read-along works (Phase 4)
+
+Highlighting a sentence needs an answer to two questions: *which* sentence is
+being spoken, and *where on the page* it is. They are solved in completely
+different places.
+
+**Which sentence: a binary search over an in-memory index.** The player is polled
+every 100 ms while playing (400 ms while paused, since a paused player still moves
+when scrubbed). Each tick reads an in-memory field and binary-searches a
+[`ChunkIndex`](app/src/main/java/dev/reedd/domain/ChunkIndex.kt) loaded once when
+the book opens — a novel's mapping is a few megabytes, and a database query ten
+times a second would be indefensible. A binary search rather than walking forward
+from the last sentence, because a scrub can move the position anywhere in either
+direction. A position exactly on a boundary belongs to the sentence that *starts*
+there, since the sync file guarantees `chunks[n].end == chunks[n+1].start`.
+
+**Where on the page: a text-quote anchor, computed once.** This is the part with
+no obvious answer, so it is worth stating what Readium actually does. Its
+JavaScript resolves a locator like this:
+
+```js
+if (text && text.highlight) {
+  scope = locations.cssSelector ? document.querySelector(...) : document.body
+  return new TextQuoteAnchor(scope, text.highlight, {prefix: text.before, suffix: text.after}).toRange()
+}
+```
+
+So a sentence plus its surrounding context resolves to a DOM range — no CSS
+selectors or character offsets needed. The
+[aligner](app/src/main/java/dev/reedd/data/align/ChunkAligner.kt) therefore runs
+once per book, at download time, and stores exactly that: an href, the sentence,
+and ~40 characters either side.
+
+Matching cannot be literal, because `SYNC.md` documents three ways audiblez'
+sentence text differs from the epub's: a `.` is appended to anything not ending in
+one, whitespace differs from however the author indented their XHTML, and only
+`title/p/h1-h4/li` is extracted so the page contains text the audio skips. So
+comparison happens on a normalised projection — whitespace collapsed, quotes and
+dashes folded, case folded — that keeps an index back to the original, and the
+**epub's own substring** is what gets stored. Storing audiblez' version would hand
+Readium a string that is not on the page.
+
+Sentences are matched with a **cursor advancing through the chapter**, not searched
+for individually: they are in reading order, so one linear pass is enough, and a
+per-sentence search would be quadratic on a novel and would happily match the
+wrong occurrence of "He nodded."
+
+**Nothing is required to align.** Chunk 0 is audiblez' injected
+`"<title> – <author>."` and appears in no epub, by design. Any other unmatched
+sentence keeps its timings and simply does not highlight — the audio still plays —
+and the match rate is recorded per book and shown on the detail screen, so a badly
+aligned book says so rather than just behaving oddly.
+
+**Playback is a service, not a screen.** [`PlaybackService`](app/src/main/java/dev/reedd/playback/PlaybackService.kt)
+is a Media3 `MediaSessionService` holding the one ExoPlayer, which is what makes
+background playback work and what supplies the lockscreen and notification
+controls and the headset buttons for free. Leaving the reader does not stop the
+audio; only the app's `MediaController` connection goes away.
+
+**Following is a state machine, because auto-advance fights the reader.** Dragging
+the page stops the audio dragging it back, with an explicit way to jump back to it;
+an intentional seek (tapping a sentence, scrubbing) resumes following, because that
+is a request to be taken there. The rules live in
+[`FollowController`](app/src/main/java/dev/reedd/domain/FollowController.kt) with no
+Android dependency, so they are actually tested.
+
+**Tapping a sentence plays it.** A second group of transparent but *activable*
+decorations covers the sentences in the resource on screen; Readium reports which
+one was activated, and the sentence index is encoded in its id. So the tap resolves
+to an exact sentence rather than being guessed from coordinates or reverse-matched
+from text.
+
+**The timing offset is adjustable and defaults to 0.** `SYNC.md` warns the `.m4b`
+carries ~40–90 ms of AAC priming the timestamps do not describe, and advises
+correcting in the player rather than the file. The reader has an "earlier/later"
+nudge in 25 ms steps. It is left at 0 because ExoPlayer honours ffmpeg's gapless
+metadata, so it may well be unnecessary — worth measuring before compensating. The
+offset shifts the *lookup* only; it is subtracted back out when seeking, or tapping
+a sentence would drift by it every time.
+
 ## Screens
 
 | | |
@@ -112,7 +188,7 @@ the user's own network.
 | **Library** | every book with a derived status badge: on device, uploading, queued, converting *n*% + ETA, downloading, ready, failed, lost |
 | **Import** | SAF picker, then voice (from `GET /api/voices`) and speed, validated against the server's own 0.5–2.0 range |
 | **Book detail** | progress, the server's error text, the audiblez log via `GET /api/jobs/{id}/log`, and cancel / resend / resume-download / delete |
-| **Reader** | Readium's `EpubNavigatorFragment` hosted in Compose; paginated or continuous scroll, text size, theme, table of contents, position saved to Room |
+| **Reader** | Readium's `EpubNavigatorFragment` hosted in Compose; paginated or continuous scroll, text size, theme, table of contents, position saved to Room. For a converted book: a transport bar with play/pause, previous/next **sentence**, speed, a follow-the-audio toggle and the highlight-timing nudge |
 | **Settings** | server address and token with a `Test connection` that hits `/api/health` (the one endpoint that never needs the token, so a bad address is distinguishable from a bad token), plus storage use |
 
 ## Storage
@@ -136,10 +212,25 @@ file's `audio_file` field refers to the `.m4b` by that name.
 ## Tests
 
 ```sh
-./gradlew testDebugUnitTest      # 100 tests, no device, no network, no server
+./gradlew testDebugUnitTest      # 146 tests, no device, no network, no server
 ```
 
 Robolectric and MockWebServer throughout. The interesting ones:
+
+- **`ChunkAlignerTest`** — run against the real `sample-short.epub` and the real
+  sync file audiblez produced for it. Asserts that every sentence except the
+  injected title line is located, that a heading whose chunk has an invented period
+  still matches, that a repeated sentence resolves to *successive* occurrences
+  rather than the first one twice, and — the property the whole approach rests on —
+  that every stored highlight is a literal substring of the page text.
+- **`ChunkIndexTest`** — boundaries, backwards seeks, before the first sentence,
+  past the last, and that the timing offset shifts the lookup but not a seek.
+- **`FollowControllerTest`** — that the same sentence never navigates twice, that
+  dragging disengages, and that resuming moves the page even to the sentence it
+  last targeted.
+- **`MigrationTest`** — builds a version 1 database from Room's *own* exported
+  `1.json` so the test cannot drift from the real old schema, then opens it with
+  Room, which validates the migration produced exactly version 2.
 
 - **`ResumableDownloaderTest`** — resume with a `Range` header; a server that
   *ignores* `Range` and answers 200 (restart, do not corrupt); a stale `.part`
@@ -168,8 +259,16 @@ shape fails a test here rather than silently reading null on device.
   `guest` and `off`, and with a pristine default AVD — so it is the host QEMU
   against this kernel, not the configuration. Everything here compiles, passes
   lint with no errors, and its logic is unit-tested, but the parts only a real
-  Android runtime can exercise are unverified: Readium rendering inside Compose,
-  the foreground-service notifications, and `WorkManager` under real Doze.
+  Android runtime can exercise are unverified. **This matters more for Phase 4 than
+  it did for Phase 3**, because read-along is mostly runtime behaviour:
+  - that Readium's JavaScript resolves these text-quote anchors to the ranges the
+    aligner intends (the alignment itself is tested; the *rendering* of it is not);
+  - that a transparent activable decoration is still tappable, which is what
+    tap-a-sentence-to-play depends on;
+  - whether `go()` per sentence is smooth or visibly jumpy, in either scroll or
+    paginated mode;
+  - whether the AAC priming offset is actually needed;
+  - background playback, the media session, and `WorkManager` under real Doze.
 - **The reader's fragment factory is installed on the activity's
   FragmentManager.** It works because `AndroidFragment` instantiates through that
   factory, but it is a shared mutable global; a second fragment-hosting screen
@@ -177,8 +276,11 @@ shape fails a test here rather than silently reading null on device.
 - **A worker killed mid-job still leaves the server's manifest at `running`
   forever** — a server-side gap noted in its own README. The app shows it as
   converting indefinitely; cancel and resend.
-- **No migrations.** Schema version 1 with no destructive fallback, so a future
-  bump will crash rather than silently wipe a library. `app/schemas/` is checked
-  in to diff against.
+- **Schema version 2, with a real migration and still no destructive fallback**, so
+  a future bump crashes naming the missing migration rather than silently wiping a
+  library of converted audiobooks. `app/schemas/` is checked in to diff against.
+- **The tap layer is applied per resource, not per page.** A chapter's worth of
+  decorations in one batch is fine; a very long single-resource book would be
+  wasteful. Narrowing it to the visible range needs on-device measurement first.
 - **Release builds are unminified.** R8 rules for Readium's reflective resource
   loading are their own piece of work and nothing here ships through Play.

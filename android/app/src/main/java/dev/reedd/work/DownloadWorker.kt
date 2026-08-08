@@ -99,7 +99,7 @@ class DownloadWorker(
 
             val audiobook = downloadAudiobook(book, jobId, progress)
             val sync = downloadSync(book, jobId)
-            parseSync(sync)
+            parseSync(book, sync)
 
             container.repository.updateDownload(
                 bookId,
@@ -177,10 +177,25 @@ class DownloadWorker(
         )
     }
 
-    private suspend fun parseSync(file: File) {
+    /**
+     * Store the timings, and work out where each sentence is on the page.
+     *
+     * Alignment happens before the insert so the locators arrive in the same write
+     * as the timings: a book is never briefly visible as ready-but-unhighlightable.
+     * A book whose text cannot be matched still gets stored — playback works, only
+     * the highlighting is missing — and the counts are recorded so the detail
+     * screen can say so.
+     */
+    private suspend fun parseSync(book: BookEntity, file: File) {
         val parsed = SyncFileParser.parse(file, bookId)
-        container.syncStore.replace(bookId, parsed.chunks, parsed.chapters)
+        val alignment = container.readAlongAligner.alignForDownload(
+            epub = File(book.epubPath),
+            chunks = parsed.chunks,
+            chapters = parsed.chapters,
+        )
+        container.syncStore.replace(bookId, alignment.chunks, parsed.chapters)
         container.repository.setSync(bookId, file, parsed.durationMs)
+        container.repository.setAlignment(bookId, alignment.aligned, alignment.total)
     }
 
     private suspend fun retryOrFail(cause: Throwable): Result =

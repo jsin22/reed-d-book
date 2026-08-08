@@ -99,6 +99,27 @@ data class BookEntity(
     /** Total audio length from the sync file, in milliseconds. */
     val audioDurationMs: Long? = null,
     val lastOpenedAt: Long? = null,
+
+    // -- read-along playback -------------------------------------------------
+    /** Where the audiobook resumes, in milliseconds. */
+    @ColumnInfo(defaultValue = "0") val playbackPositionMs: Long = 0,
+    /**
+     * Added to the player's position before looking up a sentence.
+     *
+     * `audiblez/SYNC.md` notes the `.m4b` carries roughly 40-90 ms of AAC priming
+     * that the timestamps do not describe, so highlighting can run consistently
+     * early. Its own advice is to correct in the player rather than in the file.
+     * Default 0: ExoPlayer honours ffmpeg's gapless metadata, so this may be
+     * unnecessary, and it is worth measuring before compensating.
+     */
+    @ColumnInfo(defaultValue = "0") val syncOffsetMs: Long = 0,
+    /**
+     * How many chunks the aligner could locate on the page, and how many there
+     * are in total. Surfaced on the detail screen so a badly-aligned book is
+     * visible rather than just mysteriously not highlighting.
+     */
+    @ColumnInfo(defaultValue = "0") val alignedChunks: Int = 0,
+    @ColumnInfo(defaultValue = "0") val totalChunks: Int = 0,
 ) {
     /** Both deliverables are on disk, so the book can be read along with. */
     val isPlayable: Boolean
@@ -111,6 +132,15 @@ data class BookEntity(
     /** The job was lost server-side and the app has nothing to show for it. */
     val needsReupload: Boolean
         get() = jobMissing && !isPlayable
+
+    /**
+     * The book has audio and a mapping, but nothing has been aligned to the page.
+     *
+     * Playback still works; only the highlighting is missing. Drives the lazy
+     * re-run for books downloaded before the aligner existed.
+     */
+    val needsAlignment: Boolean
+        get() = isPlayable && totalChunks > 0 && alignedChunks == 0
 }
 
 enum class DownloadState { NONE, QUEUED, RUNNING, DONE, FAILED }

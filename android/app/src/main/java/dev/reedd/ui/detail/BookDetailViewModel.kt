@@ -30,14 +30,6 @@ class BookDetailViewModel(
     private val _loadingLog = MutableStateFlow(false)
     val loadingLog: StateFlow<Boolean> = _loadingLog.asStateFlow()
 
-    /** Number of sync chunks stored, i.e. how many sentences can be highlighted. */
-    private val _chunkCount = MutableStateFlow(0)
-    val chunkCount: StateFlow<Int> = _chunkCount.asStateFlow()
-
-    init {
-        viewModelScope.launch { _chunkCount.value = repository.syncChunkCount(bookId) }
-    }
-
     /**
      * Fetches `GET /api/jobs/{id}/log`: audiblez' own output, ffmpeg included.
      *

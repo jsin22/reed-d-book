@@ -37,10 +37,15 @@ okhttp = "5.4.0"
 serialization = "1.11.0"
 coroutines = "1.11.0"
 coil = "3.5.0"
+# Readium already pulls this in transitively, but a transitive dependency is only
+# on the runtime classpath. The aligner compiles against it, so it is declared --
+# pinned to the version Readium resolves, so there is one jsoup on the classpath.
+jsoup = "1.22.2"
 
-# The EPUB parser/renderer. Also transitively supplies media3-exoplayer and
-# media3-session, which is what Phase 4 will play the .m4b with.
+# The EPUB parser/renderer. Also brings media3 transitively, but Phase 4 compiles
+# against media3 directly, so it is declared below rather than relied on.
 readium = "3.3.0"
+media3 = "1.11.0"
 
 junit = "4.13.2"
 robolectric = "4.16.1"
@@ -91,6 +96,14 @@ kotlinx-coroutines-android = { module = "org.jetbrains.kotlinx:kotlinx-coroutine
 kotlinx-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version.ref = "coroutines" }
 
 coil-compose = { module = "io.coil-kt.coil3:coil-compose", version.ref = "coil" }
+
+jsoup = { module = "org.jsoup:jsoup", version.ref = "jsoup" }
+
+# Audiobook playback. media3-session is what provides the lockscreen and
+# notification controls, and the headset/Bluetooth buttons, for free.
+media3-exoplayer = { module = "androidx.media3:media3-exoplayer", version.ref = "media3" }
+media3-session = { module = "androidx.media3:media3-session", version.ref = "media3" }
+media3-common = { module = "androidx.media3:media3-common", version.ref = "media3" }
 
 readium-shared = { module = "org.readium.kotlin-toolkit:readium-shared", version.ref = "readium" }
 readium-streamer = { module = "org.readium.kotlin-toolkit:readium-streamer", version.ref = "readium" }
