@@ -17,9 +17,11 @@ Upload returns as soon as the file is on disk; the conversion happens in a
 Celery worker.  This process never imports torch or kokoro.
 """
 
+import logging
+from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, PlainTextResponse
 
 from .audiblez_meta import MAX_SPEED, MIN_SPEED, known_voices
@@ -157,6 +159,70 @@ def download_sync(job_id: str):
     """The text-to-timestamp mapping. Format documented in audiblez/SYNC.md."""
     path = _completed_file(job_id, 'sync')
     return FileResponse(path, media_type='application/json', filename=path.name)
+
+
+# -- app diagnostics --------------------------------------------------------
+#
+# The app cannot display its own stack trace once the process has died, and the
+# Android emulator does not run on the Pocket 4, so `adb logcat` is the only
+# other way to see one.  These two endpoints let the phone leave a crash report
+# here instead: it is written to disk *and* logged, so it shows up in the
+# uvicorn console as it arrives.
+
+crash_log = logging.getLogger('reedd.crash')
+
+MAX_CRASH_BYTES = 256 * 1024
+MAX_CRASH_FILES = 200
+
+
+@app.post('/api/diagnostics/crash', status_code=202, dependencies=[Depends(require_token)])
+async def report_crash(request: Request):
+    """Accept a crash report as plain text from the app.
+
+    Deliberately lenient: this is the endpoint of last resort for a client that
+    has just died, so it validates almost nothing and never fails in a way that
+    would lose the report.
+    """
+    body = await request.body()
+    if not body:
+        raise HTTPException(status_code=400, detail='empty crash report')
+    text = body[:MAX_CRASH_BYTES].decode('utf-8', errors='replace')
+
+    settings = get_settings()
+    settings.crashes_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%f')
+    path = settings.crashes_dir / f'crash-{stamp}.txt'
+    path.write_text(text, encoding='utf-8')
+
+    # One line per crash in the console, plus the trace, so it is visible in the
+    # terminal running uvicorn without going looking for the file.
+    first_line = next((ln for ln in text.splitlines() if ln.strip()), '(no detail)')
+    crash_log.error('app crash reported (%s): %s\n%s', path.name, first_line, text)
+
+    _prune_crashes(settings.crashes_dir)
+    return {'stored': path.name, 'bytes': len(text)}
+
+
+@app.get('/api/diagnostics/crashes', response_class=PlainTextResponse,
+         dependencies=[Depends(require_token)])
+def list_crashes(limit: int = 5):
+    """The most recent crash reports, newest first, as one plain-text blob."""
+    settings = get_settings()
+    if not settings.crashes_dir.is_dir():
+        return 'no crash reports'
+    files = sorted(settings.crashes_dir.glob('crash-*.txt'), reverse=True)[:max(1, min(limit, 50))]
+    if not files:
+        return 'no crash reports'
+    return '\n\n'.join(
+        f'===== {f.name} =====\n{f.read_text(encoding="utf-8", errors="replace")}' for f in files
+    )
+
+
+def _prune_crashes(directory: Path) -> None:
+    """Keep the newest MAX_CRASH_FILES; a crash loop must not fill the disk."""
+    files = sorted(directory.glob('crash-*.txt'), reverse=True)
+    for stale in files[MAX_CRASH_FILES:]:
+        stale.unlink(missing_ok=True)
 
 
 @app.get('/api/jobs/{job_id}/log', response_class=PlainTextResponse,

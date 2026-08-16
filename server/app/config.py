@@ -43,6 +43,16 @@ class Settings:
     def jobs_dir(self) -> Path:
         return self.data_dir / 'jobs'
 
+    @property
+    def crashes_dir(self) -> Path:
+        """Crash reports posted by the app.
+
+        The app cannot show its own stack trace after it has died, and the
+        emulator does not run on this machine, so the server is the most
+        convenient place for a phone to leave one.
+        """
+        return self.data_dir / 'crashes'
+
 
 def load_settings() -> Settings:
     """Build a Settings from the current environment (not cached)."""

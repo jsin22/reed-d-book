@@ -220,3 +220,72 @@ class AuthTest(ApiTestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class CrashReportTest(ApiTestCase):
+    """The endpoint of last resort: an app that has just died leaving a trace here.
+
+    The app cannot display its own stack trace after the process is gone, and the
+    Android emulator does not run on the machine this is developed on, so this is
+    how a phone hands one over.
+    """
+
+    TRACE = ('reed-d-book crash report\n'
+             'exception: java.lang.IllegalStateException: boom\n'
+             '\tat dev.reedd.ui.library.LibraryViewModel.importAndUpload(LibraryViewModel.kt:133)\n')
+
+    def test_report_is_stored_and_listed(self):
+        response = self.client.post('/api/diagnostics/crash', content=self.TRACE.encode())
+
+        self.assertEqual(202, response.status_code)
+        body = response.json()
+        self.assertTrue(body['stored'].startswith('crash-'))
+        self.assertEqual(len(self.TRACE), body['bytes'])
+
+        stored = list(self.settings.crashes_dir.glob('crash-*.txt'))
+        self.assertEqual(1, len(stored))
+        self.assertIn('IllegalStateException', stored[0].read_text())
+
+        listing = self.client.get('/api/diagnostics/crashes')
+        self.assertEqual(200, listing.status_code)
+        self.assertIn('LibraryViewModel.importAndUpload', listing.text)
+
+    def test_empty_report_is_rejected(self):
+        response = self.client.post('/api/diagnostics/crash', content=b'')
+        self.assertEqual(400, response.status_code)
+
+    def test_listing_is_empty_before_any_crash(self):
+        self.assertIn('no crash reports', self.client.get('/api/diagnostics/crashes').text)
+
+    def test_newest_report_comes_first(self):
+        self.client.post('/api/diagnostics/crash', content=b'the older one')
+        self.client.post('/api/diagnostics/crash', content=b'the newer one')
+
+        text = self.client.get('/api/diagnostics/crashes').text
+
+        self.assertLess(text.index('the newer one'), text.index('the older one'))
+
+    def test_a_crash_loop_cannot_fill_the_disk(self):
+        from app import main
+        with mock.patch.object(main, 'MAX_CRASH_FILES', 3):
+            for i in range(6):
+                self.client.post('/api/diagnostics/crash', content=f'crash {i}'.encode())
+
+        kept = sorted(self.settings.crashes_dir.glob('crash-*.txt'))
+        self.assertEqual(3, len(kept))
+        # The ones kept are the newest.
+        self.assertIn('crash 5', ''.join(f.read_text() for f in kept))
+
+    def test_a_giant_report_is_truncated_rather_than_refused(self):
+        from app import main
+        response = self.client.post('/api/diagnostics/crash', content=b'x' * (400 * 1024))
+
+        self.assertEqual(202, response.status_code)
+        # Truncated to the cap rather than rejected: a partial trace still names
+        # the exception, and refusing it would lose the report entirely.
+        self.assertEqual(main.MAX_CRASH_BYTES, response.json()['bytes'])
+
+    def test_non_utf8_bytes_do_not_break_it(self):
+        response = self.client.post('/api/diagnostics/crash', content=b'trace \xff\xfe ends')
+        self.assertEqual(202, response.status_code)
+        self.assertIn('trace', self.client.get('/api/diagnostics/crashes').text)
