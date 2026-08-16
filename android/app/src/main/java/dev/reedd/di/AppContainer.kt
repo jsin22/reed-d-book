@@ -4,6 +4,7 @@ import android.content.Context
 import dev.reedd.data.BookRepository
 import dev.reedd.data.db.ReeddDatabase
 import dev.reedd.data.db.SyncDao
+import dev.reedd.data.dictionary.Dictionary
 import dev.reedd.data.download.ResumableDownloader
 import dev.reedd.data.local.BookFiles
 import dev.reedd.data.local.EpubImporter
@@ -12,6 +13,8 @@ import dev.reedd.data.remote.ApiProvider
 import dev.reedd.data.settings.SettingsStore
 import dev.reedd.domain.ConversionWatcher
 import dev.reedd.domain.ReadAlongAligner
+import dev.reedd.diagnostics.CrashLog
+import dev.reedd.diagnostics.CrashReporter
 import dev.reedd.notify.Notifications
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -75,4 +78,18 @@ class AppContainer(context: Context) {
     }
 
     val readAlongAligner: ReadAlongAligner by lazy { ReadAlongAligner(syncStore) }
+
+    /** The bundled offline dictionary; opens its database on first lookup. */
+    val dictionary: Dictionary by lazy { Dictionary(appContext) }
+
+    /**
+     * Not lazy: it is started from [dev.reedd.ReeddApp.onCreate] so a crash report
+     * from the previous run reaches the server (and the UI) without waiting for
+     * something else to touch the graph.
+     */
+    val crashLog: CrashLog = CrashLog(
+        reports = { CrashReporter.pending(appContext) },
+        api = api,
+        clear = { CrashReporter.clear(appContext) },
+    )
 }

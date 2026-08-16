@@ -17,10 +17,13 @@ import dev.reedd.data.remote.ServerNotConfigured
 import dev.reedd.data.settings.ServerSettings
 import dev.reedd.data.settings.SettingsStore
 import dev.reedd.di.AppContainer
+import dev.reedd.diagnostics.CrashLog
 import dev.reedd.domain.ConversionWatcher
 import dev.reedd.work.DownloadWorker
 import dev.reedd.work.PollWorker
 import dev.reedd.work.UploadWorker
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -29,6 +32,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.IOException
 
 /** What the import sheet needs to offer, fetched from the server. */
@@ -48,6 +52,7 @@ class LibraryViewModel(
     private val watcher: ConversionWatcher,
     private val api: ApiProvider,
     private val settingsStore: SettingsStore,
+    private val crashLog: CrashLog,
 ) : ViewModel() {
 
     val books: StateFlow<List<BookEntity>> =
@@ -66,6 +71,11 @@ class LibraryViewModel(
     private val _importing = MutableStateFlow(false)
     val importing: StateFlow<Boolean> = _importing.asStateFlow()
 
+    /** Stack trace from a previous crash, shown once on the next launch. */
+    val crashReport: StateFlow<String?> = crashLog.lastReport
+
+    fun dismissCrashReport() = crashLog.dismiss()
+
     init {
         viewModelScope.launch {
             // Repair rows whose files vanished, then catch up on everything the
@@ -79,6 +89,14 @@ class LibraryViewModel(
     }
 
     /**
+     * Wakes the poll loop early.
+     *
+     * Conflated: several nudges in a row are one wake-up, and a nudge sent while the
+     * loop is busy is not lost.
+     */
+    private val wake = Channel<Unit>(Channel.CONFLATED)
+
+    /**
      * Polls while a screen is open.
      *
      * The same [ConversionWatcher.pollAll] the background worker calls, just far
@@ -86,12 +104,23 @@ class LibraryViewModel(
      * finished book but useless for a progress bar someone is watching. Both write
      * to the database and the UI only ever reads from there, so the two cannot
      * disagree.
+     *
+     * The wait is interruptible, which fixes a real bug: with a plain `delay`, adding
+     * a book just after the loop had found nothing to do meant waiting out the whole
+     * idle period before any progress appeared. Uploading now nudges the loop awake
+     * immediately.
      */
     private fun startLivePolling() = viewModelScope.launch {
         while (isActive) {
             val remaining = runCatching { watcher.pollAll() }.getOrDefault(0)
-            delay(if (remaining > 0) ACTIVE_POLL_MS else IDLE_POLL_MS)
+            val wait = if (remaining > 0) ACTIVE_POLL_MS else IDLE_POLL_MS
+            withTimeoutOrNull(wait) { wake.receive() }
         }
+    }
+
+    /** Poll now rather than at the end of the current wait. */
+    fun pollSoon() {
+        wake.trySend(Unit)
     }
 
     fun loadConversionOptions() {
@@ -126,67 +155,44 @@ class LibraryViewModel(
                 repository.insert(book.copy(voice = voice, speed = speed))
                 UploadWorker.enqueue(context, book.id)
                 PollWorker.enqueuePeriodic(context)
-            } catch (e: Exception) {
-                _message.value = e.message ?: "could not import that file"
+                // The job exists now; do not wait out the idle period before the
+                // card starts showing progress.
+                pollSoon()
+            } catch (e: CancellationException) {
+                // Never swallow cancellation: the coroutine machinery needs it.
+                throw e
+            } catch (e: Throwable) {
+                // Throwable, not Exception. Importing runs third-party code over a
+                // file chosen by the user -- Readium's parser, a bitmap decode, a
+                // WorkManager enqueue -- and an Error from any of it (OutOfMemory on
+                // a huge cover, NoClassDefFound) would otherwise kill the app
+                // instead of showing a message. Reported as a failed import.
+                _message.value = e.message?.takeIf { it.isNotBlank() }
+                    ?: "could not import that file (${e.javaClass.simpleName})"
             } finally {
                 _importing.value = false
             }
         }
     }
 
-    /** Send a book again: after an upload failure, or a job the server lost. */
-    fun retry(bookId: String) {
-        viewModelScope.launch {
-            repository.clearJob(bookId)
-            UploadWorker.enqueue(context, bookId)
-            PollWorker.enqueuePeriodic(context)
-        }
-    }
-
-    /** Fetch the finished files again, e.g. after a failed download. */
-    fun retryDownload(bookId: String) {
-        DownloadWorker.enqueue(context, bookId)
-    }
-
-    /** Stop the conversion and let the server reclaim its disk. */
-    fun cancel(bookId: String) {
-        viewModelScope.launch {
-            UploadWorker.cancel(context, bookId)
-            DownloadWorker.cancel(context, bookId)
-            val book = repository.get(bookId)
-            val jobId = book?.jobId
-            if (jobId != null && !book.jobMissing) {
-                try {
-                    api.service().deleteJob(jobId)
-                } catch (e: ApiException) {
-                    if (!e.isNotFound) _message.value = e.detail ?: e.message
-                } catch (e: IOException) {
-                    _message.value = describe(e)
-                }
-            }
-            repository.clearJob(bookId)
-        }
-    }
-
-    fun delete(bookId: String) {
-        viewModelScope.launch {
-            UploadWorker.cancel(context, bookId)
-            DownloadWorker.cancel(context, bookId)
-            repository.deleteBook(bookId)
-        }
-    }
-
-    fun refresh() {
-        viewModelScope.launch { runCatching { watcher.pollAll() } }
-    }
-
     fun consumeMessage() {
         _message.value = null
     }
 
+    /** Surface a problem raised by the UI layer, e.g. a picker that cannot open. */
+    fun reportProblem(message: String) {
+        _message.value = message
+    }
+
     companion object {
         private const val ACTIVE_POLL_MS = 4_000L
-        private const val IDLE_POLL_MS = 30_000L
+
+        /**
+         * Backstop for when nothing is converting. Short enough that a job started
+         * elsewhere (the background worker, another device) is noticed reasonably
+         * soon; the interruptible wait above is what makes the common case instant.
+         */
+        private const val IDLE_POLL_MS = 10_000L
 
         /** Human-readable text for a network failure, for a snackbar. */
         fun describe(e: Throwable): String = when (e) {
@@ -204,6 +210,7 @@ class LibraryViewModel(
                 container.watcher,
                 container.api,
                 container.settings,
+                container.crashLog,
             ) as T
         }
     }

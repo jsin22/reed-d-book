@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
@@ -37,6 +38,12 @@ import dev.reedd.playback.PlayerConnection
 /**
  * The transport controls in the reader.
  *
+ * Deliberately a fixed height. Notes that appear and disappear here — "not following
+ * the audio", how many sentences were matched — changed the bar's height and shifted
+ * the whole page under the reader on every tap, which was far more distracting than
+ * the information was useful. Follow state is shown by the crosshair's tint instead,
+ * and alignment quality lives on the book's detail screen.
+ *
  * Previous/next move by **sentence** rather than by a fixed number of seconds,
  * which is what the sync mapping makes possible and is far more useful in a book:
  * "play that line again" instead of "go back 15 seconds and hope".
@@ -63,7 +70,14 @@ fun ReadAlongBar(
     val position = if (scrubbing) scrubPosition.toLong() else state.player.positionMs
 
     Surface(
-        modifier = modifier.fillMaxWidth(),
+        modifier = modifier
+            .fillMaxWidth()
+            // The activity is edge-to-edge, and Material 3's Scaffold insets its
+            // *content* slot but places bottomBar flush against the bottom of the
+            // window -- a bottom bar is expected to inset itself, the way
+            // NavigationBar does. Without this the transport controls sit under the
+            // system navigation bar and are partly untappable (BUGS.md, BUG-1).
+            .navigationBarsPadding(),
         tonalElevation = 3.dp,
     ) {
         Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
@@ -139,20 +153,6 @@ fun ReadAlongBar(
                 }
             }
 
-            if (!state.following) {
-                Text(
-                    "Not following the audio. Tap the crosshair to jump back to it.",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            if (state.partiallyAligned) {
-                Text(
-                    "${state.alignedChunks} of ${state.totalChunks} sentences could be matched to the page; the rest will not highlight.",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
         }
     }
 }

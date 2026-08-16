@@ -9,6 +9,7 @@ import dev.reedd.data.readium.ReadiumComponents
 import dev.reedd.data.settings.ReaderSettings
 import dev.reedd.data.settings.SettingsStore
 import dev.reedd.di.AppContainer
+import dev.reedd.ui.theme.PaperPalette
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -23,12 +24,37 @@ import org.json.JSONObject
 import org.readium.r2.navigator.epub.EpubNavigatorFactory
 import org.readium.r2.navigator.epub.EpubNavigatorFragment
 import org.readium.r2.navigator.epub.EpubPreferences
+import org.readium.r2.navigator.preferences.Color as ReadiumColor
 import org.readium.r2.navigator.preferences.Theme
 import org.readium.r2.shared.publication.Link
 import org.readium.r2.shared.publication.Locator
 import org.readium.r2.shared.publication.Publication
+import org.readium.r2.shared.publication.services.positions
 import org.readium.r2.shared.util.AbsoluteUrl
 import java.io.File
+import kotlin.math.roundToInt
+
+/**
+ * Where you are in the book, for the page indicator.
+ *
+ * A reflowable epub has no real page numbers — the count depends on font size and
+ * screen — so these are Readium's *positions*: stable, evenly-sized slices of the
+ * publication, which is the closest honest equivalent and does not change when the
+ * text is resized. [percent] is the fallback for a publication whose positions
+ * cannot be computed.
+ */
+data class PageInfo(
+    val page: Int?,
+    val total: Int,
+    val percent: Int?,
+) {
+    val label: String
+        get() = when {
+            page != null && total > 0 -> "$page / $total"
+            percent != null -> "$percent%"
+            else -> ""
+        }
+}
 
 sealed interface ReaderState {
     data object Loading : ReaderState
@@ -71,6 +97,12 @@ class ReaderViewModel(
      */
     private var navigator: EpubNavigatorFragment? = null
 
+    private val _pageInfo = MutableStateFlow<PageInfo?>(null)
+    val pageInfo: StateFlow<PageInfo?> = _pageInfo.asStateFlow()
+
+    /** Total Readium positions, computed once per book; 0 until it is known. */
+    private var totalPositions = 0
+
     init {
         viewModelScope.launch { open() }
     }
@@ -95,6 +127,12 @@ class ReaderViewModel(
                     initialLocator = book.readingLocator?.toLocator(),
                     tableOfContents = publication.tableOfContents,
                 )
+                // Off the critical path: computing positions walks every resource,
+                // so the book opens first and the page count fills in after.
+                viewModelScope.launch {
+                    totalPositions = runCatching { publication.positions().size }.getOrDefault(0)
+                    _pageInfo.value = _pageInfo.value?.copy(total = totalPositions)
+                }
             },
             onFailure = { _state.value = ReaderState.Failed(it.message ?: "could not open this epub") },
         )
@@ -120,6 +158,17 @@ class ReaderViewModel(
                     repository.updateReadingPosition(bookId, locator.toJSON().toString())
                 }
         }
+        // Undebounced and separate: the page indicator should move as soon as the
+        // page turns, whereas the database write above deliberately waits.
+        viewModelScope.launch {
+            fragment.currentLocator.collect { locator ->
+                _pageInfo.value = PageInfo(
+                    page = locator.locations.position,
+                    total = totalPositions,
+                    percent = locator.locations.totalProgression?.let { (it * 100).roundToInt() },
+                )
+            }
+        }
     }
 
     fun onNavigatorGone() {
@@ -130,13 +179,34 @@ class ReaderViewModel(
         navigator?.go(link, animated = false)
     }
 
-    /** Builds the preferences the navigator should render with. */
-    fun preferences(settings: ReaderSettings, systemInDarkTheme: Boolean): EpubPreferences =
-        EpubPreferences(
+    /**
+     * Builds the preferences the navigator should render with.
+     *
+     * [ReaderSettings.PAPER] is not one of Readium's themes — it is the LIGHT theme
+     * with an explicit e-ink palette. Publisher styles are switched off for it
+     * because they are the one thing that can override the page colours: an epub
+     * that sets its own `body { background: #fff }` would otherwise punch a white
+     * hole through the grey.
+     */
+    fun preferences(settings: ReaderSettings, systemInDarkTheme: Boolean): EpubPreferences {
+        val paper = settings.theme == ReaderSettings.PAPER
+        return EpubPreferences(
             fontSize = settings.fontSize,
             scroll = settings.scroll,
-            theme = settings.theme?.toTheme() ?: if (systemInDarkTheme) Theme.DARK else Theme.LIGHT,
+            // Multiplies Readium's horizontal gutter. Unlike lineHeight or textAlign
+            // this one applies whether or not publisher styles are on.
+            pageMargins = settings.pageMargins,
+            theme = when {
+                paper -> Theme.LIGHT
+                settings.theme != null -> settings.theme.toTheme() ?: Theme.LIGHT
+                systemInDarkTheme -> Theme.DARK
+                else -> Theme.LIGHT
+            },
+            backgroundColor = if (paper) ReadiumColor(PaperPalette.pageArgb) else null,
+            textColor = if (paper) ReadiumColor(PaperPalette.inkArgb) else null,
+            publisherStyles = if (paper) false else null,
         )
+    }
 
     fun updateSettings(transform: (ReaderSettings) -> ReaderSettings) {
         viewModelScope.launch {

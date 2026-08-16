@@ -1,5 +1,6 @@
 package dev.reedd.domain
 
+import dev.reedd.data.align.TextNormalizer
 import dev.reedd.data.db.SyncChunkEntity
 
 /**
@@ -92,11 +93,120 @@ class ChunkIndex(
         return if (into > restartThresholdMs) current else (current - 1).takeIf { it >= 0 }
     }
 
+    /**
+     * The sentence a piece of selected text belongs to, for "read from here".
+     *
+     * Text rather than coordinates, because that is what a text selection gives:
+     * Readium reports the selected string and the resource it came from.
+     *
+     * Both directions are tried, because a selection is rarely exactly one sentence:
+     *
+     *  * a few words *inside* a sentence — the chunk contains the selection;
+     *  * a whole paragraph spanning several sentences — the selection contains the
+     *    chunk, and the earliest such sentence is the one to start from.
+     *
+     * Comparison is normalised (whitespace collapsed, quotes and dashes folded, case
+     * folded) because the selection comes back from a WebView and will not match the
+     * stored text byte for byte.
+     *
+     * @param resourceHref restricts the search to one resource when known, so the
+     *   same sentence appearing in two chapters cannot be confused.
+     * @return the index into [chunks], or null if nothing matched.
+     */
+    fun indexOfSelection(resourceHref: String?, selectedText: String): Int? {
+        val needle = TextNormalizer.normalizeToString(selectedText).trim()
+        if (needle.isEmpty()) return null
+
+        val name = resourceHref?.substringAfterLast('/')
+        val candidates = chunks.withIndex().filter { (_, chunk) ->
+            chunk.isAligned && (name == null || chunk.resourceHref?.substringAfterLast('/') == name)
+        }
+        if (candidates.isEmpty()) return null
+
+        // A sentence containing the selection: the common case, a few words tapped
+        // or dragged over inside one sentence.
+        candidates.firstOrNull { (_, chunk) ->
+            TextNormalizer.normalizeToString(chunk.textHighlight ?: chunk.text).trim().contains(needle)
+        }?.let { return it.index }
+
+        // Otherwise the selection spans sentences; start at the first one inside it.
+        candidates.firstOrNull { (_, chunk) ->
+            val text = TextNormalizer.normalizeToString(chunk.textHighlight ?: chunk.text).trim()
+            text.isNotEmpty() && needle.contains(text)
+        }?.let { return it.index }
+
+        // Last resort: the longest leading fragment of the selection that any
+        // sentence contains. Catches a selection that starts mid-sentence and runs
+        // into the next one.
+        for (length in needle.length downTo MIN_PARTIAL_MATCH) {
+            val prefix = needle.substring(0, length)
+            candidates.firstOrNull { (_, chunk) ->
+                TextNormalizer.normalizeToString(chunk.textHighlight ?: chunk.text).contains(prefix)
+            }?.let { return it.index }
+        }
+        return null
+    }
+
+    /**
+     * The sentence at a character offset inside a block of page text — a single tap.
+     *
+     * More precise than [indexOfSelection], and preferred when the tap position is
+     * known: it finds where each sentence *sits* in the block and picks the one whose
+     * span actually covers the tap, so tapping the second of two identical sentences
+     * in a paragraph selects the second one.
+     *
+     * @param blockText the text content of the tapped block element.
+     * @param offset the tap's character offset within [blockText].
+     */
+    fun indexOfTap(resourceHref: String?, blockText: String, offset: Int): Int? {
+        if (blockText.isEmpty()) return null
+        val name = resourceHref?.substringAfterLast('/')
+        val candidates = chunks.withIndex().filter { (_, chunk) ->
+            chunk.isAligned && (name == null || chunk.resourceHref?.substringAfterLast('/') == name)
+        }
+
+        // Walk sentences and block text together, advancing a cursor -- the same
+        // approach the aligner uses, and for the same reason. Matching each sentence
+        // independently cannot tell two *identical* sentences apart ("He nodded."
+        // twice in one paragraph); only their order can, so the nth occurrence is
+        // assigned to the nth sentence.
+        var cursor = 0
+        for ((index, chunk) in candidates) {
+            val highlight = chunk.textHighlight?.takeIf { it.isNotEmpty() } ?: continue
+            // Not in this block at all: a sentence from another paragraph. Skipped
+            // without moving the cursor.
+            val at = blockText.indexOf(highlight, cursor).takeIf { it >= 0 } ?: continue
+            val end = at + highlight.length
+            if (offset in at..end) return index
+            cursor = end
+        }
+
+        // The block's text did not match verbatim -- different whitespace from the
+        // WebView, most likely. Fall back to a window around the tap, kept
+        // deliberately tight so it stays positional: a wide window would just find
+        // the first sentence in the paragraph rather than the one tapped.
+        val from = (offset - WINDOW / 2).coerceIn(0, blockText.length)
+        val to = (offset + WINDOW / 2).coerceIn(from, blockText.length)
+        return indexOfSelection(resourceHref, blockText.substring(from, to))
+    }
+
     /** A copy with a different timing offset; the mapping itself is unchanged. */
     fun withOffset(offsetMs: Long): ChunkIndex =
         if (offsetMs == this.offsetMs) this else ChunkIndex(chunks, offsetMs)
 
     companion object {
         val EMPTY = ChunkIndex(emptyList())
+
+        /**
+         * Below this many characters a partial match is more likely to be a
+         * coincidence than the sentence the reader meant.
+         */
+        private const val MIN_PARTIAL_MATCH = 8
+
+        /**
+         * Characters taken around a tap when exact matching fails: ±40. Tight on
+         * purpose — widen it and the fallback stops being about *where* the tap was.
+         */
+        private const val WINDOW = 80
     }
 }

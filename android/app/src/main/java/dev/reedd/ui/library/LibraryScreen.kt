@@ -109,7 +109,14 @@ fun LibraryScreen(
         snackbarHost = { SnackbarHost(snackbar) },
         floatingActionButton = {
             ExtendedFloatingActionButton(
-                onClick = { picker.launch(arrayOf("application/epub+zip", "application/octet-stream")) },
+                onClick = {
+                    // Guarded: launch() throws ActivityNotFoundException if nothing
+                    // on the device handles OpenDocument for these types, and an
+                    // uncaught throw from a click handler takes the app down.
+                    runCatching {
+                        picker.launch(arrayOf("application/epub+zip", "application/octet-stream"))
+                    }.onFailure { viewModel.reportProblem("no file picker available on this device") }
+                },
                 icon = {
                     if (importing) CircularProgressIndicator(Modifier.size(18.dp))
                     else Icon(Icons.Filled.Add, contentDescription = null)
@@ -135,6 +142,13 @@ fun LibraryScreen(
                 }
             }
         }
+    }
+
+    // A crash from the previous run, readable without adb. Also posted to the
+    // server by CrashLog, but this works with no server at all.
+    val crashReport by viewModel.crashReport.collectAsStateWithLifecycle()
+    crashReport?.let { report ->
+        CrashReportDialog(report = report, onDismiss = viewModel::dismissCrashReport)
     }
 
     if (showImport) {

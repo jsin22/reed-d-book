@@ -3,6 +3,7 @@ package dev.reedd.data.remote
 import okhttp3.MultipartBody
 import okhttp3.RequestBody
 import okhttp3.ResponseBody
+import retrofit2.http.Body
 import retrofit2.http.DELETE
 import retrofit2.http.GET
 import retrofit2.http.Multipart
@@ -55,4 +56,14 @@ interface ReeddService {
     /** audiblez' output for this job, ffmpeg included. `text/plain`, so not a DTO. */
     @GET("api/jobs/{jobId}/log")
     suspend fun log(@Path("jobId") jobId: String): ResponseBody
+
+    /**
+     * Post a crash report from the previous run as plain text.
+     *
+     * The server writes it to `data/crashes/` and logs it, which is the most
+     * convenient way to read an Android stack trace when the emulator does not run
+     * and the phone is not tethered.
+     */
+    @POST("api/diagnostics/crash")
+    suspend fun reportCrash(@Body report: RequestBody): ResponseBody
 }

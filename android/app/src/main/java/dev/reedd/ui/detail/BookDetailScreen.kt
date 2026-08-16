@@ -50,10 +50,7 @@ fun BookDetailScreen(
     viewModel: BookDetailViewModel,
     onBack: () -> Unit,
     onRead: (String) -> Unit,
-    onRetryUpload: (String) -> Unit,
-    onRetryDownload: (String) -> Unit,
-    onCancel: (String) -> Unit,
-    onDelete: (String) -> Unit,
+    onDeleted: () -> Unit,
 ) {
     val book by viewModel.book.collectAsStateWithLifecycle()
     val log by viewModel.log.collectAsStateWithLifecycle()
@@ -95,18 +92,23 @@ fun BookDetailScreen(
                 }
                 when (current.stage()) {
                     BookStage.LOCAL, BookStage.FAILED, BookStage.LOST ->
-                        Button(onClick = { onRetryUpload(current.id) }) {
+                        Button(onClick = viewModel::retryUpload) {
                             Text(if (current.jobId == null) "Send to server" else "Send again")
                         }
                     BookStage.QUEUED, BookStage.CONVERTING, BookStage.UPLOADING ->
-                        OutlinedButton(onClick = { onCancel(current.id) }) { Text("Cancel") }
+                        OutlinedButton(onClick = viewModel::cancel) { Text("Cancel") }
                     BookStage.DOWNLOADING ->
                         if (current.downloadState == DownloadState.FAILED) {
-                            Button(onClick = { onRetryDownload(current.id) }) { Text("Resume download") }
+                            Button(onClick = viewModel::retryDownload) { Text("Resume download") }
                         }
                     BookStage.READY -> Unit
                 }
-                TextButton(onClick = { onDelete(current.id) }) { Text("Delete") }
+                TextButton(
+                    onClick = {
+                        viewModel.delete()
+                        onDeleted()
+                    }
+                ) { Text("Delete") }
             }
 
             Details(current)

@@ -34,6 +34,17 @@ data class ServerSettings(
     companion object {
         const val MIN_SPEED = 0.5
         const val MAX_SPEED = 2.0
+
+        /**
+         * Where the app looks for the server when nothing has been configured.
+         *
+         * The Tailscale address of the development machine, deliberately: unlike a
+         * LAN address it does not change when DHCP feels like it, and it works from
+         * outside the house. It is only a *default* — Settings still overrides it,
+         * and clearing the field falls back here rather than to nothing, so a
+         * reinstall does not mean retyping an address.
+         */
+        const val DEFAULT_BASE_URL = "100.124.110.63:8000"
     }
 }
 
@@ -49,10 +60,34 @@ data class ReaderSettings(
     val fontSize: Double = 1.0,
     val theme: String? = null,
     val scroll: Boolean = false,
+    /**
+     * Multiplier on Readium's horizontal page padding, where 1.0 is its default.
+     *
+     * Horizontal only: Readium's reflowable stylesheet is
+     * `padding: 0 calc(--RS__pageGutter * --USER__pageMargins)`, so vertical
+     * padding is already zero and the space above and below the text is this app's
+     * own toolbars — reclaimed by hiding them instead (see the reader's immersive
+     * tap). Defaults tighter than Readium's, which is generous for a phone.
+     */
+    val pageMargins: Double = DEFAULT_PAGE_MARGINS,
 ) {
     companion object {
         const val MIN_FONT_SIZE = 0.5
         const val MAX_FONT_SIZE = 2.5
+
+        /** 0.5 halves the gutter: roughly 10px a side instead of 20. */
+        const val DEFAULT_PAGE_MARGINS = 0.5
+        const val MIN_PAGE_MARGINS = 0.2
+        const val MAX_PAGE_MARGINS = 2.0
+
+        /**
+         * An e-ink look: a warm grey page with near-black text.
+         *
+         * Not one of Readium's own themes (`LIGHT`, `DARK`, `SEPIA`) but a name of
+         * our own, turned into an explicit background and text colour in
+         * [dev.reedd.ui.reader.ReaderViewModel.preferences].
+         */
+        const val PAPER = "PAPER"
     }
 }
 
@@ -64,7 +99,9 @@ class SettingsStore(context: Context, scope: CoroutineScope) {
 
     val settings: Flow<ServerSettings> = dataStore.data.map { prefs ->
         ServerSettings(
-            baseUrl = prefs[KEY_BASE_URL],
+            // Falls back to the built-in default, so a fresh install can reach the
+            // server without visiting Settings first.
+            baseUrl = prefs[KEY_BASE_URL]?.takeIf { it.isNotBlank() } ?: ServerSettings.DEFAULT_BASE_URL,
             token = prefs[KEY_TOKEN],
             voice = prefs[KEY_VOICE],
             speed = prefs[KEY_SPEED] ?: 1.0,
@@ -112,6 +149,7 @@ class SettingsStore(context: Context, scope: CoroutineScope) {
             fontSize = prefs[KEY_READER_FONT_SIZE] ?: 1.0,
             theme = prefs[KEY_READER_THEME],
             scroll = prefs[KEY_READER_SCROLL] ?: false,
+            pageMargins = prefs[KEY_READER_MARGINS] ?: ReaderSettings.DEFAULT_PAGE_MARGINS,
         )
     }
 
@@ -121,6 +159,8 @@ class SettingsStore(context: Context, scope: CoroutineScope) {
                 settings.fontSize.coerceIn(ReaderSettings.MIN_FONT_SIZE, ReaderSettings.MAX_FONT_SIZE)
             if (settings.theme == null) prefs.remove(KEY_READER_THEME) else prefs[KEY_READER_THEME] = settings.theme
             prefs[KEY_READER_SCROLL] = settings.scroll
+            prefs[KEY_READER_MARGINS] =
+                settings.pageMargins.coerceIn(ReaderSettings.MIN_PAGE_MARGINS, ReaderSettings.MAX_PAGE_MARGINS)
         }
     }
 
@@ -133,5 +173,6 @@ class SettingsStore(context: Context, scope: CoroutineScope) {
         val KEY_READER_FONT_SIZE = doublePreferencesKey("reader_font_size")
         val KEY_READER_THEME = stringPreferencesKey("reader_theme")
         val KEY_READER_SCROLL = booleanPreferencesKey("reader_scroll")
+        val KEY_READER_MARGINS = doublePreferencesKey("reader_page_margins")
     }
 }

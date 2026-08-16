@@ -2,7 +2,7 @@ package dev.reedd.data.remote
 
 import kotlinx.serialization.json.Json
 import okhttp3.HttpUrl
-import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
@@ -64,12 +64,21 @@ class ApiProvider(
     fun service(): ReeddService {
         val normalized = ServerAddress.normalize(baseUrl()) ?: throw ServerNotConfigured()
         cache?.let { (url, service) -> if (url == normalized) return service }
-        val service = Retrofit.Builder()
-            .baseUrl(normalized)
-            .client(okHttp)
-            .addConverterFactory(json.asConverterFactory("application/json".toMediaType()))
-            .build()
-            .create(ReeddService::class.java)
+        val service = try {
+            Retrofit.Builder()
+                .baseUrl(normalized)
+                .client(okHttp)
+                .addConverterFactory(json.asConverterFactory("application/json".toMediaType()))
+                .build()
+                .create(ReeddService::class.java)
+        } catch (e: IllegalArgumentException) {
+            // Retrofit is stricter about base URLs than HttpUrl is, and it signals
+            // that with IllegalArgumentException -- which is not an IOException, so
+            // every caller's `catch (IOException)` would miss it and the app would
+            // die on a typo in Settings. Reported as "not configured", because from
+            // the user's point of view that is exactly what it is.
+            throw ServerNotConfigured()
+        }
         cache = normalized to service
         return service
     }
@@ -77,7 +86,7 @@ class ApiProvider(
     /** Absolute URL for a path such as `api/jobs/<id>/audiobook`, for the downloader. */
     fun url(path: String): HttpUrl {
         val normalized = ServerAddress.normalize(baseUrl()) ?: throw ServerNotConfigured()
-        return (normalized + path.removePrefix("/")).toHttpUrl()
+        return (normalized + path.removePrefix("/")).toHttpUrlOrNull() ?: throw ServerNotConfigured()
     }
 
     fun currentToken(): String? = token()?.takeIf { it.isNotBlank() }

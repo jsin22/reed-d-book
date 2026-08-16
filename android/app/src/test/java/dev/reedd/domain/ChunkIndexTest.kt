@@ -129,6 +129,148 @@ class ChunkIndexTest {
         assertEquals(4, index.size)
     }
 
+    // -- "read from here", resolving a text selection to a sentence ------------
+
+    private fun aligned(ordinal: Int, text: String, href: String = "EPUB/c1.xhtml") =
+        SyncChunkEntity(
+            bookId = "b1", ordinal = ordinal, text = text,
+            startMs = ordinal * 1000L, endMs = (ordinal + 1) * 1000L, chapter = 1,
+            resourceHref = href, textHighlight = text, progression = 0.1 * ordinal,
+        )
+
+    private val selectable = ChunkIndex(
+        listOf(
+            aligned(0, "The quick brown fox jumps over the lazy dog."),
+            aligned(1, "Digital file formats are the foundation of modern computing."),
+            aligned(2, "He nodded."),
+            aligned(3, "Every document is stored in a specific format.", href = "EPUB/c2.xhtml"),
+        )
+    )
+
+    @Test
+    fun `a few words inside a sentence resolve to that sentence`() {
+        assertEquals(1, selectable.indexOfSelection("EPUB/c1.xhtml", "foundation of modern"))
+        assertEquals(0, selectable.indexOfSelection("EPUB/c1.xhtml", "lazy dog"))
+    }
+
+    @Test
+    fun `a selection spanning sentences starts at the first one`() {
+        val selection = "He nodded. Something after it that is not mapped."
+        assertEquals(2, selectable.indexOfSelection("EPUB/c1.xhtml", selection))
+    }
+
+    @Test
+    fun `whitespace and punctuation differences from the WebView are tolerated`() {
+        // A selection comes back from a WebView with its own spacing, and may carry
+        // typographic punctuation where the stored text has ASCII or vice versa.
+        assertEquals(1, selectable.indexOfSelection("EPUB/c1.xhtml", "  FOUNDATION   of\nmodern  "))
+    }
+
+    @Test
+    fun `the resource scopes the search, so the same words in another chapter are not picked`() {
+        // "format" appears in both chapters; the href decides which.
+        assertEquals(3, selectable.indexOfSelection("EPUB/c2.xhtml", "stored in a specific format"))
+        assertNull(selectable.indexOfSelection("EPUB/c1.xhtml", "stored in a specific format"))
+    }
+
+    @Test
+    fun `a full path or a bare filename both match`() {
+        assertEquals(0, selectable.indexOfSelection("c1.xhtml", "lazy dog"))
+        assertEquals(0, selectable.indexOfSelection("/EPUB/c1.xhtml", "lazy dog"))
+    }
+
+    @Test
+    fun `an unmatched selection is null rather than a wrong guess`() {
+        assertNull(selectable.indexOfSelection("EPUB/c1.xhtml", "this text is nowhere in the book"))
+        assertNull(selectable.indexOfSelection("EPUB/c1.xhtml", "   "))
+        assertNull(selectable.indexOfSelection(null, ""))
+    }
+
+    @Test
+    fun `unaligned sentences are never selection targets`() {
+        // They have no place on the page, so "read from here" cannot mean them.
+        val unaligned = ChunkIndex(
+            listOf(
+                SyncChunkEntity(
+                    bookId = "b1", ordinal = 0, text = "Spoken but never located.",
+                    startMs = 0, endMs = 1_000, chapter = 1,
+                    // No resourceHref/textHighlight: the aligner could not place it.
+                )
+            )
+        )
+        assertNull(unaligned.indexOfSelection(null, "Spoken but never located."))
+    }
+
+    @Test
+    fun `a selection can be turned straight into a seek position`() {
+        val target = selectable.indexOfSelection("EPUB/c1.xhtml", "He nodded")!!
+        assertEquals(2_000L, selectable.seekPositionFor(target))
+    }
+
+    // -- single tap: an offset inside a block of page text ---------------------
+
+    /** One paragraph as the WebView would report it, with a repeated sentence. */
+    private val paragraph =
+        "He nodded. Digital file formats are the foundation of modern computing. He nodded."
+
+    private val tappable = ChunkIndex(
+        listOf(
+            aligned(0, "He nodded."),
+            aligned(1, "Digital file formats are the foundation of modern computing."),
+            aligned(2, "He nodded."),
+        )
+    )
+
+    @Test
+    fun `a tap resolves to the sentence covering it`() {
+        assertEquals(0, tappable.indexOfTap("EPUB/c1.xhtml", paragraph, 3))
+        assertEquals(1, tappable.indexOfTap("EPUB/c1.xhtml", paragraph, 40))
+    }
+
+    @Test
+    fun `tapping a repeated sentence picks the occurrence tapped, not the first`() {
+        // The reason a tap uses offsets rather than text matching: "He nodded."
+        // appears twice, and only the position distinguishes them.
+        val secondOccurrence = paragraph.lastIndexOf("He nodded.")
+        assertEquals(2, tappable.indexOfTap("EPUB/c1.xhtml", paragraph, secondOccurrence + 4))
+    }
+
+    @Test
+    fun `a tap at the very start and very end of a block still resolve`() {
+        assertEquals(0, tappable.indexOfTap("EPUB/c1.xhtml", paragraph, 0))
+        assertEquals(2, tappable.indexOfTap("EPUB/c1.xhtml", paragraph, paragraph.length))
+    }
+
+    @Test
+    fun `a tap in text that is not mapped resolves to nothing`() {
+        val other = "This paragraph was never spoken by anyone at all."
+        assertNull(tappable.indexOfTap("EPUB/c1.xhtml", other, 10))
+    }
+
+    @Test
+    fun `an empty block is not resolved`() {
+        assertNull(tappable.indexOfTap("EPUB/c1.xhtml", "", 0))
+    }
+
+    @Test
+    fun `the resource scopes a tap too`() {
+        val index = ChunkIndex(
+            listOf(
+                aligned(0, "Shared sentence.", href = "EPUB/c1.xhtml"),
+                aligned(1, "Shared sentence.", href = "EPUB/c2.xhtml"),
+            )
+        )
+        assertEquals(1, index.indexOfTap("EPUB/c2.xhtml", "Shared sentence.", 5))
+    }
+
+    @Test
+    fun `a block whose whitespace differs falls back to window matching`() {
+        // The WebView's text content will not always match the stored text byte for
+        // byte; the tap should still land somewhere sensible rather than nowhere.
+        val reflowed = "He nodded.\n   Digital file formats are the   foundation of modern computing."
+        assertEquals(1, tappable.indexOfTap("EPUB/c1.xhtml", reflowed, 45))
+    }
+
     @Test
     fun `the real sample book resolves at every millisecond boundary`() {
         val parsed = SyncFileParser.parse(Fixtures.read("sync_sample_short.json"), "b1")

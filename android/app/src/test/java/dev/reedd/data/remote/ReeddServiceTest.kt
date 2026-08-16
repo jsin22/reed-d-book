@@ -220,6 +220,37 @@ class ReeddServiceTest {
     }
 
     @Test
+    fun `a hostile address is a typed failure, never a crash`() {
+        // What actually happened on device: a mistyped server address took the app
+        // down. Retrofit rejects some base URLs with IllegalArgumentException, which
+        // is not an IOException, so it slipped past every caller's error handling.
+        val hostile = listOf(
+            "http://",
+            "not a url at all",
+            "::::",
+            "http:// space .example",
+            "1",
+        )
+        for (address in hostile) {
+            val provider = ApiProvider(baseUrl = { address }, token = { null })
+            try {
+                provider.service()
+                // Some of these do normalise to something usable; that is fine, as
+                // long as nothing throws an unexpected type.
+            } catch (_: ServerNotConfigured) {
+            } catch (e: Throwable) {
+                fail("address '$address' threw ${e.javaClass.simpleName}, expected ServerNotConfigured")
+            }
+            try {
+                provider.url("api/health")
+            } catch (_: ServerNotConfigured) {
+            } catch (e: Throwable) {
+                fail("url('$address') threw ${e.javaClass.simpleName}, expected ServerNotConfigured")
+            }
+        }
+    }
+
+    @Test
     fun `url() joins paths against the configured base without doubling slashes`() {
         val provider = ApiProvider(baseUrl = { "http://host:8000" }, token = { null })
         assertEquals(

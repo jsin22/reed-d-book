@@ -57,24 +57,16 @@ fun ReeddNavHost(navController: NavHostController = rememberNavController()) {
 
         composable<DetailRoute> { entry ->
             val bookId = entry.toRoute<DetailRoute>().bookId
+            // One ViewModel, which owns both the state and the actions. Constructing a
+            // LibraryViewModel here as well used to start a second polling loop.
             val detailViewModel: BookDetailViewModel =
-                viewModel(factory = BookDetailViewModel.factory(container, bookId))
-            // Actions live on the library's ViewModel because they enqueue work and
-            // talk to the repository; the detail screen only displays.
-            val libraryViewModel: LibraryViewModel =
-                viewModel(factory = LibraryViewModel.factory(container, context))
+                viewModel(factory = BookDetailViewModel.factory(container, context, bookId))
 
             BookDetailScreen(
                 viewModel = detailViewModel,
                 onBack = { navController.popBackStack() },
                 onRead = { navController.navigate(ReaderRoute(it)) },
-                onRetryUpload = libraryViewModel::retry,
-                onRetryDownload = libraryViewModel::retryDownload,
-                onCancel = libraryViewModel::cancel,
-                onDelete = { id ->
-                    libraryViewModel.delete(id)
-                    navController.popBackStack()
-                },
+                onDeleted = { navController.popBackStack() },
             )
         }
 
