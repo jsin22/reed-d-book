@@ -4,7 +4,14 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-    <!-- Progress notifications for conversion and download. Runtime-requested on 33+. -->
+    <!-- Declared because NotificationManagerCompat.notify (notify/Notifications.kt)
+         requires it to exist in the manifest at all, even though the app never
+         requests it at runtime right now: a manifest declaration alone does not
+         prompt the user, only an explicit runtime request does, and there isn't
+         one. Until there is, this permission is simply never granted, and
+         Notifications.post already no-ops without it, so conversion/download
+         progress and "book ready" degrade to silently not appearing; the
+         foreground services below work regardless. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- A multi-hundred-MB .m4b download runs as a foreground service so the
          system does not kill it when the app leaves the screen. -->

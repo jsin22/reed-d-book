@@ -29,7 +29,17 @@ data class PlayerState(
 )
 
 /**
- * The app's handle on [PlaybackService].
+ * The app's one handle on [PlaybackService] -- a single instance shared by every
+ * screen (`AppContainer.playerConnection`), not built fresh per reader.
+ *
+ * That is deliberate, not incidental: [state] is the only place "which book is
+ * playing" lives, and it has to be one answer the whole app agrees on. A library
+ * screen showing a "now playing" bar needs it to still be there after the reader
+ * that started playback has closed; [prepare] needs the controller's *actual*
+ * current item, not a copy that resets to nothing every time a new instance was
+ * constructed, or reopening the book already playing would reload and restart it.
+ * `connect()` is idempotent for the same reason -- whichever screen asks first
+ * builds the one controller everyone then shares.
  *
  * Everything here must run on the main thread: a Media3 `MediaController` requires
  * it and throws otherwise, so callers stay on the main dispatcher rather than this
@@ -81,14 +91,26 @@ class PlayerConnection(private val context: Context) {
     }
 
     /**
-     * Point the player at a book, unless it is already playing that one.
+     * Point the player at a book.
      *
-     * The guard matters: returning to the reader of a book that is already playing
-     * must not reload the media item and restart it from the saved position.
+     * Reopening the book already loaded is a no-op -- checked against the
+     * controller's *actual* current item, not a locally cached id, since this
+     * connection is shared app-wide (`AppContainer.playerConnection`) and has to
+     * agree with whatever any other screen last did to it. Skipping the reload is
+     * what lets returning to the reader of a book that is already playing not
+     * restart it from the saved position.
+     *
+     * Switching to a genuinely *different* book always pauses first. Without that,
+     * `playWhenReady` is a player-level flag that survives `setMediaItem` -- it does
+     * not belong to the outgoing item -- so it would carry over and auto-start the
+     * new book the instant it finished buffering. That is both halves of the same
+     * bug: the old book audibly keeps going after the reader moves on, and the new
+     * book starts itself before anyone asked it to.
      */
     fun prepare(bookId: String, audiobook: File, title: String, author: String?, coverPath: String?, startMs: Long) {
         val controller = controller ?: return
-        if (_state.value.bookId == bookId && controller.mediaItemCount > 0) return
+        if (controller.currentMediaItem?.mediaId == bookId) return
+        controller.pause()
 
         val item = MediaItem.Builder()
             .setMediaId(bookId)
@@ -141,16 +163,12 @@ class PlayerConnection(private val context: Context) {
             // An unprepared player reports TIME_UNSET, which is negative.
             durationMs = controller?.duration?.takeIf { it > 0 } ?: 0,
             speed = controller?.playbackParameters?.speed ?: 1f,
+            // Read from the controller rather than only ever set by `prepare`, so a
+            // screen that never called `prepare` itself -- the library, observing
+            // this same shared connection -- still finds out which book is playing
+            // as soon as it connects.
+            bookId = controller?.currentMediaItem?.mediaId ?: _state.value.bookId,
         )
-    }
-
-    fun release() {
-        controller?.let {
-            it.removeListener(listener)
-            it.release()
-        }
-        controller = null
-        _state.value = PlayerState()
     }
 
     companion object {

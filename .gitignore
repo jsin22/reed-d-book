@@ -17,3 +17,5 @@ android/app/build/
 
 # Convenience symlink to the APK output directory
 /debug
+server/*.log
+server/redis-data/

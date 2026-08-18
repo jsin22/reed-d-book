@@ -105,6 +105,23 @@ class ReadAlongViewModel(
     private var index: ChunkIndex = ChunkIndex.EMPTY
     private var lastSavedPositionMs = 0L
 
+    /**
+     * True until [pollPosition] has processed one tick.
+     *
+     * `player.currentPositionMs()` right after `prepare()` cannot be trusted the
+     * instant this ViewModel is created: [player] is shared app-wide and its
+     * `MediaController` talks to the session asynchronously, so a poll tick that
+     * lands before that round trip completes can read a stale position -- often
+     * whatever a *previously* open book left behind. Treating that as a genuine
+     * sentence change would fight the page [dev.reedd.ui.reader.ReaderViewModel]
+     * already opened at (its own saved locator), which is exactly BUGS.md BUG-10's
+     * successor: the reader "waking up at the beginning" despite a saved position
+     * elsewhere. The first tick only establishes the baseline; navigation is
+     * trusted from the second tick on, by which point the read has settled in
+     * every case that matters here.
+     */
+    private var firstTick = true
+
     fun chunkIndex(): ChunkIndex = index
 
     init {
@@ -127,6 +144,17 @@ class ReadAlongViewModel(
             coverPath = book.coverPath,
             startMs = book.playbackPositionMs,
         )
+
+        // Seed from the position just handed to the player, not a live read of
+        // it, for the same reason `firstTick` exists: this value is known good,
+        // a poll tick's read of the player this soon after `prepare()` might not
+        // be yet. `onNavigated` records it without emitting a navigation, so the
+        // reader is not asked to move from wherever it already opened.
+        index.indexAt(book.playbackPositionMs).takeIf { it >= 0 }?.let { seedIndex ->
+            _state.value = _state.value.copy(currentIndex = seedIndex)
+            follower.onNavigated(seedIndex)
+        }
+
         _state.value = _state.value.copy(available = true)
         pollPosition()
     }
@@ -170,7 +198,12 @@ class ReadAlongViewModel(
             val position = player.currentPositionMs()
             val nextIndex = index.indexAt(position)
 
-            if (nextIndex != _state.value.currentIndex) {
+            if (firstTick) {
+                // See the KDoc on firstTick: this read is not trusted for
+                // navigation, only start()'s seeded baseline is, until the
+                // player's own state has had one tick to settle.
+                firstTick = false
+            } else if (nextIndex != _state.value.currentIndex) {
                 _state.value = _state.value.copy(currentIndex = nextIndex)
                 if (follower.onSentenceChanged(nextIndex)) {
                     _navigateTo.value = nextIndex
@@ -335,11 +368,12 @@ class ReadAlongViewModel(
         }
     }
 
-    override fun onCleared() {
-        // The service keeps playing on purpose: leaving the reader should not stop
-        // an audiobook. Only this connection to it goes away.
-        player.release()
-    }
+    // No onCleared override: player is shared app-wide now (see AppContainer.playerConnection),
+    // so leaving the reader must not release it -- Library's "now playing" bar and
+    // the next book's own guard against auto-starting both depend on the
+    // connection, and its state, still being there. viewModelScope itself is still
+    // cancelled automatically, which is what actually stops this book's own
+    // position poll.
 
     companion object {
         private const val PLAYING_TICK_MS = 100L
@@ -358,7 +392,7 @@ class ReadAlongViewModel(
                 container.repository,
                 container.readAlongAligner,
                 container.dictionary,
-                PlayerConnection(container.appContext),
+                container.playerConnection,
             ) as T
         }
     }

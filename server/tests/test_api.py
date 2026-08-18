@@ -169,6 +169,33 @@ class DownloadTest(ApiTestCase):
         (self.store.output_dir(job_id) / 'Book_One.m4b').unlink()
         self.assertEqual(self.client.get(f'/api/jobs/{job_id}/audiobook').status_code, 410)
 
+    def test_serves_the_epub_even_before_the_job_finishes(self):
+        # Unlike the audiobook/sync, the upload exists from the moment the job
+        # is created and never changes -- a device adopting an in-progress job
+        # from the listing should not have to wait for it to be done.
+        payload = epub_bytes(body=b'<html><body><p>Distinct.</p></body></html>')
+        job_id = self.upload(content=payload).json()['job_id']
+        response = self.client.get(f'/api/jobs/{job_id}/epub')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, payload)
+        self.assertEqual(response.headers['content-type'], 'application/epub+zip')
+        self.assertIn('Book_One.epub', response.headers['content-disposition'])
+
+    def test_epub_supports_range_requests(self):
+        job_id = self.upload(content=epub_bytes(body=b'0123456789')).json()['job_id']
+        response = self.client.get(f'/api/jobs/{job_id}/epub', headers={'Range': 'bytes=4-6'})
+        self.assertEqual(response.status_code, 206)
+
+    def test_epub_of_unknown_job_is_404(self):
+        self.assertEqual(
+            self.client.get('/api/jobs/9d0b6c4f-5e2a-4b3c-8a1b-000000000000/epub').status_code,
+            404)
+
+    def test_missing_epub_is_410_not_500(self):
+        job_id = self.upload().json()['job_id']
+        (self.store.job_dir(job_id) / 'Book_One.epub').unlink()
+        self.assertEqual(self.client.get(f'/api/jobs/{job_id}/epub').status_code, 410)
+
     def test_log_is_served_when_it_exists(self):
         job_id = self.upload().json()['job_id']
         self.assertEqual(self.client.get(f'/api/jobs/{job_id}/log').status_code, 404)

@@ -7,9 +7,11 @@ The contract the Android app codes against:
     GET    /api/jobs/{job_id}           poll             -> {status, progress, eta, ...}
     GET    /api/jobs/{job_id}/audiobook the .m4b         (Range-resumable)
     GET    /api/jobs/{job_id}/sync      the timing .json
+    GET    /api/jobs/{job_id}/epub      the original upload (Range-resumable)
     GET    /api/jobs/{job_id}/log       audiblez' output for this job
     DELETE /api/jobs/{job_id}           cancel and/or reclaim the disk
-    GET    /api/jobs                    every job, newest first
+    GET    /api/jobs                    every job, newest first -- doubles as the
+                                         library listing; see README.md
     GET    /api/voices                  Kokoro voices, for a picker
     GET    /api/health
 
@@ -159,6 +161,25 @@ def download_sync(job_id: str):
     """The text-to-timestamp mapping. Format documented in audiblez/SYNC.md."""
     path = _completed_file(job_id, 'sync')
     return FileResponse(path, media_type='application/json', filename=path.name)
+
+
+@app.get('/api/jobs/{job_id}/epub', dependencies=[Depends(require_token)])
+def download_epub(job_id: str):
+    """The originally uploaded .epub.
+
+    Not gated on the job being done -- the upload is written before conversion
+    starts and never changes after. This is what lets a device that never
+    uploaded this book itself (a different device, a reinstall, wiped app
+    storage) adopt a job the server already finished: it can fetch the epub,
+    the audiobook and the sync file from a `GET /api/jobs` listing alone,
+    without re-uploading or waiting through TTS again. See `GET /api/jobs`
+    below and README.md, "Accumulating a library".
+    """
+    get_job(job_id)  # 404s on an unknown id
+    path = store().epub_path(job_id)
+    if not path.is_file():
+        raise HTTPException(status_code=410, detail='epub is no longer on disk')
+    return FileResponse(path, media_type='application/epub+zip', filename=path.name)
 
 
 # -- app diagnostics --------------------------------------------------------

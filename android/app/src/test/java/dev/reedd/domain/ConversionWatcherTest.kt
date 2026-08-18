@@ -243,6 +243,26 @@ class ConversionWatcherTest {
     }
 
     @Test
+    fun `reconcile tells the adopter which jobs are already local`() = runTest {
+        // "known" has to be every jobId already backed by a row, or the adopter
+        // (ServerLibraryAdopterTest, kept separate since it depends on Readium)
+        // would re-adopt a book this device already has.
+        db.books().insert(book("has-job", jobId = "job-1", jobStatus = JobStatus.DONE))
+        db.books().insert(book("no-job", jobId = null))
+        var seen: Set<String>? = null
+        val watcherWithAdoption = ConversionWatcher(
+            context, repository, ApiProvider(baseUrl = { server.url("/").toString() }, token = { null }),
+            Notifications(context),
+            adoptServerLibrary = { known -> seen = known },
+        )
+        // job-1 is DONE, so pollAll below makes no further request for it.
+
+        watcherWithAdoption.reconcile()
+
+        assertEquals(setOf("job-1"), seen)
+    }
+
+    @Test
     fun `a book with no job is never polled`() = runTest {
         db.books().insert(book("b1"))
 

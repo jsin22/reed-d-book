@@ -158,7 +158,17 @@ aligned book says so rather than just behaving oddly.
 is a Media3 `MediaSessionService` holding the one ExoPlayer, which is what makes
 background playback work and what supplies the lockscreen and notification
 controls and the headset buttons for free. Leaving the reader does not stop the
-audio; only the app's `MediaController` connection goes away.
+audio, and [`PlayerConnection`](app/src/main/java/dev/reedd/playback/PlayerConnection.kt)
+-- the app's one `MediaController` handle on it -- does not go away either: it is
+a single instance shared by every screen (`AppContainer.playerConnection`), not
+rebuilt per reader. It used to be rebuilt per reader, which was a real bug: a
+fresh instance's notion of "what is playing" always started blank, so its guard
+against reloading the book already open never fired, and the outgoing book's
+`playWhenReady` flag (a player-level flag, not a property of the media item)
+carried over and auto-started whatever opened next. One connection is what makes
+"which book is playing" a single fact the whole app -- including the library's
+now-playing bar -- can agree on, and `prepare()` now checks the controller's
+actual current item rather than a copy of its own.
 
 **Following is a state machine, because auto-advance fights the reader.** Dragging
 the page stops the audio dragging it back, with an explicit way to jump back to it;
@@ -185,7 +195,7 @@ a sentence would drift by it every time.
 
 | | |
 |---|---|
-| **Library** | every book with a derived status badge: on device, uploading, queued, converting *n*% + ETA, downloading, ready, failed, lost |
+| **Library** | every book with a derived status badge: on device, uploading, queued, converting *n*% + ETA, downloading, ready, failed, lost; a book's badge becomes "Playing"/"Paused" while it is the one loaded in the player, and a mini-player bar at the bottom (play/pause, tap to reopen) is shown whenever anything is |
 | **Import** | SAF picker, then voice (from `GET /api/voices`) and speed, validated against the server's own 0.5–2.0 range |
 | **Book detail** | progress, the server's error text, the audiblez log via `GET /api/jobs/{id}/log`, and cancel / resend / resume-download / delete |
 | **Reader** | Readium's `EpubNavigatorFragment` hosted in Compose; paginated or continuous scroll, text size, theme, table of contents, position saved to Room. For a converted book: a transport bar with play/pause, previous/next **sentence**, speed, a follow-the-audio toggle and the highlight-timing nudge |

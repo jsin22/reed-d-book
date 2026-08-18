@@ -159,7 +159,9 @@ fun SettingsScreen(
                 Column(Modifier.fillMaxWidth(0.75f)) {
                     Text("Free server disk after downloading", style = MaterialTheme.typography.bodyLarge)
                     Text(
-                        "Deletes the job on the server once both files are on this device. The server has no cleanup of its own.",
+                        "Deletes the job on the server once both files are on this device. Off by default: " +
+                            "a book left on the server can be pulled onto another device, or this one again " +
+                            "after a reinstall, without converting it a second time.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -178,6 +180,16 @@ fun SettingsScreen(
                 style = MaterialTheme.typography.bodySmall,
             )
             OutlinedButton(onClick = viewModel::refreshStorage) { Text("Recalculate") }
+
+            HorizontalDivider()
+
+            // What tells one install apart from the last one, since debug builds
+            // change several times a day and versionName/versionCode do not move.
+            Text(
+                "Build ${dev.reedd.BuildInfo.GIT_SHA} · ${dev.reedd.BuildInfo.BUILT_AT}",
+                style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }

@@ -19,6 +19,8 @@ import dev.reedd.data.settings.SettingsStore
 import dev.reedd.di.AppContainer
 import dev.reedd.diagnostics.CrashLog
 import dev.reedd.domain.ConversionWatcher
+import dev.reedd.playback.PlayerConnection
+import dev.reedd.playback.PlayerState
 import dev.reedd.work.DownloadWorker
 import dev.reedd.work.PollWorker
 import dev.reedd.work.UploadWorker
@@ -53,10 +55,18 @@ class LibraryViewModel(
     private val api: ApiProvider,
     private val settingsStore: SettingsStore,
     private val crashLog: CrashLog,
+    private val player: PlayerConnection,
 ) : ViewModel() {
 
     val books: StateFlow<List<BookEntity>> =
         repository.books().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /**
+     * Which book, if any, [player] currently has loaded, and whether it is
+     * playing -- so the library can show a "now playing" bar and mark the matching
+     * card, the same connection the reader itself uses (`AppContainer.playerConnection`).
+     */
+    val playerState: StateFlow<PlayerState> = player.state
 
     val settings: StateFlow<ServerSettings> =
         settingsStore.settings.stateIn(viewModelScope, SharingStarted.Eagerly, ServerSettings())
@@ -76,6 +86,9 @@ class LibraryViewModel(
 
     fun dismissCrashReport() = crashLog.dismiss()
 
+    /** The mini-player's play/pause button. */
+    fun togglePlayPause() = player.togglePlayPause()
+
     init {
         viewModelScope.launch {
             // Repair rows whose files vanished, then catch up on everything the
@@ -86,6 +99,11 @@ class LibraryViewModel(
             }
         }
         startLivePolling()
+        // Connecting (idempotent -- see PlayerConnection) is what lets the "now
+        // playing" bar appear the moment this screen opens, rather than only after
+        // a reader has connected first: PlaybackService can already be alive in the
+        // background from earlier in the session.
+        viewModelScope.launch { player.connect() }
     }
 
     /**
@@ -211,6 +229,7 @@ class LibraryViewModel(
                 container.api,
                 container.settings,
                 container.crashLog,
+                container.playerConnection,
             ) as T
         }
     }

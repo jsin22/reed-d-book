@@ -31,6 +31,16 @@ class ConversionWatcher(
     private val repository: BookRepository,
     private val api: ApiProvider,
     private val notifications: Notifications,
+    /**
+     * Pulls in server-side books this device does not have a row for yet. A
+     * plain function rather than [ServerLibraryAdopter] itself so tests of
+     * everything else here are not forced to construct one -- it depends on
+     * [dev.reedd.data.local.EpubImporter] and, through it, Readium, which is
+     * exactly the weight this class's own tests go out of their way to avoid.
+     * Defaults to a no-op for exactly that reason; production wires the real
+     * thing in `di/AppContainer.kt`.
+     */
+    private val adoptServerLibrary: suspend (known: Set<String>) -> Unit = {},
 ) {
     /**
      * Poll one job and write down what it said.
@@ -116,9 +126,14 @@ class ConversionWatcher(
      * the user cleared the app's storage, or a download was interrupted so hard
      * that the row still claims DONE. Trusting the database over the filesystem
      * here would give a book that opens to a missing-file error.
+     *
+     * It also adopts any book the server has finished converting that this
+     * device does not have a row for -- see [adoptServerLibrary]. Both need the
+     * same book list, fetched once rather than twice.
      */
     suspend fun reconcile(): Int {
-        for (book in repository.allBooks()) {
+        val books = repository.allBooks()
+        for (book in books) {
             if (book.downloadState == DownloadState.DONE && !book.filesPresent()) {
                 repository.updateDownload(
                     book.id,
@@ -127,6 +142,7 @@ class ConversionWatcher(
                 )
             }
         }
+        adoptServerLibrary(books.mapNotNull { it.jobId }.toSet())
         return pollAll()
     }
 

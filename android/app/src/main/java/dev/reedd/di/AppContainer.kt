@@ -13,9 +13,11 @@ import dev.reedd.data.remote.ApiProvider
 import dev.reedd.data.settings.SettingsStore
 import dev.reedd.domain.ConversionWatcher
 import dev.reedd.domain.ReadAlongAligner
+import dev.reedd.domain.ServerLibraryAdopter
 import dev.reedd.diagnostics.CrashLog
 import dev.reedd.diagnostics.CrashReporter
 import dev.reedd.notify.Notifications
+import dev.reedd.playback.PlayerConnection
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -73,11 +75,30 @@ class AppContainer(context: Context) {
         BookRepository(database.books(), syncStore, api)
     }
 
+    val libraryAdopter: ServerLibraryAdopter by lazy {
+        ServerLibraryAdopter(appContext, repository, api, files, importer, downloader)
+    }
+
     val watcher: ConversionWatcher by lazy {
-        ConversionWatcher(appContext, repository, api, notifications)
+        ConversionWatcher(appContext, repository, api, notifications, libraryAdopter::adopt)
     }
 
     val readAlongAligner: ReadAlongAligner by lazy { ReadAlongAligner(syncStore) }
+
+    /**
+     * The one connection to [dev.reedd.playback.PlaybackService], shared by every
+     * screen rather than built fresh per reader.
+     *
+     * It used to be built per [dev.reedd.ui.reader.ReadAlongViewModel] and released
+     * in that ViewModel's `onCleared`, which meant its notion of "what is the
+     * current book" reset to nothing every time the reader closed -- exactly the
+     * state a library screen needs to show a "now playing" bar, and exactly what
+     * let a freshly-opened book's `prepare()` skip its own guard (it was comparing
+     * against a blank slate) and inherit the outgoing book's `playWhenReady`,
+     * auto-starting itself. One connection, alive for the app's lifetime, is what
+     * makes "which book is playing" a fact the whole app can agree on.
+     */
+    val playerConnection: PlayerConnection by lazy { PlayerConnection(appContext) }
 
     /** The bundled offline dictionary; opens its database on first lookup. */
     val dictionary: Dictionary by lazy { Dictionary(appContext) }

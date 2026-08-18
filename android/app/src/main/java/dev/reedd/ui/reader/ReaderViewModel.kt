@@ -187,15 +187,26 @@ class ReaderViewModel(
      * because they are the one thing that can override the page colours: an epub
      * that sets its own `body { background: #fff }` would otherwise punch a white
      * hole through the grey.
+     *
+     * `publisherStyles` was briefly forced off for every theme, not just Paper, on
+     * the theory that it was letting a book's own CSS override the app's layout.
+     * Reverted: decompiling Readium's actual `ReadiumCss.injectHtml` (not guessed
+     * at, read directly) turns up no reference to `publisherStyles` anywhere near
+     * its stylesheet-selection logic in this version of the library -- it does not
+     * gate anything there. The real cause of the vertical-margin and paragraph-
+     * indent bug was different: `ReadiumCSS-default.css`, the only stylesheet
+     * defining `--RS__flowSpacing`/`--RS__paraIndent` and the rules that consume
+     * them, is linked only when the page has *no* CSS of its own, which is
+     * essentially never true for a real epub. See `TypographyFixer.kt`, which
+     * fixes that directly, and BUGS.md's BUG-12 history for the full chain.
      */
     fun preferences(settings: ReaderSettings, systemInDarkTheme: Boolean): EpubPreferences {
         val paper = settings.theme == ReaderSettings.PAPER
         return EpubPreferences(
             fontSize = settings.fontSize,
             scroll = settings.scroll,
-            // Multiplies Readium's horizontal gutter. Unlike lineHeight or textAlign
-            // this one applies whether or not publisher styles are on.
-            pageMargins = settings.pageMargins,
+            // Left at Readium's own default (a 1.0 multiplier on the fixed pageGutter
+            // set in ReaderScreen's RsProperties) -- no longer a user preference.
             theme = when {
                 paper -> Theme.LIGHT
                 settings.theme != null -> settings.theme.toTheme() ?: Theme.LIGHT

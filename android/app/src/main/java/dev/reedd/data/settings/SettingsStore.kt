@@ -20,16 +20,19 @@ import kotlinx.coroutines.launch
  * @param baseUrl raw, as typed by the user; run it through
  *   [dev.reedd.data.remote.ServerAddress] before use.
  * @param token matches the server's `REEDD_API_TOKEN`; blank when it has none.
- * @param deleteJobAfterDownload the server has no cleanup policy of its own
- *   (see `server/README.md`, "Known gaps"), so by default the app reclaims the
- *   job once it holds both files.
+ * @param deleteJobAfterDownload off by default: a finished job left on the
+ *   server is what lets [dev.reedd.domain.ServerLibraryAdopter] pull the same
+ *   book onto another device -- or this one again, after a reinstall -- without
+ *   re-uploading or waiting through TTS a second time. Turning it on trades that
+ *   away for reclaiming the server's disk as each book finishes downloading; see
+ *   `server/README.md`, "Accumulating a library".
  */
 data class ServerSettings(
     val baseUrl: String? = null,
     val token: String? = null,
     val voice: String? = null,
     val speed: Double = 1.0,
-    val deleteJobAfterDownload: Boolean = true,
+    val deleteJobAfterDownload: Boolean = false,
 ) {
     companion object {
         const val MIN_SPEED = 0.5
@@ -44,7 +47,7 @@ data class ServerSettings(
          * and clearing the field falls back here rather than to nothing, so a
          * reinstall does not mean retyping an address.
          */
-        const val DEFAULT_BASE_URL = "100.124.110.63:8000"
+        const val DEFAULT_BASE_URL = "100.98.16.59:8000"
     }
 }
 
@@ -60,25 +63,10 @@ data class ReaderSettings(
     val fontSize: Double = 1.0,
     val theme: String? = null,
     val scroll: Boolean = false,
-    /**
-     * Multiplier on Readium's horizontal page padding, where 1.0 is its default.
-     *
-     * Horizontal only: Readium's reflowable stylesheet is
-     * `padding: 0 calc(--RS__pageGutter * --USER__pageMargins)`, so vertical
-     * padding is already zero and the space above and below the text is this app's
-     * own toolbars — reclaimed by hiding them instead (see the reader's immersive
-     * tap). Defaults tighter than Readium's, which is generous for a phone.
-     */
-    val pageMargins: Double = DEFAULT_PAGE_MARGINS,
 ) {
     companion object {
         const val MIN_FONT_SIZE = 0.5
         const val MAX_FONT_SIZE = 2.5
-
-        /** 0.5 halves the gutter: roughly 10px a side instead of 20. */
-        const val DEFAULT_PAGE_MARGINS = 0.5
-        const val MIN_PAGE_MARGINS = 0.2
-        const val MAX_PAGE_MARGINS = 2.0
 
         /**
          * An e-ink look: a warm grey page with near-black text.
@@ -105,7 +93,7 @@ class SettingsStore(context: Context, scope: CoroutineScope) {
             token = prefs[KEY_TOKEN],
             voice = prefs[KEY_VOICE],
             speed = prefs[KEY_SPEED] ?: 1.0,
-            deleteJobAfterDownload = prefs[KEY_DELETE_AFTER] ?: true,
+            deleteJobAfterDownload = prefs[KEY_DELETE_AFTER] ?: false,
         )
     }
 
@@ -149,7 +137,6 @@ class SettingsStore(context: Context, scope: CoroutineScope) {
             fontSize = prefs[KEY_READER_FONT_SIZE] ?: 1.0,
             theme = prefs[KEY_READER_THEME],
             scroll = prefs[KEY_READER_SCROLL] ?: false,
-            pageMargins = prefs[KEY_READER_MARGINS] ?: ReaderSettings.DEFAULT_PAGE_MARGINS,
         )
     }
 
@@ -159,8 +146,6 @@ class SettingsStore(context: Context, scope: CoroutineScope) {
                 settings.fontSize.coerceIn(ReaderSettings.MIN_FONT_SIZE, ReaderSettings.MAX_FONT_SIZE)
             if (settings.theme == null) prefs.remove(KEY_READER_THEME) else prefs[KEY_READER_THEME] = settings.theme
             prefs[KEY_READER_SCROLL] = settings.scroll
-            prefs[KEY_READER_MARGINS] =
-                settings.pageMargins.coerceIn(ReaderSettings.MIN_PAGE_MARGINS, ReaderSettings.MAX_PAGE_MARGINS)
         }
     }
 
@@ -173,6 +158,9 @@ class SettingsStore(context: Context, scope: CoroutineScope) {
         val KEY_READER_FONT_SIZE = doublePreferencesKey("reader_font_size")
         val KEY_READER_THEME = stringPreferencesKey("reader_theme")
         val KEY_READER_SCROLL = booleanPreferencesKey("reader_scroll")
-        val KEY_READER_MARGINS = doublePreferencesKey("reader_page_margins")
+        // "reader_page_margins" (a Double) is no longer written, but deliberately
+        // not reused for a different type -- an existing install's DataStore may
+        // still hold it, and Preferences DataStore has no per-key migration, only
+        // whole-file ones. A stray unread key is harmless; a type collision is not.
     }
 }

@@ -1,3 +1,9 @@
+import org.gradle.process.ExecOperations
+import java.io.ByteArrayOutputStream
+import java.time.OffsetDateTime
+import java.time.format.DateTimeFormatter
+import javax.inject.Inject
+
 plugins {
     // No kotlin-android plugin: AGP 9 compiles Kotlin itself and fails the build
     // if the standalone plugin is also applied. See kotl.in/gradle/agp-built-in-kotlin.
@@ -5,6 +11,62 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.compose.compiler)
     alias(libs.plugins.ksp)
+}
+
+/**
+ * Writes `dev.reedd.BuildInfo` with the git commit and time this specific APK was
+ * built, so a build installed minutes apart from the last one is distinguishable on
+ * the device itself -- see BUGS.md, "Getting the build number".
+ *
+ * Runs via [ExecOperations] rather than `project.exec`, which is the
+ * configuration-cache-compatible way to shell out from a task action. Forced to run
+ * every build (`upToDateWhen { false }`): `git describe` is invisible to Gradle's own
+ * up-to-date and configuration-cache input tracking, so without this the stamp would
+ * silently freeze at whatever it was on the last build the *script* re-evaluated,
+ * which defeats the entire point during rapid device-testing iteration.
+ */
+abstract class GenerateBuildInfoTask : DefaultTask() {
+    @get:Inject
+    abstract val execOps: ExecOperations
+
+    @get:OutputDirectory
+    abstract val outputDir: DirectoryProperty
+
+    @TaskAction
+    fun generate() {
+        val out = ByteArrayOutputStream()
+        val sha = runCatching {
+            execOps.exec {
+                commandLine("git", "describe", "--always", "--dirty", "--abbrev=8")
+                standardOutput = out
+                isIgnoreExitValue = true
+            }
+            out.toString().trim()
+        }.getOrNull()?.ifBlank { null } ?: "unknown"
+
+        val builtAt = OffsetDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"))
+
+        val file = outputDir.get().asFile.resolve("dev/reedd/BuildInfo.kt")
+        file.parentFile.mkdirs()
+        file.writeText(
+            """
+            package dev.reedd
+
+            /** Which commit and when this specific APK was built. Generated at build time -- see app/build.gradle.kts. */
+            object BuildInfo {
+                const val GIT_SHA = "$sha"
+                const val BUILT_AT = "$builtAt"
+            }
+
+            """.trimIndent(),
+        )
+    }
+}
+
+val buildInfoDir = layout.buildDirectory.dir("generated/buildInfo/main")
+val generateBuildInfo = tasks.register<GenerateBuildInfoTask>("generateBuildInfo") {
+    outputDir.set(buildInfoDir)
+    outputs.upToDateWhen { false }
 }
 
 android {
@@ -84,6 +146,16 @@ kotlin {
 // Room's generated schema, checked in so migrations are reviewable in diffs.
 ksp {
     arg("room.schemaLocation", "$projectDir/schemas")
+}
+
+// The Variant API's `addGeneratedSourceDirectory` (rather than the classic
+// `AndroidSourceDirectorySet.srcDir`) is what both marks the directory as
+// generated/read-only for Android Studio and wires compileKotlin to depend on the
+// task that fills it, for every variant, without naming their task names by hand.
+androidComponents {
+    onVariants { variant ->
+        variant.sources.kotlin?.addGeneratedSourceDirectory(generateBuildInfo, GenerateBuildInfoTask::outputDir)
+    }
 }
 
 dependencies {

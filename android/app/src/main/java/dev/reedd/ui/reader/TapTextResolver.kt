@@ -39,6 +39,18 @@ object TapTextResolver {
     /** Applied by [resolve]; cleared by [clearHighlight]. */
     private const val HIGHLIGHT_NAME = "reedd-word"
 
+    /**
+     * How far, in CSS pixels, a tap may sit outside the word `caretRangeFromPoint`
+     * resolved before that word is rejected as a miss rather than a hit.
+     *
+     * `caretRangeFromPoint` returns the *nearest* caret position, full stop -- it
+     * does not report "nothing here" for blank space, it reports whatever text is
+     * closest, which can be centimetres away in a paginated, multi-column layout.
+     * A few pixels is enough slack for font-metric rounding without accepting that
+     * kind of nearest-neighbour guess.
+     */
+    private const val TAP_TOLERANCE_PX = 6
+
     suspend fun resolve(fragment: EpubNavigatorFragment, x: Float, y: Float): TappedWord? {
         val raw = runCatching { fragment.evaluateJavascript(script(x, y)) }.getOrNull() ?: return null
         return parse(raw)
@@ -85,6 +97,21 @@ object TapTextResolver {
     private fun script(x: Float, y: Float): String = """
         (function() {
           try {
+            // Readium's decoration overlays (e.g. the currently-spoken-sentence
+            // highlight, group "readalong") are real elements painted above the
+            // text -- Readium's own bundle never sets pointer-events on them. Left
+            // alone, caretRangeFromPoint hit-tests paint order and lands on the
+            // decoration instead of the text underneath, so a tap on whichever
+            // sentence happens to be highlighted right now silently resolves to
+            // nothing. Done first, unconditionally, so it is in effect before the
+            // very first caretRangeFromPoint call below -- not just future ones.
+            if (!document.getElementById('reedd-decoration-passthrough-style')) {
+              var passthrough = document.createElement('style');
+              passthrough.id = 'reedd-decoration-passthrough-style';
+              passthrough.textContent = '[id^="r2-decoration-"] { pointer-events: none; }';
+              document.head.appendChild(passthrough);
+            }
+
             var caret = document.caretRangeFromPoint($x, $y);
             if (!caret) { return null; }
             var node = caret.startContainer;
@@ -103,6 +130,20 @@ object TapTextResolver {
             var range = document.createRange();
             range.setStart(node, start);
             range.setEnd(node, end);
+
+            // caretRangeFromPoint reports the *nearest* caret position, even when
+            // the tap did not land on any text at all: blank space below the last
+            // line, a side margin, or -- worse, under column-based pagination -- a
+            // position that belongs to a different page entirely. Trust it only
+            // when the tap point actually falls inside the word's own rendered
+            // box; otherwise this is a miss, not a hit, and must not fabricate an
+            // answer just because *something* was nearby.
+            var rect = range.getBoundingClientRect();
+            var pad = $TAP_TOLERANCE_PX;
+            if ($x < rect.left - pad || $x > rect.right + pad ||
+                $y < rect.top - pad || $y > rect.bottom + pad) {
+              return null;
+            }
 
             // Nearest block, so the text returned is a whole paragraph rather than
             // one styled fragment of one.
@@ -135,7 +176,6 @@ object TapTextResolver {
               }
             } catch (e) {}
 
-            var rect = range.getBoundingClientRect();
             return JSON.stringify({
               word: word, text: block.textContent || '', offset: offset,
               left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom

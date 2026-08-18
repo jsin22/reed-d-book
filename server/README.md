@@ -23,6 +23,7 @@ Android app ──POST /api/jobs──▶ FastAPI ──▶ Redis ──▶ Cele
 | `GET /api/jobs/{id}` | poll: `status`, `progress` (0-100), `eta`, `chapters_done`, `error`. |
 | `GET /api/jobs/{id}/audiobook` | the `.m4b`. Supports `Range`, so an interrupted download resumes. |
 | `GET /api/jobs/{id}/sync` | the timing `.json`. |
+| `GET /api/jobs/{id}/epub` | the original upload. Also `Range`-resumable. |
 | `GET /api/jobs/{id}/log` | audiblez' output for this job, ffmpeg included. |
 | `DELETE /api/jobs/{id}` | cancels if running, then deletes the job's files. |
 | `GET /api/jobs` | every job, newest first. |
@@ -120,13 +121,28 @@ per-chapter `.wav` files are deleted once the `.m4b` exists — they are roughly
 resume-from-`.wav` behaviour, which is the right trade for a one-shot job; set
 `REEDD_KEEP_INTERMEDIATE=1` while debugging.
 
+**Accumulating a library.** A finished job is a complete, standalone record of
+one conversion — the epub that went in, the audiobook and sync file that came
+out — and nothing here deletes it on its own. `GET /api/jobs` is therefore also
+the library listing: on launch, the app diffs it against the jobs it already
+has a local row for and adopts anything new, fetching the epub alongside the
+audiobook and sync file it would fetch anyway. A book converted once stays
+converted for every device that ever points at this server, without
+re-uploading or waiting through TTS a second time. Nothing about a conversion
+itself changes to make this work — audiblez, the queue, and the job.json
+lifecycle are exactly as they were; this is purely a question of what the app
+does with a job once it exists.
+
 ## Known gaps
 
 - **A worker killed mid-job leaves the manifest at `running` forever.** Celery's
   `acks_late` would re-run it instead, but a job that crashes deterministically
   would then loop, and a conversion is expensive. `DELETE` the job and re-upload.
-- **No cleanup policy.** Finished jobs sit on disk until deleted; nothing sweeps
-  them. The app is expected to `DELETE` a job once it has both files.
+- **No automatic disk reclamation.** Finished jobs accumulate on disk
+  indefinitely by design now (see "Accumulating a library" above) — the app's
+  "free server disk after downloading" setting defaults to off. Nothing sweeps
+  old jobs on its own; `DELETE /api/jobs/{id}` is a manual, deliberate action, on
+  a server disk that is not being watched for size.
 
 ## Tests
 

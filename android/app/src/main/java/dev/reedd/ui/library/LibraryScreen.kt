@@ -16,10 +16,14 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.MenuBook
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
@@ -32,6 +36,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
@@ -63,6 +68,8 @@ fun LibraryScreen(
     val books by viewModel.books.collectAsStateWithLifecycle()
     val message by viewModel.message.collectAsStateWithLifecycle()
     val importing by viewModel.importing.collectAsStateWithLifecycle()
+    val playerState by viewModel.playerState.collectAsStateWithLifecycle()
+    val nowPlaying = books.find { it.id == playerState.bookId }
     val snackbar = remember { SnackbarHostState() }
     var showImport by remember { mutableStateOf(false) }
     var pickedUri by remember { mutableStateOf<android.net.Uri?>(null) }
@@ -83,18 +90,6 @@ fun LibraryScreen(
         }
     }
 
-    // Conversions and downloads report progress through notifications, and both
-    // outlive this screen. Asked for once on first open; declining only costs the
-    // notifications, not the transfers.
-    val notificationPermission = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { }
-    LaunchedEffect(Unit) {
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-            notificationPermission.launch(android.Manifest.permission.POST_NOTIFICATIONS)
-        }
-    }
-
     Scaffold(
         topBar = {
             TopAppBar(
@@ -107,6 +102,19 @@ fun LibraryScreen(
             )
         },
         snackbarHost = { SnackbarHost(snackbar) },
+        bottomBar = {
+            // Playback outlives the reader on purpose (PlaybackService keeps going
+            // in the background) -- this is what makes it visible again once its
+            // book is no longer on screen, and gives a way back into it.
+            nowPlaying?.let { book ->
+                NowPlayingBar(
+                    book = book,
+                    isPlaying = playerState.isPlaying,
+                    onClick = { onOpenBook(book.id) },
+                    onTogglePlayPause = viewModel::togglePlayPause,
+                )
+            }
+        },
         floatingActionButton = {
             ExtendedFloatingActionButton(
                 onClick = {
@@ -136,6 +144,8 @@ fun LibraryScreen(
                 items(books, key = { it.id }) { book ->
                     BookCard(
                         book = book,
+                        nowPlaying = book.id == playerState.bookId,
+                        isPlaying = playerState.isPlaying,
                         onClick = { if (book.isPlayable) onOpenBook(book.id) else onOpenDetail(book.id) },
                         onLongClick = { onOpenDetail(book.id) },
                     )
@@ -195,7 +205,13 @@ private fun EmptyLibrary(modifier: Modifier) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun BookCard(book: BookEntity, onClick: () -> Unit, onLongClick: () -> Unit) {
+private fun BookCard(
+    book: BookEntity,
+    nowPlaying: Boolean,
+    isPlaying: Boolean,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
+) {
     Card(
         Modifier
             .fillMaxWidth()
@@ -229,7 +245,7 @@ private fun BookCard(book: BookEntity, onClick: () -> Unit, onLongClick: () -> U
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    StageChip(book)
+                    StageChip(book, nowPlaying = nowPlaying, isPlaying = isPlaying)
                     if (book.stage() == BookStage.FAILED || book.stage() == BookStage.LOST) {
                         Text(
                             "Details",
@@ -268,8 +284,13 @@ private fun Cover(book: BookEntity, modifier: Modifier) {
 }
 
 @Composable
-private fun StageChip(book: BookEntity) {
-    val (label, tint) = when (book.stage()) {
+private fun StageChip(book: BookEntity, nowPlaying: Boolean, isPlaying: Boolean) {
+    // Takes over the ready-to-read chip's slot rather than adding a second badge:
+    // once a book is the one loaded in the player, "ready to read along" is no
+    // longer the most useful thing this card can say about it.
+    val (label, tint) = if (nowPlaying) {
+        (if (isPlaying) "Playing" else "Paused") to MaterialTheme.colorScheme.primary
+    } else when (book.stage()) {
         BookStage.LOCAL -> "On device only" to MaterialTheme.colorScheme.onSurfaceVariant
         BookStage.UPLOADING -> "Uploading" to MaterialTheme.colorScheme.primary
         BookStage.QUEUED -> "Queued on server" to MaterialTheme.colorScheme.primary
@@ -285,6 +306,15 @@ private fun StageChip(book: BookEntity) {
     AssistChip(
         onClick = {},
         enabled = false,
+        leadingIcon = if (nowPlaying) {
+            {
+                Icon(
+                    if (isPlaying) Icons.Filled.VolumeUp else Icons.Filled.Pause,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp),
+                )
+            }
+        } else null,
         label = { Text(label, style = MaterialTheme.typography.labelSmall, color = tint) },
     )
 }
@@ -306,6 +336,64 @@ private fun ProgressLine(book: BookEntity) {
                 .padding(top = 8.dp)
                 .height(3.dp),
         )
+    }
+}
+
+/**
+ * A persistent mini-player, so leaving the reader (playback keeps going in the
+ * background on purpose) does not mean losing track of what is playing or how
+ * to get back to it.
+ *
+ * `navigationBarsPadding()` is required here, not optional: Material3's
+ * `Scaffold` insets its content slot but places `bottomBar` flush against the
+ * bottom edge and leaves the bar to inset itself (BUGS.md, BUG-1 -- the same fix
+ * `ReadAlongBar` needed).
+ */
+@Composable
+private fun NowPlayingBar(
+    book: BookEntity,
+    isPlaying: Boolean,
+    onClick: () -> Unit,
+    onTogglePlayPause: () -> Unit,
+) {
+    Surface(
+        tonalElevation = 3.dp,
+        shadowElevation = 8.dp,
+        modifier = Modifier.fillMaxWidth().navigationBarsPadding(),
+    ) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onClick)
+                .padding(start = 12.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Cover(book, Modifier.size(width = 40.dp, height = 40.dp))
+            Column(
+                Modifier
+                    .padding(start = 12.dp)
+                    .weight(1f)
+            ) {
+                Text(
+                    book.title,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    if (isPlaying) "Playing" else "Paused",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            IconButton(onClick = onTogglePlayPause) {
+                Icon(
+                    if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                    contentDescription = if (isPlaying) "Pause" else "Play",
+                )
+            }
+        }
     }
 }
 

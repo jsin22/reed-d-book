@@ -146,6 +146,20 @@ What could not be removed: a heading's own top margin comes from the publication
 CSS, which is preserved deliberately — that is the point of rendering through Readium.
 The exception is the Paper theme, where publisher styles are already off.
 
+**Update, 2026-08-17.** This entry's `pageGutter`/**Margins** fix turned out to be
+treating a symptom, not the real cause. Readium's own stylesheet also caps the
+reading column at `--RS__maxLineLength: 40rem` and centers it (`margin: 0 auto`) —
+sized for a desktop browser window, not a phone, and left at Readium's default the
+whole time. Two visible effects: the text sat in a narrower, centered column with
+dead space either side instead of using the screen, and because the cap is in `rem`
+(relative to font size), turning the font down shrank the column by the same
+proportion instead of fitting more text — font size controlled blank margin, not
+density. Fixed by setting `maxLineLength` high enough to never bind on a phone or
+tablet (`RsProperties(maxLineLength = 100rem)`, ReaderScreen.kt), and the **Margins**
+slider is gone — `pageGutter` is now a fixed few pixels, not a user preference, since
+once the column stopped being artificially narrow there was nothing left worth
+tuning. See BUGS.md, BUG-12.
+
 ### E-5 — Show where you are in the book
 
 *2026-08-12.* A muted `24 / 312` at the bottom centre of the page, over the text

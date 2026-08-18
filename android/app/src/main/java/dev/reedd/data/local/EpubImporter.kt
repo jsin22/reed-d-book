@@ -17,19 +17,24 @@ import java.util.UUID
 class ImportError(message: String, cause: Throwable? = null) : Exception(message, cause)
 
 /**
- * Turns a file the user picked into a row in the library.
+ * Turns an epub into a row in the library, however it arrived: [import] for one
+ * the user picked, [fromServerCopy] for one adopted from the server's own
+ * accumulated library. Three steps, in this order for a reason:
  *
- * Three steps, in this order for a reason:
- *
- *  1. **Copy first.** A `content://` URI from the picker is only valid for as
- *     long as the permission grant lasts, so nothing else can depend on it.
+ *  1. **Get the bytes in place first.** [import]'s `content://` URI is only
+ *     valid for as long as the permission grant lasts, so nothing else can
+ *     depend on it; [fromServerCopy]'s caller has already downloaded the file
+ *     for the same reason a picker grant cannot be trusted to outlive a
+ *     background worker.
  *  2. **Validate cheaply.** An epub is a zip; checking the four magic bytes
  *     rejects a mis-picked PDF before Readium spins up a parser. This mirrors
  *     the server's own `looks_like_epub` check, so the app fails at import
  *     rather than after a pointless upload.
  *  3. **Read metadata.** Title, author and cover come from Readium, which is
  *     also what will render the book, so the library and the reader can never
- *     disagree about what the book is called.
+ *     disagree about what the book is called -- and an adopted book looks
+ *     exactly like one imported locally, regardless of which device it was
+ *     first converted on.
  */
 class EpubImporter(
     context: Context,
@@ -44,15 +49,33 @@ class EpubImporter(
         if (!displayName.lowercase().endsWith(".epub")) {
             throw ImportError("$displayName is not an .epub")
         }
+        buildEntity(bookId, displayName) { copy(uri, files.epub(bookId)) }
+    }
 
+    /**
+     * A book whose epub arrived from the server rather than the picker -- one
+     * this device is adopting from the server's own accumulated library (see
+     * `domain/ServerLibraryAdopter.kt`). The file must already be at
+     * [BookFiles.epub] for [bookId], e.g. just downloaded there. Shares
+     * validation and metadata extraction with [import] so a book looks the same
+     * in the library regardless of which device originally converted it.
+     */
+    suspend fun fromServerCopy(bookId: String, displayName: String): BookEntity =
+        withContext(Dispatchers.IO) { buildEntity(bookId, displayName) {} }
+
+    private suspend fun buildEntity(
+        bookId: String,
+        displayName: String,
+        place: suspend () -> Unit,
+    ): BookEntity {
         val target = files.epub(bookId)
         try {
-            copy(uri, target)
+            place()
             if (!looksLikeZip(target)) {
                 throw ImportError("$displayName is not a valid epub (not a zip archive)")
             }
             val details = readDetails(bookId, target)
-            BookEntity(
+            return BookEntity(
                 id = bookId,
                 epubPath = target.absolutePath,
                 originalFilename = displayName,
