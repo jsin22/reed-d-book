@@ -38,6 +38,7 @@ class Settings:
     max_upload_bytes: int
     keep_intermediate: bool
     api_token: str
+    conversion_workers: int | None
 
     @property
     def jobs_dir(self) -> Path:
@@ -72,6 +73,10 @@ def load_settings() -> Settings:
         # Empty means no auth: fine on a trusted home network, but this server
         # binds to a LAN interface, so a shared secret is one env var away.
         api_token=_env('API_TOKEN', ''),
+        # None means audiblez picks its own default (roughly half the CPUs, see
+        # audiblez.core.resolve_worker_count) -- unset unless a run has shown a
+        # different number works better for this machine's RAM/thermals.
+        conversion_workers=int(_env('CONVERSION_WORKERS')) if _env('CONVERSION_WORKERS') else None,
     )
 
 

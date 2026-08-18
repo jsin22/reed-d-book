@@ -7,6 +7,7 @@ import os
 import traceback
 from glob import glob
 
+import billiard.pool
 import torch.cuda
 import spacy
 import ebooklib
@@ -79,7 +80,8 @@ def set_espeak_library():
 
 
 def main(file_path, voice, pick_manually, speed, output_folder='.',
-         max_chapters=None, max_sentences=None, selected_chapters=None, post_event=None):
+         max_chapters=None, max_sentences=None, selected_chapters=None, post_event=None,
+         workers=None):
     if post_event: post_event('CORE_STARTED')
     load_spacy()
     if output_folder != '.':
@@ -123,12 +125,17 @@ def main(file_path, voice, pick_manually, speed, output_folder='.',
     eta = strfdelta((stats.total_chars - stats.processed_chars) / stats.chars_per_sec)
     print(f'Estimated time remaining (assuming {stats.chars_per_sec} chars/sec): {eta}')
     set_espeak_library()
-    pipeline = KPipeline(lang_code=voice[0])  # a for american or b for british etc.
 
     # Tracks where every sentence lands in the final audio, for read-along sync.
     timeline = sync.SyncTimeline(sample_rate)
 
+    # First pass, sequential and cheap: resolve which chapters are already done
+    # (and can be spliced in from their cache, same as any resumed run) versus
+    # which actually need synthesizing. Deciding this up front, before picking
+    # a pipeline or a worker count, is what lets that decision skip chapters
+    # that need no work at all.
     chapter_wav_files = []
+    to_synthesize = []  # (i, chapter, text, chapter_wav_path)
     for i, chapter in enumerate(selected_chapters, start=1):
         if max_chapters and i > max_chapters: break
         text = chapter.extracted_text
@@ -149,6 +156,158 @@ def main(file_path, voice, pick_manually, speed, output_folder='.',
         if i == 1:
             # add intro text
             text = f'{title} – {creator}.\n\n' + text
+        to_synthesize.append((i, chapter, text, chapter_wav_path))
+
+    worker_count = resolve_worker_count(workers, len(to_synthesize))
+    if worker_count > 1:
+        _run_chapters_parallel(to_synthesize, voice, speed, max_sentences, worker_count,
+                                stats, post_event, timeline, chapter_wav_files)
+    else:
+        pipeline = KPipeline(lang_code=voice[0])  # a for american or b for british etc.
+        _run_chapters_sequential(pipeline, to_synthesize, voice, speed, max_sentences,
+                                  stats, post_event, timeline, chapter_wav_files)
+
+    sync_path = Path(output_folder) / filename.replace(extension, '.json')
+    sync.write_sync_file(
+        sync_path, timeline, title=title, author=creator,
+        audio_file=filename.replace(extension, '.m4b'))
+    print(f'Sync mapping written to {sync_path} ({len(timeline.chunks)} chunks, '
+          f'{timeline.current_time:.1f}s)')
+
+    if has_ffmpeg:
+        create_index_file(title, creator, chapter_wav_files, output_folder)
+        create_m4b(chapter_wav_files, filename, cover_image, output_folder)
+        if post_event: post_event('CORE_FINISHED')
+
+
+def resolve_worker_count(workers, num_chapters):
+    """How many chapters to synthesize at once.
+
+    Multiple *processes*, not threads: a chapter crosses spaCy, the
+    espeak/phonemizer backend and torch, and process-level parallelism is what
+    reliably keeps every core busy across all of that, not just whichever part
+    happens to release the GIL.
+
+    Skipped (returns 1) on a CUDA/ROCm GPU: a single accelerator does not
+    parallelize across processes the way independent CPU cores do, and several
+    processes fighting over one GPU's VRAM more easily hurts than helps.
+    Sequential-but-GPU-accelerated is already the fast path there.
+    """
+    if torch.cuda.is_available():
+        return 1
+    if workers is None:
+        cpu = os.cpu_count() or 1
+        # Each worker process holds its own copy of the Kokoro model plus
+        # spaCy in memory -- measured at ~1.8GB RSS per process on the
+        # reference machine (a 12-core/24-thread Ryzen AI handheld with 22GB
+        # RAM) once loaded. Half the logical CPUs, capped at 6, is a starting
+        # point that leaves room for the rest of the stack (Celery, Redis,
+        # the API) rather than the number that would purely maximize CPU use;
+        # override with an explicit `workers` (server: REEDD_CONVERSION_WORKERS)
+        # once you've watched `free -h` and temperatures during a real run.
+        workers = max(1, min(cpu // 2, 6))
+    return max(1, min(workers, num_chapters))
+
+
+# Set once per worker process by _init_chapter_worker, not passed as an argument:
+# a KPipeline is not (and does not need to be) picklable across the process
+# boundary that Pool tasks cross.
+_worker_pipeline = None
+
+
+def _init_chapter_worker(voice, threads):
+    """Runs once per worker process, before it picks up its first chapter."""
+    global _worker_pipeline
+    torch.set_num_threads(max(1, threads))
+    set_espeak_library()
+    _worker_pipeline = KPipeline(lang_code=voice[0])
+
+
+def _synthesize_chapter_worker(args):
+    """Runs in a worker process: synthesize one whole chapter and write its
+    .wav and sync cache to disk, exactly as a sequential run would.
+
+    Only a small summary crosses back to the main process -- the audio itself
+    never does, which is what keeps this cheap even for a long chapter. The
+    main process picks the result back up via the same cache file a resumed
+    run already reads (`reuse_chapter_sync`), so nothing about how a chapter's
+    files reach the timeline needs to know they came from another process.
+    """
+    index, text, voice, speed, chapter_wav_path, max_sentences = args
+    local_timeline = sync.SyncTimeline(sample_rate)
+    local_timeline.begin_chapter(index)
+    audio_segments = gen_audio_segments(
+        _worker_pipeline, text, voice, speed, max_sentences=max_sentences, timeline=local_timeline)
+    if not audio_segments:
+        return {'index': index, 'ok': False}
+    final_audio = np.concatenate(audio_segments)
+    soundfile.write(chapter_wav_path, final_audio, sample_rate)
+    _, relative_chunks = local_timeline.end_chapter()
+    sync.save_chapter_sync(chapter_wav_path, len(final_audio) / sample_rate, relative_chunks)
+    return {'index': index, 'ok': True, 'chars': len(text)}
+
+
+def _run_chapters_parallel(to_synthesize, voice, speed, max_sentences, workers,
+                            stats, post_event, timeline, chapter_wav_files):
+    """Fans chapters out across a process pool.
+
+    Uses `billiard` (Celery's own maintained fork of `multiprocessing`, and
+    already a Celery dependency) rather than stdlib `multiprocessing` /
+    `concurrent.futures.ProcessPoolExecutor`. When this runs inside a Celery
+    worker (`--pool=prefork`, the reedd server's setup), the task-executing
+    process is itself a *daemonic* child process, and stdlib multiprocessing
+    refuses to let a daemonic process spawn children of its own
+    ("daemonic processes are not allowed to have children") -- confirmed by
+    hitting exactly that AssertionError through the real worker queue. billiard
+    keeps its own separate process bookkeeping, precisely so Celery's own
+    internals (and code that runs inside a Celery worker, like this) can do
+    this without hitting that restriction.
+    """
+    print(f'Synthesizing {len(to_synthesize)} chapters across {workers} worker processes')
+    threads_per_worker = max(1, (os.cpu_count() or workers) // workers)
+    args_list = [
+        (i, text, voice, speed, str(chapter_wav_path), max_sentences)
+        for i, _chapter, text, chapter_wav_path in to_synthesize
+    ]
+    # stats.chars_per_sec starts out as a single-process guess (main()'s 50
+    # chars/sec on CPU) and is never revised by the sequential path either, but
+    # here that guess is off by roughly `workers`x once real throughput exists
+    # to replace it with -- otherwise the ETA this reports would stay several
+    # times too pessimistic for the whole run, undoing exactly what
+    # parallelizing was for.
+    start_time = time.time()
+    with billiard.pool.Pool(
+        processes=workers, initializer=_init_chapter_worker, initargs=(voice, threads_per_worker),
+    ) as pool:
+        # pool.imap() yields results in the order args_list was given, not
+        # completion order -- every worker keeps running in the background
+        # regardless of which result we are waiting on. That is what lets the
+        # timeline (and the final .m4b's chapter order) be assembled strictly
+        # in chapter order with no extra bookkeeping here, whichever chapter
+        # actually finishes first.
+        results = pool.imap(_synthesize_chapter_worker, args_list)
+        for (i, chapter, text, chapter_wav_path), result in zip(to_synthesize, results):
+            if not result['ok']:
+                print(f'Warning: No audio generated for chapter {i}')
+                chapter_wav_files.remove(chapter_wav_path)
+                continue
+            stats.processed_chars += result['chars']
+            stats.progress = stats.processed_chars * 100 // stats.total_chars
+            elapsed = time.time() - start_time
+            if elapsed > 0:
+                stats.chars_per_sec = stats.processed_chars / elapsed
+            stats.eta = strfdelta((stats.total_chars - stats.processed_chars) / stats.chars_per_sec)
+            if post_event:
+                post_event('CORE_PROGRESS', stats=stats)
+            print('Chapter written to', chapter_wav_path)
+            reuse_chapter_sync(timeline, chapter_wav_path, i, chapter, text)
+            if post_event:
+                post_event('CORE_CHAPTER_FINISHED', chapter_index=chapter.chapter_index)
+
+
+def _run_chapters_sequential(pipeline, to_synthesize, voice, speed, max_sentences,
+                              stats, post_event, timeline, chapter_wav_files):
+    for i, chapter, text, chapter_wav_path in to_synthesize:
         start_time = time.time()
         if post_event: post_event('CORE_CHAPTER_STARTED', chapter_index=chapter.chapter_index)
         timeline.begin_chapter(i, title=f'Chapter {i}', source=chapter.get_name())
@@ -170,18 +329,6 @@ def main(file_path, voice, pick_manually, speed, output_folder='.',
             print(f'Warning: No audio generated for chapter {i}')
             timeline.end_chapter()
             chapter_wav_files.remove(chapter_wav_path)
-
-    sync_path = Path(output_folder) / filename.replace(extension, '.json')
-    sync.write_sync_file(
-        sync_path, timeline, title=title, author=creator,
-        audio_file=filename.replace(extension, '.m4b'))
-    print(f'Sync mapping written to {sync_path} ({len(timeline.chunks)} chunks, '
-          f'{timeline.current_time:.1f}s)')
-
-    if has_ffmpeg:
-        create_index_file(title, creator, chapter_wav_files, output_folder)
-        create_m4b(chapter_wav_files, filename, cover_image, output_folder)
-        if post_event: post_event('CORE_FINISHED')
 
 
 def wav_duration(path):

@@ -95,6 +95,7 @@ Everything has a working default; override with environment variables.
 | `REEDD_MAX_UPLOAD_BYTES` | `209715200` (200 MB) | |
 | `REEDD_KEEP_INTERMEDIATE` | `0` | keep the per-chapter `.wav` files |
 | `REEDD_API_TOKEN` | *(empty: no auth)* | if set, requests need `Authorization: Bearer <token>` |
+| `REEDD_CONVERSION_WORKERS` | *(auto)* | chapters to synthesize concurrently on CPU, see below |
 
 ## How it hangs together
 
@@ -121,6 +122,34 @@ per-chapter `.wav` files are deleted once the `.m4b` exists — they are roughly
 resume-from-`.wav` behaviour, which is the right trade for a one-shot job; set
 `REEDD_KEEP_INTERMEDIATE=1` while debugging.
 
+**Chapters synthesize in parallel on CPU.** A book's chapters are independent
+work, and `audiblez.core` (`resolve_worker_count`, `_run_chapters_parallel`)
+fans them out across several worker processes instead of the one-chapter-at-a-
+time loop audiblez ships with upstream. GPU acceleration (ROCm, for the Pocket
+4's integrated Radeon 890M) was also evaluated and, once actually working,
+measured no faster than a single CPU process on this hardware -- MIOpen's
+kernel support for this specific, very new GPU architecture just isn't mature
+enough yet. CPU parallelism is the one that actually pays off here. Each
+worker writes its chapter's `.wav` and sync cache straight to disk and only a
+tiny summary crosses back to the main process, so results splice into the
+final timeline through the exact same cache-reading code path a resumed run
+already uses -- parallel and sequential runs produce identical output.
+Automatically skipped (falls back to one process) whenever
+`torch.cuda.is_available()` is true, since a single accelerator does not
+benefit from being asked for by several processes at once.
+
+The default (`REEDD_CONVERSION_WORKERS` unset) is roughly half the logical
+CPUs, capped at 6 — deliberately short of "as many as there are cores": each
+worker holds its own copy of the Kokoro model and spaCy in memory (~1.8GB RSS
+measured on the reference Pocket 4), and this runs on a handheld with a lot
+less RAM and thermal headroom than a desktop. This is a starting point, not a
+measured optimum for your machine — raise or lower it once you've watched
+`free -h` and temperatures during a real conversion. This is orthogonal to
+Celery's own `--concurrency=1` above, which limits how many *jobs* run at
+once, not how many chapters one job uses at a time; keep `--concurrency=1`
+regardless, since two conversions each trying to fan out across the same CPUs
+would only fight each other.
+
 **Accumulating a library.** A finished job is a complete, standalone record of
 one conversion — the epub that went in, the audiobook and sync file that came
 out — and nothing here deletes it on its own. `GET /api/jobs` is therefore also
@@ -138,6 +167,18 @@ does with a job once it exists.
 - **A worker killed mid-job leaves the manifest at `running` forever.** Celery's
   `acks_late` would re-run it instead, but a job that crashes deterministically
   would then loop, and a conversion is expensive. `DELETE` the job and re-upload.
+- **Deleting/cancelling a job mid-conversion does not stop its chapter workers.**
+  `DELETE /api/jobs/{id}` revokes the Celery task with `terminate=True`, which
+  signals the worker process actually running it — but once that task has
+  handed chapters off to its own `billiard.pool.Pool` (parallel CPU synthesis,
+  see "Chapters synthesize in parallel" above), the signal has been observed
+  not to reach, or not to stop, those child processes. They keep running to
+  completion — full CPU each — with nothing left tracking them, since the job
+  they belong to is already gone from disk. Confirmed by hand once; not yet
+  root-caused (unclear whether the signal isn't reaching the pool workers at
+  all, or is being caught/ignored) or fixed. If a cancelled conversion seems to
+  leave the machine still under load, `ps -ef | grep celery` and kill any
+  leftover children by hand; restarting the Celery worker also clears them.
 - **No automatic disk reclamation.** Finished jobs accumulate on disk
   indefinitely by design now (see "Accumulating a library" above) — the app's
   "free server disk after downloading" setting defaults to off. Nothing sweeps

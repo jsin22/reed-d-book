@@ -153,6 +153,7 @@ def convert_epub(self, job_id):
                 manifest['speed'],
                 output_folder=str(output_dir),
                 post_event=progress,
+                workers=get_settings().conversion_workers,
             )
     except Exception:
         _fail(store, job_id, traceback.format_exc())

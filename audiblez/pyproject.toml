@@ -18,6 +18,17 @@ dependencies = [
     "tabulate (>=0.9.0,<0.10.0)",
     "epub-toc (>=1.0.0,<2.0.0)",
     "qwen-tts (>=0.1.1,<0.2.0)",
+    # Multiprocessing for parallel chapter synthesis (core.py's
+    # resolve_worker_count / _run_chapters_parallel). Not stdlib
+    # multiprocessing: the reedd server runs this from inside a Celery
+    # prefork worker, whose task-executing child is itself a daemonic
+    # process, and stdlib forbids a daemonic process from having children of
+    # its own ("daemonic processes are not allowed to have children").
+    # billiard -- Celery's own maintained fork of multiprocessing, and
+    # already a dependency of Celery itself -- keeps separate bookkeeping
+    # that does not hit that restriction, precisely because it exists to let
+    # Celery's own internals do exactly this.
+    "billiard (>=4.2.0,<5.0.0)",
 ]
 exclude = [
     "imgs",
