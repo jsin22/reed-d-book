@@ -33,6 +33,7 @@ class Settings:
     data_dir: Path
     broker_url: str
     result_backend: str
+    default_engine: str
     default_voice: str
     default_speed: float
     max_upload_bytes: int
@@ -62,6 +63,7 @@ def load_settings() -> Settings:
         data_dir=Path(_env('DATA_DIR', str(here / 'data'))).expanduser(),
         broker_url=_env('BROKER_URL', f'{DEFAULT_REDIS}/0'),
         result_backend=_env('RESULT_BACKEND', f'{DEFAULT_REDIS}/1'),
+        default_engine=_env('DEFAULT_ENGINE', 'kokoro'),
         default_voice=_env('DEFAULT_VOICE', 'af_heart'),
         default_speed=float(_env('DEFAULT_SPEED', '1.0')),
         # Epubs are text; 200 MB is already absurdly generous and stops a bad

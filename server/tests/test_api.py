@@ -60,6 +60,7 @@ class UploadTest(ApiTestCase):
 
     def test_defaults_come_from_settings(self):
         body = self.upload().json()
+        self.assertEqual(body['engine'], self.settings.default_engine)
         self.assertEqual(body['voice'], self.settings.default_voice)
         self.assertEqual(body['speed'], self.settings.default_speed)
 
@@ -99,6 +100,80 @@ class UploadLimitTest(ApiTestCase):
         response = self.upload(content=epub_bytes(body=b'x' * 5000))
         self.assertEqual(response.status_code, 413)
         self.assertEqual(self.store.list(), [])
+
+
+class EngineTest(ApiTestCase):
+    def test_pocket_tts_gets_its_own_default_voice_not_kokoros(self):
+        body = self.upload(engine='pocket_tts').json()
+        self.assertEqual(body['engine'], 'pocket_tts')
+        self.assertEqual(body['voice'], 'alba')
+
+    def test_accepts_an_explicit_pocket_tts_voice(self):
+        body = self.upload(engine='pocket_tts', voice='giovanni').json()
+        self.assertEqual(body['voice'], 'giovanni')
+
+    def test_rejects_a_kokoro_voice_for_pocket_tts(self):
+        response = self.upload(engine='pocket_tts', voice='af_heart')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('voice', response.json()['detail'])
+
+    def test_rejects_a_pocket_tts_voice_for_kokoro(self):
+        response = self.upload(engine='kokoro', voice='alba')
+        self.assertEqual(response.status_code, 400)
+
+    def test_rejects_an_unknown_engine(self):
+        response = self.upload(engine='not_an_engine')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('engine', response.json()['detail'])
+
+    def test_voices_endpoint_defaults_to_kokoro(self):
+        body = self.client.get('/api/voices').json()
+        self.assertEqual(body['engine'], 'kokoro')
+        self.assertEqual(body['default'], self.settings.default_voice)
+        self.assertIn('af_heart', body['voices'])
+
+    def test_voices_endpoint_accepts_an_engine(self):
+        body = self.client.get('/api/voices', params={'engine': 'pocket_tts'}).json()
+        self.assertEqual(body['engine'], 'pocket_tts')
+        self.assertEqual(body['default'], 'alba')
+        self.assertIn('alba', body['voices'])
+        self.assertNotIn('af_heart', body['voices'])
+
+    def test_voices_endpoint_rejects_an_unknown_engine(self):
+        response = self.client.get('/api/voices', params={'engine': 'not_an_engine'})
+        self.assertEqual(response.status_code, 400)
+
+    def test_supertonic_gets_its_own_default_voice(self):
+        body = self.upload(engine='supertonic').json()
+        self.assertEqual(body['engine'], 'supertonic')
+        self.assertEqual(body['voice'], 'M1')
+
+    def test_accepts_an_explicit_supertonic_voice(self):
+        body = self.upload(engine='supertonic', voice='F3').json()
+        self.assertEqual(body['voice'], 'F3')
+
+    def test_rejects_a_kokoro_voice_for_supertonic(self):
+        response = self.upload(engine='supertonic', voice='af_heart')
+        self.assertEqual(response.status_code, 400)
+
+    def test_engine_voice_catalogs_are_kept_separate(self):
+        # Regression check specifically for cross-engine name collisions --
+        # each engine's job used its own catalog, not one shared list.
+        self.assertEqual(self.upload(engine='kokoro', voice='alba').status_code, 400)
+        self.assertEqual(self.upload(engine='pocket_tts', voice='M1').status_code, 400)
+        self.assertEqual(self.upload(engine='supertonic', voice='alba').status_code, 400)
+
+    def test_engines_endpoint_lists_every_engine_with_its_own_voices_and_default(self):
+        body = self.client.get('/api/engines').json()
+        self.assertEqual(body['default'], self.settings.default_engine)
+        by_id = {e['id']: e for e in body['engines']}
+        self.assertEqual(set(by_id), {'kokoro', 'pocket_tts', 'supertonic'})
+        self.assertEqual(by_id['kokoro']['default_voice'], self.settings.default_voice)
+        self.assertIn('af_heart', by_id['kokoro']['voices'])
+        self.assertEqual(by_id['pocket_tts']['default_voice'], 'alba')
+        self.assertIn('alba', by_id['pocket_tts']['voices'])
+        self.assertEqual(by_id['supertonic']['default_voice'], 'M1')
+        self.assertIn('M1', by_id['supertonic']['voices'])
 
 
 class PollTest(ApiTestCase):

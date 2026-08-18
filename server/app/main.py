@@ -12,7 +12,8 @@ The contract the Android app codes against:
     DELETE /api/jobs/{job_id}           cancel and/or reclaim the disk
     GET    /api/jobs                    every job, newest first -- doubles as the
                                          library listing; see README.md
-    GET    /api/voices                  Kokoro voices, for a picker
+    GET    /api/voices                  voices for one engine (default kokoro), for a picker
+    GET    /api/engines                 every engine and its voices, for a two-level picker
     GET    /api/health
 
 Upload returns as soon as the file is on disk; the conversion happens in a
@@ -26,7 +27,8 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, PlainTextResponse
 
-from .audiblez_meta import MAX_SPEED, MIN_SPEED, known_voices
+from .audiblez_meta import (DEFAULT_VOICE_BY_ENGINE, ENGINES, MAX_SPEED, MIN_SPEED,
+                            known_voices)
 from .celery_app import enqueue, revoke
 from .config import get_settings
 from .store import (DONE, TERMINAL_STATUSES, JobNotFound, JobStore, UploadTooLarge,
@@ -66,14 +68,41 @@ def health():
 
 
 @app.get('/api/voices')
-def voices():
-    return {'voices': known_voices(), 'default': get_settings().default_voice}
+def voices(engine: str | None = None):
+    """Voices for one engine. Defaults to the server's default engine (kokoro
+    unless REEDD_DEFAULT_ENGINE says otherwise) if `engine` is not given, which
+    keeps this endpoint's existing contract for a client that has not been
+    updated to know engines exist at all.
+    """
+    engine = engine or get_settings().default_engine
+    if engine not in ENGINES:
+        raise HTTPException(status_code=400, detail=f'unknown engine: {engine}')
+    default_voice = get_settings().default_voice if engine == 'kokoro' else DEFAULT_VOICE_BY_ENGINE.get(engine)
+    return {'voices': known_voices(engine), 'default': default_voice, 'engine': engine}
+
+
+@app.get('/api/engines')
+def engines():
+    """Every engine and its voices, for a two-level (engine, then voice) picker."""
+    settings = get_settings()
+    return {
+        'engines': [
+            {
+                'id': e,
+                'voices': known_voices(e),
+                'default_voice': settings.default_voice if e == 'kokoro' else DEFAULT_VOICE_BY_ENGINE.get(e),
+            }
+            for e in ENGINES
+        ],
+        'default': settings.default_engine,
+    }
 
 
 @app.post('/api/jobs', status_code=202, dependencies=[Depends(require_token)])
 def create_job(file: UploadFile = File(...),
                voice: str = Form(default=None),
-               speed: float = Form(default=None)):
+               speed: float = Form(default=None),
+               engine: str = Form(default=None)):
     """Accept an .epub and queue it. Returns immediately with the job's id.
 
     Deliberately synchronous (`def`, not `async def`) so Starlette runs it in a
@@ -81,12 +110,16 @@ def create_job(file: UploadFile = File(...),
     a 200 MB book must not stall the event loop.
     """
     settings = get_settings()
-    voice = voice or settings.default_voice
+    engine = engine or settings.default_engine
+    if engine not in ENGINES:
+        raise HTTPException(status_code=400, detail=f'unknown engine: {engine}')
+    if voice is None:
+        voice = settings.default_voice if engine == 'kokoro' else DEFAULT_VOICE_BY_ENGINE.get(engine)
     speed = settings.default_speed if speed is None else speed
 
-    valid = known_voices()
+    valid = known_voices(engine)
     if valid and voice not in valid:
-        raise HTTPException(status_code=400, detail=f'unknown voice: {voice}')
+        raise HTTPException(status_code=400, detail=f'unknown voice for engine {engine}: {voice}')
     if not MIN_SPEED <= speed <= MAX_SPEED:
         raise HTTPException(status_code=400,
                             detail=f'speed must be between {MIN_SPEED} and {MAX_SPEED}')
@@ -94,7 +127,7 @@ def create_job(file: UploadFile = File(...),
         raise HTTPException(status_code=400, detail='expected a .epub file')
 
     jobs = store()
-    manifest = jobs.create(file.filename, voice, speed)
+    manifest = jobs.create(file.filename, voice, speed, engine)
     job_id = manifest['job_id']
     try:
         jobs.save_upload(job_id, file.file, settings.max_upload_bytes)

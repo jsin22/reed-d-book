@@ -29,6 +29,17 @@ dependencies = [
     # that does not hit that restriction, precisely because it exists to let
     # Celery's own internals do exactly this.
     "billiard (>=4.2.0,<5.0.0)",
+    # Second TTS backend (audiblez.engines.PocketTTSEngine), alongside Kokoro.
+    # Kyutai's Pocket TTS: ~100M params, built for CPU inference specifically,
+    # rather than being a GPU model that happens to also run on CPU. Measured
+    # faster than Kokoro on this project's own reference CPU.
+    "pocket-tts[audio] (>=2.1.0,<3.0.0)",
+    # Third TTS backend (audiblez.engines.SupertonicEngine). Supertone's
+    # Supertonic 3: ~99M params, ONNX Runtime rather than PyTorch, genuinely
+    # supports a speed parameter (Pocket TTS does not). Note its audio comes
+    # back at 44100Hz, not the 24000Hz Kokoro and Pocket TTS both use --
+    # see audiblez.engines.engine_sample_rate.
+    "supertonic (>=1.3.0,<2.0.0)",
 ]
 exclude = [
     "imgs",

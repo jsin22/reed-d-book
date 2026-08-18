@@ -19,7 +19,7 @@ Android app ──POST /api/jobs──▶ FastAPI ──▶ Redis ──▶ Cele
 
 | | |
 |---|---|
-| `POST /api/jobs` | multipart: `file` (the .epub), optional `voice`, `speed`. `202` with the job. |
+| `POST /api/jobs` | multipart: `file` (the .epub), optional `engine`, `voice`, `speed`. `202` with the job. |
 | `GET /api/jobs/{id}` | poll: `status`, `progress` (0-100), `eta`, `chapters_done`, `error`. |
 | `GET /api/jobs/{id}/audiobook` | the `.m4b`. Supports `Range`, so an interrupted download resumes. |
 | `GET /api/jobs/{id}/sync` | the timing `.json`. |
@@ -27,7 +27,8 @@ Android app ──POST /api/jobs──▶ FastAPI ──▶ Redis ──▶ Cele
 | `GET /api/jobs/{id}/log` | audiblez' output for this job, ffmpeg included. |
 | `DELETE /api/jobs/{id}` | cancels if running, then deletes the job's files. |
 | `GET /api/jobs` | every job, newest first. |
-| `GET /api/voices` | the Kokoro voices audiblez accepts. |
+| `GET /api/voices` | voices for one engine (`?engine=`, default the server's default engine). |
+| `GET /api/engines` | every engine and its own voices/default, for a two-level picker. |
 | `GET /api/health` | liveness; never requires the token, so the app can find the server. |
 
 `status` is one of `queued`, `running`, `done`, `error`. Interactive docs are at
@@ -90,7 +91,8 @@ Everything has a working default; override with environment variables.
 | `REEDD_DATA_DIR` | `server/data` | where uploads and output live |
 | `REEDD_BROKER_URL` | `redis://127.0.0.1:6379/0` | |
 | `REEDD_RESULT_BACKEND` | `redis://127.0.0.1:6379/1` | |
-| `REEDD_DEFAULT_VOICE` | `af_heart` | used when the app doesn't ask for one |
+| `REEDD_DEFAULT_ENGINE` | `kokoro` | used when the app doesn't ask for one, see below |
+| `REEDD_DEFAULT_VOICE` | `af_heart` | Kokoro's default; Pocket TTS's is fixed at `alba`, see below |
 | `REEDD_DEFAULT_SPEED` | `1.0` | |
 | `REEDD_MAX_UPLOAD_BYTES` | `209715200` (200 MB) | |
 | `REEDD_KEEP_INTERMEDIATE` | `0` | keep the per-chapter `.wav` files |
@@ -107,9 +109,51 @@ later, after being closed and reopened (Phase 3). Celery stays the queue; it
 just isn't asked to remember anything. The worker rewrites the manifest
 atomically as it goes, so a poll never reads a half-written file.
 
-**The web process never imports torch or kokoro.** It dispatches by task name
-with `send_task`, which keeps uvicorn's startup instant and its memory small,
-and lets the whole API be tested without the TTS stack installed.
+**The web process never imports torch, kokoro, or pocket_tts.** It dispatches
+by task name with `send_task`, which keeps uvicorn's startup instant and its
+memory small, and lets the whole API be tested without the TTS stack
+installed. It does need to know each engine's *voice names* to validate a
+request, which is why those live in their own plain-data modules
+(`audiblez.voices`, `audiblez.pocket_tts_voices`) that import nothing heavier
+than the stdlib -- `server/app/audiblez_meta.py` reads those directly, never
+`audiblez.engines` itself, so a future engine's module accidentally importing
+torch at its own top level cannot silently break that separation.
+
+**Three TTS engines, chosen per job.** `audiblez.engines.TTSEngine` is a small
+interface (`sample_rate`, `synthesize(text, voice, speed)`) that `KokoroEngine`,
+`PocketTTSEngine` and `SupertonicEngine` all implement; `core.py`'s chapter
+loop (sequential or the parallel pool) calls it without knowing which backend
+is underneath. `POST /api/jobs`'s `engine` field selects one (default
+`REEDD_DEFAULT_ENGINE`/`kokoro`); `voice` is validated against that engine's
+own catalog, not the others' -- a Kokoro voice like `af_heart` is rejected for
+a Pocket TTS or Supertonic job, and so on. All three were evaluated after
+Kokoro's narration was reported as handling context and non-speech sounds
+(interjections like "mmmhmmm") poorly:
+
+- [Chatterbox](https://github.com/resemble-ai/chatterbox) (standard/Turbo/Nano,
+  all rejected on either quality or speed) measured 2-25x *slower* than
+  Kokoro's already-established CPU-parallel baseline on this hardware.
+- [Pocket TTS](https://github.com/kyutai-labs/pocket-tts) (~100M params) --
+  built for CPU inference specifically, not a GPU model that happens to also
+  run on CPU -- measured faster than Kokoro single-process. `speed` has no
+  effect on its output (the backend has no speed control) -- accepted for
+  API/manifest consistency, silently ignored.
+- [Supertonic 3](https://github.com/supertone-inc/supertonic) (~99M params,
+  ONNX Runtime rather than PyTorch) also measured faster than Kokoro
+  single-process, and unlike Pocket TTS its `speed` parameter is genuinely
+  honored.
+
+All three share the same chapter-parallelism path (`REEDD_CONVERSION_WORKERS`,
+see below) and the same `.wav`/sync-cache shape, so nothing about chapter
+caching, resuming, or the sync timeline's *structure* needed to change to add
+a second or third engine. Their sample rates are not all the same, though --
+Kokoro and Pocket TTS both happen to use 24000Hz, Supertonic uses 44100Hz --
+and that is a genuine, easy-to-miss trap: the sync timeline's own rate has to
+be resolved from whichever engine a job actually selected
+(`audiblez.engines.engine_sample_rate`), not assumed, or every timestamp in
+that book's sync file comes out wrong by the ratio between the two rates.
+Caught by hand while wiring Supertonic in, not by inspection -- worth knowing
+if a fourth engine ever gets added.
 
 **Progress comes from audiblez' existing `post_event` hook** (`CORE_PROGRESS`
 carries a percentage and an ETA, `CORE_CHAPTER_FINISHED` a chapter count). It

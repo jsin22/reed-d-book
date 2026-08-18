@@ -4,8 +4,6 @@
 # Kokoro-82M model for high-quality text-to-speech synthesis.
 # by Claudio Santini 2025 - https://claudio.uk
 import os
-import traceback
-from glob import glob
 
 import billiard.pool
 import torch.cuda
@@ -24,11 +22,11 @@ from tabulate import tabulate
 from pathlib import Path
 from string import Formatter
 from bs4 import BeautifulSoup
-from kokoro import KPipeline
 from ebooklib import epub
 from pick import pick
 
 from audiblez import sync
+from audiblez.engines import DEFAULT_ENGINE, engine_sample_rate, load_engine
 
 sample_rate = 24000
 
@@ -39,49 +37,9 @@ def load_spacy():
         spacy.cli.download("xx_ent_wiki_sm")
 
 
-def set_espeak_library():
-    """Find the espeak library path"""
-    try:
-
-        if os.environ.get('ESPEAK_LIBRARY'):
-            library = os.environ['ESPEAK_LIBRARY']
-        elif platform.system() == 'Darwin':
-            from subprocess import check_output
-            try:
-                cellar = Path(check_output(["brew", "--cellar"], text=True).strip())
-                pattern = cellar / "espeak-ng" / "*" / "lib" / "*.dylib"
-                if not (library := next(iter(glob(str(pattern))), None)):
-                    raise RuntimeError("No espeak-ng library found; please set the path manually")
-            except (subprocess.CalledProcessError, FileNotFoundError) as e:
-                raise RuntimeError("Cannot locate Homebrew Cellar. Is 'brew' installed and in PATH?") from e
-        elif platform.system() == 'Linux':
-            # Debian/Ubuntu use /usr/lib/<triplet>/, Fedora/RHEL use /usr/lib64/.
-            candidates = (glob('/usr/lib/*/libespeak-ng*')
-                          + glob('/usr/lib64/libespeak-ng*')
-                          + glob('/usr/lib/libespeak-ng*')
-                          + glob('/usr/local/lib*/libespeak-ng*'))
-            if not candidates:
-                raise RuntimeError('No espeak-ng library found; set ESPEAK_LIBRARY to its path')
-            library = candidates[0]
-        elif platform.system() == 'Windows':
-            library = 'C:\\Program Files*\\eSpeak NG\\libespeak-ng.dll'
-        else:
-            print('Unsupported OS, please set the espeak library path manually')
-            return
-        print('Using espeak library:', library)
-        from phonemizer.backend.espeak.wrapper import EspeakWrapper
-        EspeakWrapper.set_library(library)
-    except Exception:
-        traceback.print_exc()
-        print("Error finding espeak-ng library:")
-        print("Probably you haven't installed espeak-ng.")
-        print("On Mac: brew install espeak-ng")
-        print("On Linux: sudo apt install espeak-ng")
-
-
 def main(file_path, voice, pick_manually, speed, output_folder='.',
          max_chapters=None, max_sentences=None, selected_chapters=None, post_event=None,
-         workers=None):
+         workers=None, engine=DEFAULT_ENGINE):
     if post_event: post_event('CORE_STARTED')
     load_spacy()
     if output_folder != '.':
@@ -124,10 +82,12 @@ def main(file_path, voice, pick_manually, speed, output_folder='.',
     print('Total words:', len(' '.join(texts).split()))
     eta = strfdelta((stats.total_chars - stats.processed_chars) / stats.chars_per_sec)
     print(f'Estimated time remaining (assuming {stats.chars_per_sec} chars/sec): {eta}')
-    set_espeak_library()
 
-    # Tracks where every sentence lands in the final audio, for read-along sync.
-    timeline = sync.SyncTimeline(sample_rate)
+    # Tracks where every sentence lands in the final audio, for read-along
+    # sync. Resolved from the engine actually converting this book, not the
+    # module-level default: engines do not all use the same sample rate (see
+    # audiblez.engines.engine_sample_rate).
+    timeline = sync.SyncTimeline(engine_sample_rate(engine))
 
     # First pass, sequential and cheap: resolve which chapters are already done
     # (and can be spliced in from their cache, same as any resumed run) versus
@@ -160,11 +120,11 @@ def main(file_path, voice, pick_manually, speed, output_folder='.',
 
     worker_count = resolve_worker_count(workers, len(to_synthesize))
     if worker_count > 1:
-        _run_chapters_parallel(to_synthesize, voice, speed, max_sentences, worker_count,
+        _run_chapters_parallel(to_synthesize, voice, speed, max_sentences, worker_count, engine,
                                 stats, post_event, timeline, chapter_wav_files)
     else:
-        pipeline = KPipeline(lang_code=voice[0])  # a for american or b for british etc.
-        _run_chapters_sequential(pipeline, to_synthesize, voice, speed, max_sentences,
+        tts_engine = load_engine(engine, voice)
+        _run_chapters_sequential(tts_engine, to_synthesize, voice, speed, max_sentences,
                                   stats, post_event, timeline, chapter_wav_files)
 
     sync_path = Path(output_folder) / filename.replace(extension, '.json')
@@ -210,17 +170,16 @@ def resolve_worker_count(workers, num_chapters):
 
 
 # Set once per worker process by _init_chapter_worker, not passed as an argument:
-# a KPipeline is not (and does not need to be) picklable across the process
-# boundary that Pool tasks cross.
-_worker_pipeline = None
+# a loaded TTSEngine is not (and does not need to be) picklable across the
+# process boundary that Pool tasks cross.
+_worker_engine = None
 
 
-def _init_chapter_worker(voice, threads):
+def _init_chapter_worker(engine_name, voice, threads):
     """Runs once per worker process, before it picks up its first chapter."""
-    global _worker_pipeline
+    global _worker_engine
     torch.set_num_threads(max(1, threads))
-    set_espeak_library()
-    _worker_pipeline = KPipeline(lang_code=voice[0])
+    _worker_engine = load_engine(engine_name, voice, threads=threads)
 
 
 def _synthesize_chapter_worker(args):
@@ -234,20 +193,21 @@ def _synthesize_chapter_worker(args):
     files reach the timeline needs to know they came from another process.
     """
     index, text, voice, speed, chapter_wav_path, max_sentences = args
-    local_timeline = sync.SyncTimeline(sample_rate)
+    engine_sample_rate = _worker_engine.sample_rate
+    local_timeline = sync.SyncTimeline(engine_sample_rate)
     local_timeline.begin_chapter(index)
     audio_segments = gen_audio_segments(
-        _worker_pipeline, text, voice, speed, max_sentences=max_sentences, timeline=local_timeline)
+        _worker_engine, text, voice, speed, max_sentences=max_sentences, timeline=local_timeline)
     if not audio_segments:
         return {'index': index, 'ok': False}
     final_audio = np.concatenate(audio_segments)
-    soundfile.write(chapter_wav_path, final_audio, sample_rate)
+    soundfile.write(chapter_wav_path, final_audio, engine_sample_rate)
     _, relative_chunks = local_timeline.end_chapter()
-    sync.save_chapter_sync(chapter_wav_path, len(final_audio) / sample_rate, relative_chunks)
+    sync.save_chapter_sync(chapter_wav_path, len(final_audio) / engine_sample_rate, relative_chunks)
     return {'index': index, 'ok': True, 'chars': len(text)}
 
 
-def _run_chapters_parallel(to_synthesize, voice, speed, max_sentences, workers,
+def _run_chapters_parallel(to_synthesize, voice, speed, max_sentences, workers, engine,
                             stats, post_event, timeline, chapter_wav_files):
     """Fans chapters out across a process pool.
 
@@ -277,7 +237,7 @@ def _run_chapters_parallel(to_synthesize, voice, speed, max_sentences, workers,
     # parallelizing was for.
     start_time = time.time()
     with billiard.pool.Pool(
-        processes=workers, initializer=_init_chapter_worker, initargs=(voice, threads_per_worker),
+        processes=workers, initializer=_init_chapter_worker, initargs=(engine, voice, threads_per_worker),
     ) as pool:
         # pool.imap() yields results in the order args_list was given, not
         # completion order -- every worker keeps running in the background
@@ -305,20 +265,20 @@ def _run_chapters_parallel(to_synthesize, voice, speed, max_sentences, workers,
                 post_event('CORE_CHAPTER_FINISHED', chapter_index=chapter.chapter_index)
 
 
-def _run_chapters_sequential(pipeline, to_synthesize, voice, speed, max_sentences,
+def _run_chapters_sequential(engine, to_synthesize, voice, speed, max_sentences,
                               stats, post_event, timeline, chapter_wav_files):
     for i, chapter, text, chapter_wav_path in to_synthesize:
         start_time = time.time()
         if post_event: post_event('CORE_CHAPTER_STARTED', chapter_index=chapter.chapter_index)
         timeline.begin_chapter(i, title=f'Chapter {i}', source=chapter.get_name())
         audio_segments = gen_audio_segments(
-            pipeline, text, voice, speed, stats, post_event=post_event, max_sentences=max_sentences,
+            engine, text, voice, speed, stats, post_event=post_event, max_sentences=max_sentences,
             timeline=timeline)
         if audio_segments:
             final_audio = np.concatenate(audio_segments)
-            soundfile.write(chapter_wav_path, final_audio, sample_rate)
+            soundfile.write(chapter_wav_path, final_audio, engine.sample_rate)
             _, relative_chunks = timeline.end_chapter()
-            sync.save_chapter_sync(chapter_wav_path, len(final_audio) / sample_rate, relative_chunks)
+            sync.save_chapter_sync(chapter_wav_path, len(final_audio) / engine.sample_rate, relative_chunks)
             end_time = time.time()
             delta_seconds = end_time - start_time
             chars_per_sec = len(text) / delta_seconds
@@ -389,55 +349,38 @@ def print_selected_chapters(document_chapters, chapters):
         for i, c in enumerate(document_chapters, start=1)
     ], headers=['#', 'Chapter', 'Text Length', 'Selected', 'First words']))
 
-def split_long_sentence(text, max_length=400):
-    """Split a long sentence around the 500 chars, picking the first whitespace after the 500th character. """
-    if len(text) <= max_length:
-        return [text]
-    parts = []
-    while len(text) > max_length:
-        split_index = text.rfind(' ', 0, max_length)
-        if split_index == -1:
-            split_index = max_length
-        parts.append(text[:split_index].strip())
-        text = text[split_index:].strip()
-    if text:
-        parts.append(text)
-    return parts
-
-
-def gen_audio_segments(pipeline, text, voice, speed, stats=None, max_sentences=None, post_event=None,
+def gen_audio_segments(engine, text, voice, speed, stats=None, max_sentences=None, post_event=None,
                        timeline=None):
-    """Synthesise `text` sentence by sentence.
+    """Synthesise `text` sentence by sentence, via the given TTSEngine.
 
     Returns the raw audio segments. If a `sync.SyncTimeline` is passed, every
     sentence is also recorded on it with the exact timestamps it occupies in the
     output audio, for read-along highlighting.
+
+    Splitting into sentences happens here, once, for every engine -- any
+    further splitting a specific backend needs (Kokoro's own long-sentence
+    workaround, for instance) is that engine's own concern, inside its
+    `synthesize()`.
     """
     nlp = spacy.load('xx_ent_wiki_sm')
     nlp.add_pipe('sentencizer')
     audio_segments = []
     doc = nlp(text)
-    lang_code = voice[0]
-
-    if lang_code in 'ab':
-        sentences = [s.text for s in doc.sents]
-    else:
-        # For non-english languages, Kokoro truncates long sentences, so we split them manually
-        sentences = []
-        for sent in list(doc.sents):
-            if len(sent.text) > 400:
-                print(f'Warning: Sentence too long ({len(sent.text)} chars), splitting into smaller sentences.')
-                sents = split_long_sentence(sent.text, 400)
-                sentences.extend(sents)
-            else:
-                sentences.append(sent.text)
+    # spaCy's sentencizer occasionally yields a whitespace-only fragment (a
+    # stray newline/punctuation artifact from how the epub's text was
+    # extracted). Kokoro tolerates that silently; Pocket TTS raises
+    # ValueError("Text prompt cannot be empty") -- either way there is no
+    # actual sentence there to synthesize, so it is dropped before any engine
+    # ever sees it.
+    sentences = [s.text for s in doc.sents if s.text.strip()]
 
     for i, sent_text in enumerate(sentences):
         if max_sentences and i > max_sentences: break
-        # Kokoro can split one sentence into several segments; they are contiguous
-        # in the output, so the sentence's duration is the sum of their frames.
+        # An engine can split one sentence into several segments; they are
+        # contiguous in the output, so the sentence's duration is the sum of
+        # their frames.
         sentence_frames = 0
-        for gs, ps, audio in pipeline(sent_text, voice=voice, speed=speed, split_pattern=r'\n\n\n'):
+        for audio in engine.synthesize(sent_text, voice, speed):
             audio_segments.append(audio)
             sentence_frames += sync.num_frames(audio)
         if timeline is not None and sentence_frames:
@@ -452,16 +395,15 @@ def gen_audio_segments(pipeline, text, voice, speed, stats=None, max_sentences=N
     return audio_segments
 
 
-def gen_text(text, voice='af_heart', output_file='text.wav', speed=1, play=False):
-    lang_code = voice[:1]
-    pipeline = KPipeline(lang_code=lang_code, repo_id='hexgrad/Kokoro-82M')
+def gen_text(text, voice='af_heart', output_file='text.wav', speed=1, play=False, engine=DEFAULT_ENGINE):
+    tts_engine = load_engine(engine, voice)
     load_spacy()
-    timeline = sync.SyncTimeline(sample_rate)
+    timeline = sync.SyncTimeline(tts_engine.sample_rate)
     timeline.begin_chapter(1)
-    audio_segments = gen_audio_segments(pipeline, text, voice=voice, speed=speed, timeline=timeline)
+    audio_segments = gen_audio_segments(tts_engine, text, voice=voice, speed=speed, timeline=timeline)
     timeline.end_chapter()
     final_audio = np.concatenate(audio_segments)
-    soundfile.write(output_file, final_audio, sample_rate)
+    soundfile.write(output_file, final_audio, tts_engine.sample_rate)
     sync.write_sync_file(
         Path(output_file).with_suffix('.json'), timeline, audio_file=Path(output_file).name)
     if play:
@@ -601,7 +543,7 @@ def create_m4b(chapter_files, filename, cover_image, output_folder):
 
         '-map', '0:a',  # Map audio
         '-c:a', 'aac',  # Convert to AAC
-        '-b:a', '64k',  # Reduce bitrate for smaller size
+        '-b:a', '48k',  # Reduce bitrate for smaller size -- mono speech, not music
 
         '-map_metadata', '1', # Map metadata
 

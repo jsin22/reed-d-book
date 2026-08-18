@@ -154,6 +154,10 @@ def convert_epub(self, job_id):
                 output_folder=str(output_dir),
                 post_event=progress,
                 workers=get_settings().conversion_workers,
+                # Jobs created before engine selection existed have no
+                # 'engine' key; treat those as the kokoro they were always
+                # converted with.
+                engine=manifest.get('engine', 'kokoro'),
             )
     except Exception:
         _fail(store, job_id, traceback.format_exc())

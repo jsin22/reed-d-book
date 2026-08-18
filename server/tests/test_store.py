@@ -50,7 +50,7 @@ class JobStoreTest(TempDataDirTestCase):
         self.store = JobStore(self.settings.jobs_dir)
 
     def test_create_makes_a_queued_job_with_an_output_dir(self):
-        manifest = self.store.create('Book One.epub', 'af_heart', 1.0)
+        manifest = self.store.create('Book One.epub', 'af_heart', 1.0, 'kokoro')
         self.assertEqual(manifest['status'], 'queued')
         self.assertEqual(manifest['filename'], 'Book_One.epub')
         self.assertTrue(self.store.output_dir(manifest['job_id']).is_dir())
@@ -62,7 +62,7 @@ class JobStoreTest(TempDataDirTestCase):
         self.assertRaises(JobNotFound, self.store.job_dir, '..')
 
     def test_update_merges_and_persists(self):
-        job_id = self.store.create('b.epub', 'af_heart', 1.0)['job_id']
+        job_id = self.store.create('b.epub', 'af_heart', 1.0, 'kokoro')['job_id']
         self.store.update(job_id, status='running', progress=12)
         self.store.update(job_id, progress=40)
         manifest = self.store.read(job_id)
@@ -70,7 +70,7 @@ class JobStoreTest(TempDataDirTestCase):
         self.assertEqual(manifest['voice'], 'af_heart')
 
     def test_write_leaves_no_partial_file_behind(self):
-        job_id = self.store.create('b.epub', 'af_heart', 1.0)['job_id']
+        job_id = self.store.create('b.epub', 'af_heart', 1.0, 'kokoro')['job_id']
         self.store.update(job_id, progress=50)
         # The temp file used for the atomic replace must not survive.
         leftovers = list(self.store.job_dir(job_id).glob('.job.json*'))
@@ -78,7 +78,7 @@ class JobStoreTest(TempDataDirTestCase):
         json.loads(self.store.manifest_path(job_id).read_text())
 
     def test_save_upload_streams_the_whole_file(self):
-        job_id = self.store.create('b.epub', 'af_heart', 1.0)['job_id']
+        job_id = self.store.create('b.epub', 'af_heart', 1.0, 'kokoro')['job_id']
         payload = epub_bytes()
         written = self.store.save_upload(job_id, io.BytesIO(payload), max_bytes=10_000,
                                          chunk_size=16)
@@ -88,14 +88,14 @@ class JobStoreTest(TempDataDirTestCase):
         self.assertTrue(looks_like_epub(path))
 
     def test_save_upload_refuses_oversized_and_deletes_the_partial(self):
-        job_id = self.store.create('b.epub', 'af_heart', 1.0)['job_id']
+        job_id = self.store.create('b.epub', 'af_heart', 1.0, 'kokoro')['job_id']
         with self.assertRaises(UploadTooLarge):
             self.store.save_upload(job_id, io.BytesIO(b'x' * 5000), max_bytes=100,
                                    chunk_size=16)
         self.assertFalse((self.store.job_dir(job_id) / 'b.epub').exists())
 
     def test_delete_removes_everything(self):
-        job_id = self.store.create('b.epub', 'af_heart', 1.0)['job_id']
+        job_id = self.store.create('b.epub', 'af_heart', 1.0, 'kokoro')['job_id']
         self.store.save_upload(job_id, io.BytesIO(epub_bytes()), max_bytes=10_000)
         self.store.delete(job_id)
         self.assertFalse(self.store.job_dir(job_id).exists())
@@ -104,7 +104,7 @@ class JobStoreTest(TempDataDirTestCase):
     def test_list_is_newest_first_and_ignores_junk(self):
         ids = []
         for i in range(3):
-            manifest = self.store.create(f'b{i}.epub', 'af_heart', 1.0)
+            manifest = self.store.create(f'b{i}.epub', 'af_heart', 1.0, 'kokoro')
             # created_at has second resolution; make the order unambiguous.
             self.store.update(manifest['job_id'], created_at=f'2026-07-0{i + 1}T00:00:00+00:00')
             ids.append(manifest['job_id'])

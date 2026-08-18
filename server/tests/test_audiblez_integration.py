@@ -26,7 +26,7 @@ SAMPLE = Path(__file__).resolve().parent.parent.parent / 'sample-short.epub'
 class RealConversionTest(TempDataDirTestCase):
     def test_produces_a_playable_audiobook_and_a_usable_sync_file(self):
         store = JobStore(self.settings.jobs_dir)
-        manifest = store.create(SAMPLE.name, 'af_heart', 1.0)
+        manifest = store.create(SAMPLE.name, 'af_heart', 1.0, 'kokoro')
         job_id = manifest['job_id']
         with open(SAMPLE, 'rb') as f:
             store.save_upload(job_id, f, max_bytes=self.settings.max_upload_bytes)

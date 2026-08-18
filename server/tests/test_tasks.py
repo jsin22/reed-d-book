@@ -56,8 +56,8 @@ class TaskTestCase(TempDataDirTestCase):
         super().setUp()
         self.store = JobStore(self.settings.jobs_dir)
 
-    def make_job(self, filename='Book One.epub', voice='af_heart', speed=1.0):
-        manifest = self.store.create(filename, voice, speed)
+    def make_job(self, filename='Book One.epub', voice='af_heart', speed=1.0, engine='kokoro'):
+        manifest = self.store.create(filename, voice, speed, engine)
         self.store.save_upload(manifest['job_id'], io.BytesIO(epub_bytes()),
                                max_bytes=1_000_000)
         return manifest['job_id']

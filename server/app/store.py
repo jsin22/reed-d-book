@@ -102,7 +102,7 @@ class JobStore:
 
     # -- lifecycle -----------------------------------------------------------
 
-    def create(self, filename, voice, speed) -> dict:
+    def create(self, filename, voice, speed, engine) -> dict:
         """Register a job and return its manifest. The epub is written separately."""
         job_id = str(uuid.uuid4())
         (self.jobs_dir / job_id / OUTPUT_DIRNAME).mkdir(parents=True, exist_ok=True)
@@ -110,6 +110,7 @@ class JobStore:
             'job_id': job_id,
             'status': QUEUED,
             'filename': safe_filename(filename),
+            'engine': engine,
             'voice': voice,
             'speed': speed,
             'created_at': utcnow(),
