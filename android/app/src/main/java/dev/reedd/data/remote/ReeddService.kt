@@ -28,12 +28,16 @@ interface ReeddService {
     @GET("api/voices")
     suspend fun voices(): VoicesDto
 
+    /** Every engine and its voices, for a two-level (engine, then voice) picker. */
+    @GET("api/engines")
+    suspend fun engines(): EnginesDto
+
     /**
      * Upload an .epub. Returns as soon as the file is on disk server-side, with
      * `status: "queued"` and the id to poll.
      *
-     * `voice` and `speed` are plain text parts, not JSON: the server reads them
-     * with FastAPI's `Form(...)`.
+     * `voice`, `speed` and `engine` are plain text parts, not JSON: the server
+     * reads them with FastAPI's `Form(...)`.
      */
     @Multipart
     @POST("api/jobs")
@@ -41,6 +45,7 @@ interface ReeddService {
         @Part file: MultipartBody.Part,
         @Part("voice") voice: RequestBody?,
         @Part("speed") speed: RequestBody?,
+        @Part("engine") engine: RequestBody?,
     ): JobDto
 
     @GET("api/jobs")
@@ -66,4 +71,27 @@ interface ReeddService {
      */
     @POST("api/diagnostics/crash")
     suspend fun reportCrash(@Body report: RequestBody): ResponseBody
+
+    /** Who the current token belongs to -- used to show "logged in as" and to
+     *  decide whether to offer the Admin screen. */
+    @GET("api/me")
+    suspend fun me(): MeDto
+
+    // -- admin only; see server/README.md "Sharing with others" --
+
+    /** Every job on the server, unfiltered, with the owner's email joined in. */
+    @GET("api/admin/jobs")
+    suspend fun adminJobs(@Query("limit") limit: Int = 50): AdminJobListDto
+
+    @POST("api/admin/jobs/{jobId}/public")
+    suspend fun setJobPublic(@Path("jobId") jobId: String, @Body body: PublicUpdateDto): JobDto
+
+    @GET("api/admin/users")
+    suspend fun adminUsers(): UserListDto
+
+    /** Creates the account and, if the server has SMTP configured, emails them
+     *  the token; either way the token comes back here too, in case it needs
+     *  to be hand-delivered instead. */
+    @POST("api/admin/users")
+    suspend fun inviteUser(@Body body: InviteRequestDto): InviteResultDto
 }

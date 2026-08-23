@@ -29,20 +29,34 @@ Android app ──POST /api/jobs──▶ FastAPI ──▶ Redis ──▶ Cele
 | `GET /api/jobs` | every job, newest first. |
 | `GET /api/voices` | voices for one engine (`?engine=`, default the server's default engine). |
 | `GET /api/engines` | every engine and its own voices/default, for a two-level picker. |
-| `GET /api/health` | liveness; never requires the token, so the app can find the server. |
+| `GET /api/me` | the caller's own `{user_id, email, is_admin}`. |
+| `GET /api/health` | liveness; never requires a token, so the app can find the server. |
+
+Admin-only (see "Sharing with others" below):
+
+| | |
+|---|---|
+| `GET /api/admin/jobs` | every job, unfiltered, with `owner_email` joined in. |
+| `POST /api/admin/jobs/{id}/public` | `{"public": bool}` — flips a job's visibility. |
+| `GET /api/admin/users` | every invited user. |
+| `POST /api/admin/users` | `{"email": str}` — invites a user and emails them a token. |
+| `GET /download/app` | unauthenticated: serves the APK, for an invitee who has no token yet. |
 
 `status` is one of `queued`, `running`, `done`, `error`. Interactive docs are at
-`/docs`.
+`/docs`. Every route above except `/api/health`, `/api/voices`, `/api/engines`
+and `/download/app` needs `Authorization: Bearer <token>` — there is no
+auth-optional mode any more, see "Sharing with others".
 
 ```console
-$ curl -F file=@book.epub -F voice=af_heart http://pocket4.local:8000/api/jobs
+$ auth="Authorization: Bearer $TOKEN"
+$ curl -H "$auth" -F file=@book.epub -F voice=af_heart http://pocket4.local:8000/api/jobs
 {"job_id":"bc2989f1-...","status":"queued", ...}
 
-$ curl http://pocket4.local:8000/api/jobs/bc2989f1-...
+$ curl -H "$auth" http://pocket4.local:8000/api/jobs/bc2989f1-...
 {"status":"running","progress":32,"eta":"00d 00h 00m 11s","chapters_done":0, ...}
 
-$ curl -OJ http://pocket4.local:8000/api/jobs/bc2989f1-.../audiobook
-$ curl -OJ http://pocket4.local:8000/api/jobs/bc2989f1-.../sync
+$ curl -H "$auth" -OJ http://pocket4.local:8000/api/jobs/bc2989f1-.../audiobook
+$ curl -H "$auth" -OJ http://pocket4.local:8000/api/jobs/bc2989f1-.../sync
 ```
 
 ## Setup
@@ -82,6 +96,66 @@ Pocket 4's firewall (`sudo firewall-cmd --add-port=8000/tcp`) and point the app
 at the machine's LAN address. Keep `--concurrency=1`: TTS already saturates the
 machine, and a second job would only make both slower.
 
+### Staying up across reboots
+
+All three processes (redis, celery, uvicorn) run as systemd **user** services
+so a reboot doesn't silently take the app's backend down — `~/.config/systemd/user/reedd-{redis,celery,uvicorn}.service`,
+enabled with `systemctl --user enable --now`. This machine has no root, so
+redis comes from the `reedd` micromamba env
+(`~/micromamba/envs/reedd/bin/redis-server`) rather than a distro package.
+
+User services normally only run while that user has an active login session;
+`loginctl enable-linger jsin` (no root needed for enabling your own linger)
+makes them start at boot instead. Check with `loginctl show-user jsin -p Linger`
+— `no` means a reboot will leave the backend down until someone logs back in.
+
+Useful commands:
+
+```sh
+systemctl --user status reedd-redis reedd-celery reedd-uvicorn
+systemctl --user restart reedd-uvicorn      # after pulling a server code change
+journalctl --user -u reedd-uvicorn -f       # tail logs (replaces the old uvicorn.log/celery.log files)
+```
+
+### Sharing with others
+
+The server only accepts requests from invited people — see "Configuration"
+below for how access works. To let an invitee's phone reach it without
+joining your Tailscale network, expose it publicly with [Tailscale
+Funnel](https://tailscale.com/kb/1223/funnel):
+
+```sh
+tailscale funnel 8000
+```
+
+(Enable Funnel once for this node in the Tailscale admin console if it isn't
+already.) This gives an HTTPS URL like `https://pocket4.<tailnet>.ts.net`
+that resolves and connects from any network, reusing `tailscale cert` for
+TLS — no port-forwarding, no separate account. Set `REEDD_PUBLIC_SERVER_URL`
+to that URL; it's only used to build the `/download/app` link in invite
+emails, since the Android app has its own copy of this URL baked in at build
+time and never needs to be told it.
+
+To invite someone:
+
+1. Bootstrap yourself as the first admin (one-time, from `server/`):
+   ```sh
+   ../audiblez/.venv/bin/python -m app.users create-admin you@example.com
+   ```
+   This prints a token once — paste it into your own phone's Settings screen.
+2. From the app's Admin screen (visible once you're signed in as an admin),
+   enter the person's email and send the invite. If `REEDD_SMTP_USER` /
+   `REEDD_SMTP_APP_PASSWORD` are set, they get an email with just their
+   token and an APK download link — no server URL to communicate, the app
+   already knows it. If SMTP isn't configured, the token is shown inline in
+   the Admin screen so you can hand-deliver it instead.
+3. They install the app and paste the token into Settings. That's it — no
+   server address to enter.
+
+Everyone sees the books they upload themselves, plus any job an admin has
+marked public from the Admin screen. Nothing else is visible to them, and
+mutating another user's job (deleting it) is refused even for a public one.
+
 ## Configuration
 
 Everything has a working default; override with environment variables.
@@ -91,13 +165,22 @@ Everything has a working default; override with environment variables.
 | `REEDD_DATA_DIR` | `server/data` | where uploads and output live |
 | `REEDD_BROKER_URL` | `redis://127.0.0.1:6379/0` | |
 | `REEDD_RESULT_BACKEND` | `redis://127.0.0.1:6379/1` | |
-| `REEDD_DEFAULT_ENGINE` | `kokoro` | used when the app doesn't ask for one, see below |
+| `REEDD_DEFAULT_ENGINE` | `pocket_tts` | used when the app doesn't ask for one, see below |
 | `REEDD_DEFAULT_VOICE` | `af_heart` | Kokoro's default; Pocket TTS's is fixed at `alba`, see below |
 | `REEDD_DEFAULT_SPEED` | `1.0` | |
 | `REEDD_MAX_UPLOAD_BYTES` | `209715200` (200 MB) | |
 | `REEDD_KEEP_INTERMEDIATE` | `0` | keep the per-chapter `.wav` files |
-| `REEDD_API_TOKEN` | *(empty: no auth)* | if set, requests need `Authorization: Bearer <token>` |
 | `REEDD_CONVERSION_WORKERS` | *(auto)* | chapters to synthesize concurrently on CPU, see below |
+| `REEDD_SMTP_HOST` | `smtp.gmail.com` | invite-email relay, see "Sharing with others" |
+| `REEDD_SMTP_PORT` | `587` | |
+| `REEDD_SMTP_USER` | *(empty: invites aren't emailed)* | a Gmail address |
+| `REEDD_SMTP_APP_PASSWORD` | *(empty)* | an [app password](https://support.google.com/mail/answer/185833), not the account password |
+| `REEDD_SMTP_FROM` | `REEDD_SMTP_USER` | |
+| `REEDD_PUBLIC_SERVER_URL` | *(empty)* | the externally-reachable URL, for the `/download/app` link in invite emails |
+| `REEDD_APK_PATH` | *(empty: `/download/app` returns 404)* | path to the APK it serves |
+
+Access itself is invite-only, not an env var — see "Sharing with others"
+above for `create-admin` and the admin-only invite endpoints.
 
 ## How it hangs together
 
@@ -124,11 +207,14 @@ interface (`sample_rate`, `synthesize(text, voice, speed)`) that `KokoroEngine`,
 `PocketTTSEngine` and `SupertonicEngine` all implement; `core.py`'s chapter
 loop (sequential or the parallel pool) calls it without knowing which backend
 is underneath. `POST /api/jobs`'s `engine` field selects one (default
-`REEDD_DEFAULT_ENGINE`/`kokoro`); `voice` is validated against that engine's
-own catalog, not the others' -- a Kokoro voice like `af_heart` is rejected for
-a Pocket TTS or Supertonic job, and so on. All three were evaluated after
-Kokoro's narration was reported as handling context and non-speech sounds
-(interjections like "mmmhmmm") poorly:
+`REEDD_DEFAULT_ENGINE`/`pocket_tts`); `voice` is validated against that
+engine's own catalog, not the others' -- a Kokoro voice like `af_heart` is
+rejected for a Pocket TTS or Supertonic job, and so on. The Android app no
+longer exposes a choice here -- it always sends `pocket_tts` explicitly
+(`ImportSheet.kt`), the one found to sound best -- but the server itself
+still serves all three for anything that wants them directly. All three were
+evaluated after Kokoro's narration was reported as handling context and
+non-speech sounds (interjections like "mmmhmmm") poorly:
 
 - [Chatterbox](https://github.com/resemble-ai/chatterbox) (standard/Turbo/Nano,
   all rejected on either quality or speed) measured 2-25x *slower* than
@@ -235,7 +321,7 @@ does with a job once it exists.
 cd server && ../audiblez/.venv/bin/python -m unittest discover
 ```
 
-55 tests, no Redis, no network, no TTS stack: the queue is stubbed and the
+110 tests, no Redis, no network, no TTS stack: the queue is stubbed and the
 worker runs against a fake audiblez. To also convert `sample-short.epub` for
 real (needs torch/kokoro/spacy/ffmpeg, ~15s):
 

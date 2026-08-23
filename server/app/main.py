@@ -9,12 +9,24 @@ The contract the Android app codes against:
     GET    /api/jobs/{job_id}/sync      the timing .json
     GET    /api/jobs/{job_id}/epub      the original upload (Range-resumable)
     GET    /api/jobs/{job_id}/log       audiblez' output for this job
-    DELETE /api/jobs/{job_id}           cancel and/or reclaim the disk
-    GET    /api/jobs                    every job, newest first -- doubles as the
-                                         library listing; see README.md
+    DELETE /api/jobs/{job_id}           cancel and/or reclaim the disk (owner or admin only)
+    GET    /api/jobs                    every job you own, plus every public job,
+                                         newest first -- doubles as the library
+                                         listing; see README.md
     GET    /api/voices                  voices for one engine (default kokoro), for a picker
     GET    /api/engines                 every engine and its voices, for a two-level picker
+    GET    /api/me                      the caller's own {user_id, email, is_admin}
     GET    /api/health
+
+Admin-only (see app.users.UserStore):
+
+    GET    /api/admin/jobs              every job, unfiltered, with owner_email joined in
+    POST   /api/admin/jobs/{id}/public  {"public": bool} -- flip a job's visibility
+    GET    /api/admin/users             every invited user
+    POST   /api/admin/users             {"email": str} -- invite a new user, email them a token
+
+    GET    /download/app                unauthenticated: serves the APK, for an
+                                         invitee who has no token yet
 
 Upload returns as soon as the file is on disk; the conversion happens in a
 Celery worker.  This process never imports torch or kokoro.
@@ -26,13 +38,16 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, PlainTextResponse
+from pydantic import BaseModel
 
 from .audiblez_meta import (DEFAULT_VOICE_BY_ENGINE, ENGINES, MAX_SPEED, MIN_SPEED,
                             known_voices)
 from .celery_app import enqueue, revoke
 from .config import get_settings
+from .mailer import invite_configured, send_invite
 from .store import (DONE, TERMINAL_STATUSES, JobNotFound, JobStore, UploadTooLarge,
                     looks_like_epub)
+from .users import UserStore
 
 app = FastAPI(
     title='reed-d-book conversion server',
@@ -40,25 +55,66 @@ app = FastAPI(
     version='1.0.0',
 )
 
+invite_log = logging.getLogger('reedd.mail')
+
 
 def store() -> JobStore:
     return JobStore(get_settings().jobs_dir)
 
 
-def require_token(authorization: str = Header(default='')):
-    """No-op unless REEDD_API_TOKEN is set; see config.Settings.api_token."""
-    expected = get_settings().api_token
-    if not expected:
-        return
-    if authorization.removeprefix('Bearer ').strip() != expected:
+def users() -> UserStore:
+    return UserStore(get_settings().data_dir)
+
+
+def require_user(authorization: str = Header(default='')) -> dict:
+    """Every route but /api/health, /api/voices, /api/engines and
+    /download/app needs a valid per-user token -- there is no LAN-trust,
+    auth-optional mode any more (see users.py and README.md, "Sharing with
+    others"): if you can call this, you were invited.
+    """
+    token = authorization.removeprefix('Bearer ').strip()
+    user = users().find_by_token(token) if token else None
+    if user is None:
         raise HTTPException(status_code=401, detail='invalid or missing API token')
+    return user
 
 
-def get_job(job_id: str) -> dict:
+def require_admin(user: dict = Depends(require_user)) -> dict:
+    if not user.get('is_admin'):
+        raise HTTPException(status_code=403, detail='admin only')
+    return user
+
+
+def _visible(job: dict, user: dict) -> bool:
+    """Whether `user` may see this job: they own it, it's public, or they're
+    admin. The admin branch also covers every job created before `owner`
+    existed (owner is None on those) -- see store.JobStore.create -- so nothing
+    from before this feature shipped is orphaned, it's just admin-only until
+    reclaimed or made public.
+    """
+    return bool(user.get('is_admin')) or job.get('owner') == user['user_id'] or bool(job.get('public'))
+
+
+def _owns_or_admin(job: dict, user: dict) -> bool:
+    """Narrower than _visible: seeing a public job someone else owns does not
+    mean you may delete it."""
+    return bool(user.get('is_admin')) or job.get('owner') == user['user_id']
+
+
+def _read_or_404(job_id: str) -> dict:
     try:
         return store().read(job_id)
     except JobNotFound:
         raise HTTPException(status_code=404, detail=f'no such job: {job_id}')
+
+
+def get_job(job_id: str, user: dict) -> dict:
+    manifest = _read_or_404(job_id)
+    if not _visible(manifest, user):
+        # Same 404 as a truly unknown id: a caller must not be able to tell
+        # "not yours" apart from "doesn't exist" by status code alone.
+        raise HTTPException(status_code=404, detail=f'no such job: {job_id}')
+    return manifest
 
 
 @app.get('/api/health')
@@ -98,11 +154,12 @@ def engines():
     }
 
 
-@app.post('/api/jobs', status_code=202, dependencies=[Depends(require_token)])
+@app.post('/api/jobs', status_code=202)
 def create_job(file: UploadFile = File(...),
                voice: str = Form(default=None),
                speed: float = Form(default=None),
-               engine: str = Form(default=None)):
+               engine: str = Form(default=None),
+               user: dict = Depends(require_user)):
     """Accept an .epub and queue it. Returns immediately with the job's id.
 
     Deliberately synchronous (`def`, not `async def`) so Starlette runs it in a
@@ -127,7 +184,7 @@ def create_job(file: UploadFile = File(...),
         raise HTTPException(status_code=400, detail='expected a .epub file')
 
     jobs = store()
-    manifest = jobs.create(file.filename, voice, speed, engine)
+    manifest = jobs.create(file.filename, voice, speed, engine, owner=user['user_id'])
     job_id = manifest['job_id']
     try:
         jobs.save_upload(job_id, file.file, settings.max_upload_bytes)
@@ -149,28 +206,39 @@ def create_job(file: UploadFile = File(...),
     return jobs.update(job_id, celery_task_id=celery_task_id)
 
 
-@app.get('/api/jobs', dependencies=[Depends(require_token)])
-def list_jobs(limit: int = 50):
-    return {'jobs': store().list(limit=max(1, min(limit, 500)))}
+@app.get('/api/jobs')
+def list_jobs(limit: int = 50, user: dict = Depends(require_user)):
+    limit = max(1, min(limit, 500))
+    # Fetch generously, then filter by visibility, then cap -- filtering
+    # after store().list(limit=N) would silently return fewer than N visible
+    # jobs even when more existed further back in the unfiltered list.
+    visible = [j for j in store().list(limit=10_000) if _visible(j, user)]
+    return {'jobs': visible[:limit]}
 
 
-@app.get('/api/jobs/{job_id}', dependencies=[Depends(require_token)])
-def job_status(job_id: str):
-    return get_job(job_id)
+@app.get('/api/jobs/{job_id}')
+def job_status(job_id: str, user: dict = Depends(require_user)):
+    return get_job(job_id, user)
 
 
-@app.delete('/api/jobs/{job_id}', dependencies=[Depends(require_token)])
-def delete_job(job_id: str):
-    """Cancel the job if it is still running, then delete everything it wrote."""
-    manifest = get_job(job_id)
+@app.delete('/api/jobs/{job_id}')
+def delete_job(job_id: str, user: dict = Depends(require_user)):
+    """Cancel the job if it is still running, then delete everything it wrote.
+
+    Ownership-gated, not just visibility-gated: being able to see a public
+    job someone else uploaded does not mean you may delete it.
+    """
+    manifest = get_job(job_id, user)
+    if not _owns_or_admin(manifest, user):
+        raise HTTPException(status_code=403, detail='not your job')
     if manifest['status'] not in TERMINAL_STATUSES:
         revoke(manifest.get('celery_task_id'))
     store().delete(job_id)
     return {'job_id': job_id, 'deleted': True}
 
 
-def _completed_file(job_id: str, kind: str) -> Path:
-    manifest = get_job(job_id)
+def _completed_file(job_id: str, kind: str, user: dict) -> Path:
+    manifest = get_job(job_id, user)
     if manifest['status'] != DONE:
         detail = manifest.get('error') or f'job is {manifest["status"]}'
         # 409, not 404: the id is valid, the result just isn't there yet.
@@ -182,22 +250,22 @@ def _completed_file(job_id: str, kind: str) -> Path:
     return path
 
 
-@app.get('/api/jobs/{job_id}/audiobook', dependencies=[Depends(require_token)])
-def download_audiobook(job_id: str):
+@app.get('/api/jobs/{job_id}/audiobook')
+def download_audiobook(job_id: str, user: dict = Depends(require_user)):
     """The .m4b. FileResponse honours Range, so an interrupted download resumes."""
-    path = _completed_file(job_id, 'audiobook')
+    path = _completed_file(job_id, 'audiobook', user)
     return FileResponse(path, media_type='audio/mp4', filename=path.name)
 
 
-@app.get('/api/jobs/{job_id}/sync', dependencies=[Depends(require_token)])
-def download_sync(job_id: str):
+@app.get('/api/jobs/{job_id}/sync')
+def download_sync(job_id: str, user: dict = Depends(require_user)):
     """The text-to-timestamp mapping. Format documented in audiblez/SYNC.md."""
-    path = _completed_file(job_id, 'sync')
+    path = _completed_file(job_id, 'sync', user)
     return FileResponse(path, media_type='application/json', filename=path.name)
 
 
-@app.get('/api/jobs/{job_id}/epub', dependencies=[Depends(require_token)])
-def download_epub(job_id: str):
+@app.get('/api/jobs/{job_id}/epub')
+def download_epub(job_id: str, user: dict = Depends(require_user)):
     """The originally uploaded .epub.
 
     Not gated on the job being done -- the upload is written before conversion
@@ -208,7 +276,7 @@ def download_epub(job_id: str):
     without re-uploading or waiting through TTS again. See `GET /api/jobs`
     below and README.md, "Accumulating a library".
     """
-    get_job(job_id)  # 404s on an unknown id
+    get_job(job_id, user)  # 404s on an unknown or invisible id
     path = store().epub_path(job_id)
     if not path.is_file():
         raise HTTPException(status_code=410, detail='epub is no longer on disk')
@@ -229,7 +297,7 @@ MAX_CRASH_BYTES = 256 * 1024
 MAX_CRASH_FILES = 200
 
 
-@app.post('/api/diagnostics/crash', status_code=202, dependencies=[Depends(require_token)])
+@app.post('/api/diagnostics/crash', status_code=202, dependencies=[Depends(require_user)])
 async def report_crash(request: Request):
     """Accept a crash report as plain text from the app.
 
@@ -258,7 +326,7 @@ async def report_crash(request: Request):
 
 
 @app.get('/api/diagnostics/crashes', response_class=PlainTextResponse,
-         dependencies=[Depends(require_token)])
+         dependencies=[Depends(require_user)])
 def list_crashes(limit: int = 5):
     """The most recent crash reports, newest first, as one plain-text blob."""
     settings = get_settings()
@@ -279,11 +347,81 @@ def _prune_crashes(directory: Path) -> None:
         stale.unlink(missing_ok=True)
 
 
-@app.get('/api/jobs/{job_id}/log', response_class=PlainTextResponse,
-         dependencies=[Depends(require_token)])
-def job_log(job_id: str):
-    get_job(job_id)  # 404s on an unknown id
+@app.get('/api/jobs/{job_id}/log', response_class=PlainTextResponse)
+def job_log(job_id: str, user: dict = Depends(require_user)):
+    get_job(job_id, user)  # 404s on an unknown or invisible id
     path = store().log_path(job_id)
     if not path.is_file():
         raise HTTPException(status_code=404, detail='no log yet; the job has not started')
     return path.read_text(encoding='utf-8', errors='replace')
+
+
+# -- current user & admin ----------------------------------------------------
+
+
+@app.get('/api/me')
+def me(user: dict = Depends(require_user)):
+    return {'user_id': user['user_id'], 'email': user['email'], 'is_admin': user['is_admin']}
+
+
+class PublicBody(BaseModel):
+    public: bool
+
+
+class InviteBody(BaseModel):
+    email: str
+
+
+@app.get('/api/admin/jobs', dependencies=[Depends(require_admin)])
+def admin_list_jobs(limit: int = 50):
+    """Every job, unfiltered, with the owner's email joined in for the admin screen."""
+    by_id = {u['user_id']: u['email'] for u in users().list()}
+    jobs = store().list(limit=max(1, min(limit, 500)))
+    return {'jobs': [dict(j, owner_email=by_id.get(j.get('owner'))) for j in jobs]}
+
+
+@app.post('/api/admin/jobs/{job_id}/public', dependencies=[Depends(require_admin)])
+def set_job_public(job_id: str, body: PublicBody):
+    _read_or_404(job_id)
+    return store().update(job_id, public=body.public)
+
+
+@app.get('/api/admin/users', dependencies=[Depends(require_admin)])
+def admin_list_users():
+    return {'users': [{'user_id': u['user_id'], 'email': u['email'],
+                        'is_admin': u['is_admin'], 'created_at': u['created_at']}
+                       for u in users().list()]}  # token_hash never leaves the server
+
+
+@app.post('/api/admin/users', status_code=201)
+def invite_user(body: InviteBody, admin: dict = Depends(require_admin)):
+    if users().find_by_email(body.email):
+        raise HTTPException(status_code=409, detail='already invited')
+    user, token = users().create(body.email, invited_by=admin['user_id'])
+
+    settings = get_settings()
+    email_sent = False
+    if invite_configured(settings):
+        try:
+            send_invite(settings, body.email, token)
+            email_sent = True
+        except Exception as e:
+            # Email is a delivery convenience, not the source of truth -- the
+            # account and its token below are real either way, so a bad app
+            # password must not block onboarding.
+            invite_log.error('invite email to %s failed: %s', body.email, e)
+
+    return {'user': {'user_id': user['user_id'], 'email': user['email'],
+                     'is_admin': user['is_admin'], 'created_at': user['created_at']},
+            'token': token, 'email_sent': email_sent}
+
+
+@app.get('/download/app')
+def download_app():
+    """Unauthenticated on purpose: an invitee has no token until after they
+    install the app and paste one into Settings."""
+    path = get_settings().apk_path
+    if not path or not Path(path).is_file():
+        raise HTTPException(status_code=404, detail='app download not configured')
+    return FileResponse(path, media_type='application/vnd.android.package-archive',
+                        filename=Path(path).name)

@@ -102,8 +102,15 @@ class JobStore:
 
     # -- lifecycle -----------------------------------------------------------
 
-    def create(self, filename, voice, speed, engine) -> dict:
-        """Register a job and return its manifest. The epub is written separately."""
+    def create(self, filename, voice, speed, engine, owner=None) -> dict:
+        """Register a job and return its manifest. The epub is written separately.
+
+        `owner` is a user_id (see app.users.UserStore) or None for a job
+        created without an authenticated caller -- e.g. an older job from
+        before per-user accounts existed, or one made directly against this
+        store (tests, scripts). An ownerless job is invisible to regular
+        users and visible only to an admin; see app.main._visible.
+        """
         job_id = str(uuid.uuid4())
         (self.jobs_dir / job_id / OUTPUT_DIRNAME).mkdir(parents=True, exist_ok=True)
         manifest = {
@@ -123,6 +130,8 @@ class JobStore:
             'celery_task_id': None,
             'audiobook': None,
             'sync': None,
+            'owner': owner,
+            'public': False,
         }
         self.write(job_id, manifest)
         return manifest

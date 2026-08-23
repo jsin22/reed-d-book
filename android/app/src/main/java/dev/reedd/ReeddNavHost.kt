@@ -8,6 +8,8 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.toRoute
+import dev.reedd.ui.admin.AdminScreen
+import dev.reedd.ui.admin.AdminViewModel
 import dev.reedd.ui.detail.BookDetailScreen
 import dev.reedd.ui.detail.BookDetailViewModel
 import dev.reedd.ui.library.LibraryScreen
@@ -24,6 +26,9 @@ object LibraryRoute
 
 @Serializable
 object SettingsRoute
+
+@Serializable
+object AdminRoute
 
 @Serializable
 data class DetailRoute(val bookId: String)
@@ -87,7 +92,16 @@ fun ReeddNavHost(navController: NavHostController = rememberNavController()) {
 
         composable<SettingsRoute> {
             val viewModel: SettingsViewModel = viewModel(factory = SettingsViewModel.factory(container))
-            SettingsScreen(viewModel = viewModel, onBack = { navController.popBackStack() })
+            SettingsScreen(
+                viewModel = viewModel,
+                onBack = { navController.popBackStack() },
+                onOpenAdmin = { navController.navigate(AdminRoute) },
+            )
+        }
+
+        composable<AdminRoute> {
+            val viewModel: AdminViewModel = viewModel(factory = AdminViewModel.factory(container))
+            AdminScreen(viewModel = viewModel, onBack = { navController.popBackStack() })
         }
     }
 }

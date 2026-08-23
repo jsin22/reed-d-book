@@ -56,6 +56,17 @@ class JobStoreTest(TempDataDirTestCase):
         self.assertTrue(self.store.output_dir(manifest['job_id']).is_dir())
         self.assertEqual(self.store.read(manifest['job_id']), manifest)
 
+    def test_create_records_the_owner_and_starts_private(self):
+        manifest = self.store.create('Book One.epub', 'af_heart', 1.0, 'kokoro', owner='user-1')
+        self.assertEqual(manifest['owner'], 'user-1')
+        self.assertFalse(manifest['public'])
+
+    def test_create_without_an_owner_is_admin_only(self):
+        # Jobs made without an authenticated caller (a script, or a job from
+        # before per-user accounts existed) have no owner -- see app.main._visible.
+        manifest = self.store.create('Book One.epub', 'af_heart', 1.0, 'kokoro')
+        self.assertIsNone(manifest['owner'])
+
     def test_unknown_and_malformed_ids_both_raise(self):
         self.assertRaises(JobNotFound, self.store.read, '9d0b6c4f-5e2a-4b3c-8a1b-000000000000')
         self.assertRaises(JobNotFound, self.store.read, '../../../etc')

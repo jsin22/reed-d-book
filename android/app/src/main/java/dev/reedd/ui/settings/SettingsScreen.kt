@@ -43,10 +43,12 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 fun SettingsScreen(
     viewModel: SettingsViewModel,
     onBack: () -> Unit,
+    onOpenAdmin: () -> Unit = {},
 ) {
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val check by viewModel.check.collectAsStateWithLifecycle()
     val storage by viewModel.storageBytes.collectAsStateWithLifecycle()
+    val me by viewModel.me.collectAsStateWithLifecycle()
 
     var baseUrl by remember { mutableStateOf("") }
     var token by remember { mutableStateOf("") }
@@ -103,7 +105,7 @@ fun SettingsScreen(
                 value = token,
                 onValueChange = { token = it },
                 label = { Text("API token") },
-                supportingText = { Text("Only if the server sets REEDD_API_TOKEN. Leave blank otherwise.") },
+                supportingText = { Text("The token from your invite. Paste it here.") },
                 visualTransformation = PasswordVisualTransformation(),
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
@@ -147,6 +149,20 @@ fun SettingsScreen(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.error,
                 )
+            }
+
+            me?.let { current ->
+                HorizontalDivider()
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("Logged in as ${current.email}", style = MaterialTheme.typography.bodyMedium)
+                    if (current.isAdmin) {
+                        OutlinedButton(onClick = onOpenAdmin) { Text("Admin") }
+                    }
+                }
             }
 
             HorizontalDivider()

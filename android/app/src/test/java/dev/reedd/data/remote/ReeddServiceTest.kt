@@ -152,6 +152,7 @@ class ReeddServiceTest {
             file = part,
             voice = "af_heart".toRequestBody("text/plain".toMediaType()),
             speed = "1.0".toRequestBody("text/plain".toMediaType()),
+            engine = null,
         )
 
         val request = server.takeRequest()
@@ -176,6 +177,76 @@ class ReeddServiceTest {
         val result = provider().service().deleteJob("abc")
         assertTrue(result.deleted)
         assertEquals("DELETE", server.takeRequest().method)
+    }
+
+    @Test
+    fun `me returns who the token belongs to`() = runBlocking {
+        enqueueJson("""{"user_id":"u1","email":"a@example.com","is_admin":true}""")
+
+        val me = provider().service().me()
+
+        assertEquals("/api/me", server.takeRequest().url.encodedPath)
+        assertEquals("a@example.com", me.email)
+        assertTrue(me.isAdmin)
+    }
+
+    private fun jobJson(jobId: String = "abc", public: Boolean = false, ownerEmail: String? = null): String {
+        val ownerField = if (ownerEmail != null) ",\"owner_email\":\"$ownerEmail\"" else ""
+        return "{\"job_id\":\"$jobId\",\"status\":\"done\",\"filename\":\"Book.epub\"," +
+            "\"voice\":\"af_heart\",\"speed\":1.0,\"created_at\":\"2026-08-07T16:37:04+00:00\"," +
+            "\"progress\":100,\"chapters_done\":1,\"public\":$public$ownerField}"
+    }
+
+    @Test
+    fun `admin jobs listing carries the owner email`() = runBlocking {
+        enqueueJson("""{"jobs":[${jobJson(ownerEmail = "a@example.com")}]}""")
+
+        val jobs = provider().service().adminJobs().jobs
+
+        assertEquals("/api/admin/jobs", server.takeRequest().url.encodedPath)
+        assertEquals("a@example.com", jobs.single().ownerEmail)
+    }
+
+    @Test
+    fun `setJobPublic posts the flag as a json body`() = runBlocking {
+        enqueueJson(jobJson(public = true))
+
+        val job = provider().service().setJobPublic("abc", PublicUpdateDto(true))
+
+        val request = server.takeRequest()
+        assertEquals("POST", request.method)
+        assertEquals("/api/admin/jobs/abc/public", request.url.encodedPath)
+        assertEquals("""{"public":true}""", request.body!!.utf8())
+        assertTrue(job.public)
+    }
+
+    @Test
+    fun `admin users listing parses every account`() = runBlocking {
+        enqueueJson(
+            """{"users":[{"user_id":"u1","email":"a@example.com","is_admin":true,"created_at":"2026-01-01T00:00:00+00:00"}]}"""
+        )
+
+        val users = provider().service().adminUsers().users
+
+        assertEquals("/api/admin/users", server.takeRequest().url.encodedPath)
+        assertEquals("a@example.com", users.single().email)
+    }
+
+    @Test
+    fun `inviteUser posts the email and parses the token back`() = runBlocking {
+        enqueueJson(
+            """{"user":{"user_id":"u2","email":"new@example.com","is_admin":false,"created_at":"2026-01-01T00:00:00+00:00"},"token":"tok_abc","email_sent":false}""",
+            code = 201,
+        )
+
+        val result = provider().service().inviteUser(InviteRequestDto("new@example.com"))
+
+        val request = server.takeRequest()
+        assertEquals("POST", request.method)
+        assertEquals("/api/admin/users", request.url.encodedPath)
+        assertEquals("""{"email":"new@example.com"}""", request.body!!.utf8())
+        assertEquals("tok_abc", result.token)
+        assertEquals(false, result.emailSent)
     }
 
     @Test

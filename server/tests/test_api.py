@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.store import JobStore
+from app.users import UserStore
 
 from .support import TempDataDirTestCase, epub_bytes
 
@@ -23,9 +24,20 @@ class ApiTestCase(TempDataDirTestCase):
         super().setUp()
         self.client = TestClient(app)
         self.store = JobStore(self.settings.jobs_dir)
+        self.users = UserStore(self.settings.data_dir)
+        # Every route but /api/health, /api/voices, /api/engines and
+        # /download/app needs a per-user token now -- see app.main.require_user
+        # -- so give every test an authenticated caller by default. Tests that
+        # care about auth itself (AuthTest) or about a second identity
+        # (OwnershipTest, AdminTest, InviteTest) adjust self.client.headers.
+        self.user, self.token = self.users.create('test@example.com')
+        self.client.headers['Authorization'] = f'Bearer {self.token}'
         patcher = mock.patch('app.main.enqueue', return_value=FAKE_TASK_ID)
         self.enqueue = patcher.start()
         self.addCleanup(patcher.stop)
+
+    def make_user(self, email='other@example.com', is_admin=False):
+        return self.users.create(email, is_admin=is_admin)
 
     def upload(self, name='Book One.epub', content=None, **data):
         files = {'file': (name, content if content is not None else epub_bytes(),
@@ -61,12 +73,15 @@ class UploadTest(ApiTestCase):
     def test_defaults_come_from_settings(self):
         body = self.upload().json()
         self.assertEqual(body['engine'], self.settings.default_engine)
-        self.assertEqual(body['voice'], self.settings.default_voice)
+        # Not self.settings.default_voice: that setting is Kokoro's own
+        # default specifically (see audiblez_meta.DEFAULT_VOICE_BY_ENGINE's
+        # comment) and the default engine is pocket_tts, which has its own.
+        self.assertEqual(body['voice'], 'alba')
         self.assertEqual(body['speed'], self.settings.default_speed)
 
     def test_accepts_explicit_voice_and_speed(self):
-        body = self.upload(voice='bf_emma', speed=1.25).json()
-        self.assertEqual((body['voice'], body['speed']), ('bf_emma', 1.25))
+        body = self.upload(voice='giovanni', speed=1.25).json()
+        self.assertEqual((body['voice'], body['speed']), ('giovanni', 1.25))
 
     def test_rejects_unknown_voice(self):
         response = self.upload(voice='not_a_voice')
@@ -126,11 +141,14 @@ class EngineTest(ApiTestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn('engine', response.json()['detail'])
 
-    def test_voices_endpoint_defaults_to_kokoro(self):
+    def test_voices_endpoint_defaults_to_pocket_tts(self):
+        # The Android app locks to pocket_tts and always sends it explicitly
+        # (ImportSheet.kt); this is what a request that omits the field
+        # entirely falls back to.
         body = self.client.get('/api/voices').json()
-        self.assertEqual(body['engine'], 'kokoro')
-        self.assertEqual(body['default'], self.settings.default_voice)
-        self.assertIn('af_heart', body['voices'])
+        self.assertEqual(body['engine'], 'pocket_tts')
+        self.assertEqual(body['default'], 'alba')
+        self.assertIn('alba', body['voices'])
 
     def test_voices_endpoint_accepts_an_engine(self):
         body = self.client.get('/api/voices', params={'engine': 'pocket_tts'}).json()
@@ -303,21 +321,167 @@ class DeleteTest(ApiTestCase):
 
 
 class AuthTest(ApiTestCase):
-    env = {'REEDD_API_TOKEN': 's3cret'}
-
-    def test_requests_without_the_token_are_rejected(self):
+    def test_requests_without_a_token_are_rejected(self):
+        del self.client.headers['Authorization']
         self.assertEqual(self.upload().status_code, 401)
         self.assertEqual(self.client.get('/api/jobs').status_code, 401)
 
-    def test_the_token_grants_access(self):
-        self.client.headers['Authorization'] = 'Bearer s3cret'
+    def test_an_unknown_token_is_rejected(self):
+        self.client.headers['Authorization'] = 'Bearer not-a-real-token'
+        self.assertEqual(self.client.get('/api/jobs').status_code, 401)
+
+    def test_a_valid_token_grants_access(self):
         response = self.upload()
         self.assertEqual(response.status_code, 202)
         job_id = response.json()['job_id']
         self.assertEqual(self.client.get(f'/api/jobs/{job_id}').status_code, 200)
 
-    def test_health_stays_open_so_the_app_can_find_the_server(self):
+    def test_health_voices_and_engines_stay_open(self):
+        del self.client.headers['Authorization']
         self.assertEqual(self.client.get('/api/health').status_code, 200)
+        self.assertEqual(self.client.get('/api/voices').status_code, 200)
+        self.assertEqual(self.client.get('/api/engines').status_code, 200)
+
+
+class MeTest(ApiTestCase):
+    def test_returns_the_current_user(self):
+        body = self.client.get('/api/me').json()
+        self.assertEqual(body['email'], self.user['email'])
+        self.assertFalse(body['is_admin'])
+
+    def test_requires_a_token(self):
+        del self.client.headers['Authorization']
+        self.assertEqual(self.client.get('/api/me').status_code, 401)
+
+
+class OwnershipTest(ApiTestCase):
+    def test_a_job_is_invisible_to_a_different_user(self):
+        job_id = self.upload().json()['job_id']
+        _, other_token = self.make_user('other@example.com')
+        self.client.headers['Authorization'] = f'Bearer {other_token}'
+        self.assertEqual(self.client.get('/api/jobs').json()['jobs'], [])
+        self.assertEqual(self.client.get(f'/api/jobs/{job_id}').status_code, 404)
+
+    def test_marking_a_job_public_makes_it_visible_to_others(self):
+        job_id = self.upload().json()['job_id']
+        self.store.update(job_id, public=True)
+        _, other_token = self.make_user('other@example.com')
+        self.client.headers['Authorization'] = f'Bearer {other_token}'
+        ids = {j['job_id'] for j in self.client.get('/api/jobs').json()['jobs']}
+        self.assertIn(job_id, ids)
+        self.assertEqual(self.client.get(f'/api/jobs/{job_id}').status_code, 200)
+
+    def test_admin_sees_every_job_regardless_of_owner_or_public(self):
+        job_id = self.upload().json()['job_id']
+        _, admin_token = self.make_user('admin@example.com', is_admin=True)
+        self.client.headers['Authorization'] = f'Bearer {admin_token}'
+        ids = {j['job_id'] for j in self.client.get('/api/jobs').json()['jobs']}
+        self.assertIn(job_id, ids)
+
+    def test_a_public_job_can_only_be_deleted_by_its_owner_or_an_admin(self):
+        job_id = self.upload().json()['job_id']
+        self.store.update(job_id, public=True)
+        _, other_token = self.make_user('other@example.com')
+        self.client.headers['Authorization'] = f'Bearer {other_token}'
+        # Visible (it's public) but not theirs to delete.
+        self.assertEqual(self.client.delete(f'/api/jobs/{job_id}').status_code, 403)
+
+    def test_jobs_from_before_owner_existed_stay_admin_visible(self):
+        job_id = self.upload().json()['job_id']
+        manifest = self.store.read(job_id)
+        del manifest['owner']
+        self.store.write(job_id, manifest)
+        _, admin_token = self.make_user('admin@example.com', is_admin=True)
+        self.client.headers['Authorization'] = f'Bearer {admin_token}'
+        ids = {j['job_id'] for j in self.client.get('/api/jobs').json()['jobs']}
+        self.assertIn(job_id, ids)
+
+
+class AdminTest(ApiTestCase):
+    def test_admin_routes_reject_a_non_admin(self):
+        self.assertEqual(self.client.get('/api/admin/jobs').status_code, 403)
+        self.assertEqual(self.client.get('/api/admin/users').status_code, 403)
+        self.assertEqual(
+            self.client.post('/api/admin/users', json={'email': 'x@example.com'}).status_code, 403)
+
+    def test_admin_can_list_every_job_with_owner_email(self):
+        job_id = self.upload().json()['job_id']
+        _, admin_token = self.make_user('admin@example.com', is_admin=True)
+        self.client.headers['Authorization'] = f'Bearer {admin_token}'
+        by_id = {j['job_id']: j for j in self.client.get('/api/admin/jobs').json()['jobs']}
+        self.assertEqual(by_id[job_id]['owner_email'], self.user['email'])
+
+    def test_admin_can_toggle_a_jobs_public_flag(self):
+        job_id = self.upload().json()['job_id']
+        _, admin_token = self.make_user('admin@example.com', is_admin=True)
+        self.client.headers['Authorization'] = f'Bearer {admin_token}'
+        response = self.client.post(f'/api/admin/jobs/{job_id}/public', json={'public': True})
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(self.store.read(job_id)['public'])
+
+    def test_toggling_an_unknown_jobs_public_flag_is_404(self):
+        _, admin_token = self.make_user('admin@example.com', is_admin=True)
+        self.client.headers['Authorization'] = f'Bearer {admin_token}'
+        response = self.client.post(
+            '/api/admin/jobs/9d0b6c4f-5e2a-4b3c-8a1b-000000000000/public', json={'public': True})
+        self.assertEqual(response.status_code, 404)
+
+    def test_admin_can_list_users(self):
+        _, admin_token = self.make_user('admin@example.com', is_admin=True)
+        self.client.headers['Authorization'] = f'Bearer {admin_token}'
+        emails = {u['email'] for u in self.client.get('/api/admin/users').json()['users']}
+        self.assertEqual(emails, {self.user['email'], 'admin@example.com'})
+
+
+class InviteTest(ApiTestCase):
+    def setUp(self):
+        super().setUp()
+        _, admin_token = self.make_user('admin@example.com', is_admin=True)
+        self.client.headers['Authorization'] = f'Bearer {admin_token}'
+
+    def test_invite_creates_a_user_and_returns_a_token(self):
+        response = self.client.post('/api/admin/users', json={'email': 'new@example.com'})
+        self.assertEqual(response.status_code, 201)
+        body = response.json()
+        self.assertEqual(body['user']['email'], 'new@example.com')
+        self.assertTrue(body['token'])
+        # SMTP is not configured in these tests -- see InviteWithSmtpTest.
+        self.assertFalse(body['email_sent'])
+
+    def test_the_invited_user_can_authenticate_with_the_returned_token(self):
+        token = self.client.post('/api/admin/users', json={'email': 'new@example.com'}).json()['token']
+        self.client.headers['Authorization'] = f'Bearer {token}'
+        self.assertEqual(self.client.get('/api/me').json()['email'], 'new@example.com')
+
+    def test_inviting_the_same_email_twice_is_409(self):
+        self.client.post('/api/admin/users', json={'email': 'new@example.com'})
+        response = self.client.post('/api/admin/users', json={'email': 'new@example.com'})
+        self.assertEqual(response.status_code, 409)
+
+
+class InviteWithSmtpTest(ApiTestCase):
+    env = {'REEDD_SMTP_USER': 'sender@gmail.com', 'REEDD_SMTP_APP_PASSWORD': 'app-password'}
+
+    def setUp(self):
+        super().setUp()
+        _, admin_token = self.make_user('admin@example.com', is_admin=True)
+        self.client.headers['Authorization'] = f'Bearer {admin_token}'
+
+    def test_sends_an_invite_email_via_smtp(self):
+        with mock.patch('app.mailer.smtplib.SMTP') as smtp_cls:
+            response = self.client.post('/api/admin/users', json={'email': 'new@example.com'})
+        self.assertEqual(response.status_code, 201)
+        self.assertTrue(response.json()['email_sent'])
+        smtp_cls.assert_called_once_with('smtp.gmail.com', 587)
+        smtp = smtp_cls.return_value.__enter__.return_value
+        smtp.login.assert_called_once_with('sender@gmail.com', 'app-password')
+
+    def test_a_failed_send_does_not_block_user_creation(self):
+        with mock.patch('app.mailer.smtplib.SMTP', side_effect=OSError('no route to host')):
+            response = self.client.post('/api/admin/users', json={'email': 'new@example.com'})
+        self.assertEqual(response.status_code, 201)
+        self.assertFalse(response.json()['email_sent'])
+        self.assertTrue(response.json()['token'])
 
 
 if __name__ == '__main__':

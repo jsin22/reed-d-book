@@ -7,6 +7,7 @@ import dev.reedd.data.BookRepository
 import dev.reedd.data.local.BookFiles
 import dev.reedd.data.remote.ApiException
 import dev.reedd.data.remote.ApiProvider
+import dev.reedd.data.remote.MeDto
 import dev.reedd.data.remote.ServerAddress
 import dev.reedd.data.remote.ServerNotConfigured
 import dev.reedd.data.settings.ServerSettings
@@ -43,8 +44,21 @@ class SettingsViewModel(
     private val _storageBytes = MutableStateFlow(0L)
     val storageBytes: StateFlow<Long> = _storageBytes.asStateFlow()
 
+    /** Who the configured token belongs to, for "logged in as" and the Admin
+     *  entry. Null while loading or if the server/token isn't set up yet --
+     *  those are not errors worth a snackbar here, just "nothing to show". */
+    private val _me = MutableStateFlow<MeDto?>(null)
+    val me: StateFlow<MeDto?> = _me.asStateFlow()
+
     init {
         refreshStorage()
+        refreshMe()
+    }
+
+    fun refreshMe() {
+        viewModelScope.launch {
+            _me.value = runCatching { api.service().me() }.getOrNull()
+        }
     }
 
     fun save(baseUrl: String, token: String) {
@@ -52,6 +66,7 @@ class SettingsViewModel(
             settingsStore.setServer(baseUrl, token)
             _check.value = ConnectionCheck.Idle
         }
+        refreshMe()
     }
 
     fun setDeleteJobAfterDownload(enabled: Boolean) {

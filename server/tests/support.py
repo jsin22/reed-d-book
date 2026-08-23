@@ -10,8 +10,11 @@ import zipfile
 
 from app import config
 
-ENV_KEYS = ('REEDD_DATA_DIR', 'REEDD_MAX_UPLOAD_BYTES', 'REEDD_API_TOKEN',
-            'REEDD_KEEP_INTERMEDIATE', 'REEDD_DEFAULT_VOICE')
+ENV_KEYS = ('REEDD_DATA_DIR', 'REEDD_MAX_UPLOAD_BYTES',
+            'REEDD_KEEP_INTERMEDIATE', 'REEDD_DEFAULT_VOICE',
+            'REEDD_SMTP_HOST', 'REEDD_SMTP_PORT', 'REEDD_SMTP_USER',
+            'REEDD_SMTP_APP_PASSWORD', 'REEDD_SMTP_FROM',
+            'REEDD_PUBLIC_SERVER_URL', 'REEDD_APK_PATH')
 
 
 def epub_bytes(name='chapter1.xhtml', body=b'<html><body><p>Hello.</p></body></html>'):

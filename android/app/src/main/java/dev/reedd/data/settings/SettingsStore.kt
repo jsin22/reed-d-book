@@ -32,6 +32,8 @@ data class ServerSettings(
     val token: String? = null,
     val voice: String? = null,
     val speed: Double = 1.0,
+    /** Null defers to the server's own default engine (see `GET /api/engines`). */
+    val engine: String? = null,
     val deleteJobAfterDownload: Boolean = false,
 ) {
     companion object {
@@ -41,13 +43,18 @@ data class ServerSettings(
         /**
          * Where the app looks for the server when nothing has been configured.
          *
-         * The Tailscale address of the development machine, deliberately: unlike a
-         * LAN address it does not change when DHCP feels like it, and it works from
-         * outside the house. It is only a *default* — Settings still overrides it,
-         * and clearing the field falls back here rather than to nothing, so a
-         * reinstall does not mean retyping an address.
+         * The server's Tailscale Funnel URL (see `server/README.md`, "Sharing with
+         * others"), deliberately: it resolves and connects from any network, not
+         * just this Tailscale tailnet, which is what lets an invited user's app
+         * find the server with nothing but a token -- no address to type or be
+         * told. It is only a *default* — Settings still overrides it, and clearing
+         * the field falls back here rather than to nothing, so a reinstall does not
+         * mean retyping an address. (Before Funnel, this pointed at the bare
+         * Tailscale IP, `100.98.16.59:8000` -- LAN/tailnet-only, which is why
+         * sharing the app previously required the other person to join the
+         * tailnet.)
          */
-        const val DEFAULT_BASE_URL = "100.98.16.59:8000"
+        const val DEFAULT_BASE_URL = "https://gpd-server.tail6bd1d4.ts.net"
     }
 }
 
@@ -56,12 +63,15 @@ data class ServerSettings(
  * different reason -- a reading preference, not a connection detail.
  *
  * @param fontSize a scale factor, where 1.0 is the publication's own size.
+ *   Defaults to the second-smallest of the reader's 9 slider steps (0.5,
+ *   0.75, 1.0, ... 2.5 -- MIN_FONT_SIZE..MAX_FONT_SIZE by 0.25, matching the
+ *   `steps = 7` slider in ReaderScreen.kt).
  * @param theme one of Readium's `LIGHT`, `DARK`, `SEPIA`, or null to follow the
- *   system.
+ *   system. Defaults to [PAPER].
  */
 data class ReaderSettings(
-    val fontSize: Double = 1.0,
-    val theme: String? = null,
+    val fontSize: Double = 0.75,
+    val theme: String? = PAPER,
     val scroll: Boolean = false,
 ) {
     companion object {
@@ -93,6 +103,7 @@ class SettingsStore(context: Context, scope: CoroutineScope) {
             token = prefs[KEY_TOKEN],
             voice = prefs[KEY_VOICE],
             speed = prefs[KEY_SPEED] ?: 1.0,
+            engine = prefs[KEY_ENGINE],
             deleteJobAfterDownload = prefs[KEY_DELETE_AFTER] ?: false,
         )
     }
@@ -121,10 +132,11 @@ class SettingsStore(context: Context, scope: CoroutineScope) {
         }
     }
 
-    suspend fun setConversionDefaults(voice: String?, speed: Double) {
+    suspend fun setConversionDefaults(voice: String?, speed: Double, engine: String?) {
         dataStore.edit { prefs ->
             if (voice.isNullOrBlank()) prefs.remove(KEY_VOICE) else prefs[KEY_VOICE] = voice
             prefs[KEY_SPEED] = speed.coerceIn(ServerSettings.MIN_SPEED, ServerSettings.MAX_SPEED)
+            if (engine.isNullOrBlank()) prefs.remove(KEY_ENGINE) else prefs[KEY_ENGINE] = engine
         }
     }
 
@@ -134,8 +146,16 @@ class SettingsStore(context: Context, scope: CoroutineScope) {
 
     val readerSettings: Flow<ReaderSettings> = dataStore.data.map { prefs ->
         ReaderSettings(
-            fontSize = prefs[KEY_READER_FONT_SIZE] ?: 1.0,
-            theme = prefs[KEY_READER_THEME],
+            fontSize = prefs[KEY_READER_FONT_SIZE] ?: ReaderSettings().fontSize,
+            theme = when (val stored = prefs[KEY_READER_THEME]) {
+                // Never saved -- a fresh install -- gets the app's own default
+                // rather than Readium's "follow system", which is otherwise
+                // indistinguishable from a user who explicitly chose System
+                // (see the sentinel below).
+                null -> ReaderSettings().theme
+                SYSTEM_THEME_SENTINEL -> null
+                else -> stored
+            },
             scroll = prefs[KEY_READER_SCROLL] ?: false,
         )
     }
@@ -144,7 +164,10 @@ class SettingsStore(context: Context, scope: CoroutineScope) {
         dataStore.edit { prefs ->
             prefs[KEY_READER_FONT_SIZE] =
                 settings.fontSize.coerceIn(ReaderSettings.MIN_FONT_SIZE, ReaderSettings.MAX_FONT_SIZE)
-            if (settings.theme == null) prefs.remove(KEY_READER_THEME) else prefs[KEY_READER_THEME] = settings.theme
+            // Always written, never removed: a null theme has to read back as
+            // "the user picked System", not fall through to the app default
+            // meant only for an install that has never saved a choice at all.
+            prefs[KEY_READER_THEME] = settings.theme ?: SYSTEM_THEME_SENTINEL
             prefs[KEY_READER_SCROLL] = settings.scroll
         }
     }
@@ -154,10 +177,14 @@ class SettingsStore(context: Context, scope: CoroutineScope) {
         val KEY_TOKEN = stringPreferencesKey("api_token")
         val KEY_VOICE = stringPreferencesKey("voice")
         val KEY_SPEED = doublePreferencesKey("speed")
+        val KEY_ENGINE = stringPreferencesKey("engine")
         val KEY_DELETE_AFTER = booleanPreferencesKey("delete_job_after_download")
         val KEY_READER_FONT_SIZE = doublePreferencesKey("reader_font_size")
         val KEY_READER_THEME = stringPreferencesKey("reader_theme")
         val KEY_READER_SCROLL = booleanPreferencesKey("reader_scroll")
+
+        /** Not a real theme name -- see [readerSettings] and [setReaderSettings]. */
+        const val SYSTEM_THEME_SENTINEL = "SYSTEM"
         // "reader_page_margins" (a Double) is no longer written, but deliberately
         // not reused for a different type -- an existing install's DataStore may
         // still hold it, and Preferences DataStore has no per-key migration, only
