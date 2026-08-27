@@ -231,7 +231,13 @@ fun SettingsScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Column(Modifier.fillMaxWidth(0.75f)) {
+                // weight(1f), not a fixed fillMaxWidth fraction: a fixed 75%
+                // left too little room for "Browse" on a narrower phone, and
+                // Compose has no word to break it on, so it wrapped mid-word
+                // ("Brow" / "se"). weight(1f) instead gives the label
+                // whatever space is left once the button has claimed the
+                // width it actually needs.
+                Column(Modifier.weight(1f).padding(end = 8.dp)) {
                     Text("Voices", style = MaterialTheme.typography.bodyLarge)
                     Text(
                         "Hear a sample of every Pocket TTS voice before picking one to convert with.",
