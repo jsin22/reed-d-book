@@ -21,6 +21,19 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.io.IOException
 
+/** Result of the non-admin Save button's own `GET /api/me` check -- distinct
+ *  from [ConnectionCheck], which is admin-only UI built around `/api/health`
+ *  data a non-admin never fetches. Without this, a bad token silently saved
+ *  and showed nothing until the user left Settings and saw the library's own
+ *  banner (LibraryViewModel.authStatus) -- the same class of silent failure
+ *  BUG-23 was about, just one screen over. */
+sealed interface TokenSaveResult {
+    data object Idle : TokenSaveResult
+    data object Saving : TokenSaveResult
+    data object Ok : TokenSaveResult
+    data class Failed(val reason: String) : TokenSaveResult
+}
+
 sealed interface ConnectionCheck {
     data object Idle : ConnectionCheck
     data object Checking : ConnectionCheck
@@ -85,15 +98,44 @@ class SettingsViewModel(
         refreshMe()
     }
 
-    /** The non-admin Save button: the address field is not shown to them (it is
-     *  baked into the app -- see SettingsStore.DEFAULT_BASE_URL), so only the
-     *  token changes; whatever address is already configured is left alone. */
+    private val _tokenSaveResult = MutableStateFlow<TokenSaveResult>(TokenSaveResult.Idle)
+    val tokenSaveResult: StateFlow<TokenSaveResult> = _tokenSaveResult.asStateFlow()
+
+    /**
+     * The non-admin Save button: the address field is not shown to them (it
+     * is baked into the app -- see SettingsStore.DEFAULT_BASE_URL), so only
+     * the token changes; whatever address is already configured is left
+     * alone. Unlike [refreshMe] (which swallows failures -- it runs
+     * passively, e.g. on screen open, and has nowhere good to put an error),
+     * this is a direct response to something the user just typed and saved,
+     * so a bad token has to say so right here, not just fail silently and
+     * wait for the library screen's own banner to eventually notice.
+     */
     fun saveToken(token: String) {
         viewModelScope.launch {
             settingsStore.setServer(settingsStore.current().baseUrl, token)
-            _check.value = ConnectionCheck.Idle
+            _tokenSaveResult.value = TokenSaveResult.Saving
+            _tokenSaveResult.value = try {
+                val me = api.service().me()
+                _me.value = me
+                if (!me.isAdmin && settingsStore.current().deleteJobAfterDownload) {
+                    settingsStore.setDeleteJobAfterDownload(false)
+                }
+                TokenSaveResult.Ok
+            } catch (e: ApiException) {
+                _me.value = null
+                TokenSaveResult.Failed(
+                    if (e.isUnauthorized) "That token was not accepted. Check it for typos and try again."
+                    else e.detail ?: "The server returned ${e.code}."
+                )
+            } catch (e: ServerNotConfigured) {
+                _me.value = null
+                TokenSaveResult.Failed("No server address set.")
+            } catch (e: IOException) {
+                _me.value = null
+                TokenSaveResult.Failed(e.message ?: "Could not reach the server.")
+            }
         }
-        refreshMe()
     }
 
     fun setDeleteJobAfterDownload(enabled: Boolean) {

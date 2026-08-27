@@ -50,6 +50,7 @@ fun SettingsScreen(
     val check by viewModel.check.collectAsStateWithLifecycle()
     val storage by viewModel.storageBytes.collectAsStateWithLifecycle()
     val me by viewModel.me.collectAsStateWithLifecycle()
+    val tokenSaveResult by viewModel.tokenSaveResult.collectAsStateWithLifecycle()
     // Fails closed: while `me` is still loading (or the check failed), this
     // reads as non-admin, so a moment of uncertainty never shows the fuller,
     // server-affecting admin view to someone who has not been confirmed one.
@@ -180,11 +181,33 @@ fun SettingsScreen(
                     )
                 }
             } else {
-                // No address to save alongside it and no connection test to
-                // show the result of -- just the token itself. The library
-                // screen's own auth banner (LibraryViewModel.authStatus) is
-                // what tells a non-admin whether it actually worked.
-                OutlinedButton(onClick = { viewModel.saveToken(token) }) { Text("Save") }
+                // No address field and no Test Connection button -- just the
+                // token -- but Save still has to say whether it worked: see
+                // TokenSaveResult.
+                OutlinedButton(
+                    onClick = { viewModel.saveToken(token) },
+                    enabled = tokenSaveResult !is TokenSaveResult.Saving,
+                ) { Text("Save") }
+
+                when (val result = tokenSaveResult) {
+                    is TokenSaveResult.Idle -> Unit
+                    is TokenSaveResult.Saving -> Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        CircularProgressIndicator(Modifier.size(16.dp))
+                        Text("Checking", style = MaterialTheme.typography.bodySmall)
+                    }
+                    is TokenSaveResult.Ok -> Text(
+                        "Token saved.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    is TokenSaveResult.Failed -> Text(
+                        result.reason,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
             }
 
             me?.let { current ->
