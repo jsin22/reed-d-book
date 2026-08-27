@@ -22,13 +22,14 @@ The contract the Android app codes against:
 
 Admin-only (see app.users.UserStore):
 
-    GET    /api/admin/jobs              every job, unfiltered, with owner_email joined in
-    POST   /api/admin/jobs/{id}/public  {"public": bool} -- flip a job's visibility
-    GET    /api/admin/users             every invited user
-    POST   /api/admin/users             {"email": str} -- invite a new user, email them a token
+    GET    /api/admin/jobs               every job, unfiltered, with owner_email joined in
+    POST   /api/admin/jobs/{id}/public   {"public": bool} -- flip a job's visibility
+    GET    /api/admin/users              every invited user
+    POST   /api/admin/users              {"email": str} -- invite a new user, email them a token
+    DELETE /api/admin/users/{user_id}    revoke a user's access (not your own account)
 
-    GET    /download/app                unauthenticated: serves the APK, for an
-                                         invitee who has no token yet
+    GET    /download/app                 unauthenticated: serves the APK, for an
+                                          invitee who has no token yet
 
 Upload returns as soon as the file is on disk; the conversion happens in a
 Celery worker.  This process never imports torch or kokoro.
@@ -50,7 +51,7 @@ from .config import get_settings
 from .mailer import invite_configured, send_invite
 from .store import (DONE, TERMINAL_STATUSES, JobNotFound, JobStore, UploadTooLarge,
                     looks_like_epub)
-from .users import UserStore
+from .users import UserNotFound, UserStore
 
 app = FastAPI(
     title='reed-d-book conversion server',
@@ -489,6 +490,23 @@ def invite_user(body: InviteBody, admin: dict = Depends(require_admin)):
     return {'user': {'user_id': user['user_id'], 'email': user['email'],
                      'is_admin': user['is_admin'], 'created_at': user['created_at']},
             'token': token, 'email_sent': email_sent}
+
+
+@app.delete('/api/admin/users/{user_id}')
+def delete_user(user_id: str, admin: dict = Depends(require_admin)):
+    """Revoke a user's access. Their token stops working immediately; jobs
+    they own are left alone -- see UserStore.delete's docstring for why.
+    """
+    if user_id == admin['user_id']:
+        # Not a security boundary (an admin could just invite a second admin
+        # and delete this one from there) -- purely to stop a slip of the
+        # thumb locking someone out of their own admin session.
+        raise HTTPException(status_code=400, detail='cannot delete your own account')
+    try:
+        users().delete(user_id)
+    except UserNotFound:
+        raise HTTPException(status_code=404, detail='no such user')
+    return {'user_id': user_id, 'deleted': True}
 
 
 @app.get('/download/app')

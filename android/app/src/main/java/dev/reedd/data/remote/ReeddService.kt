@@ -94,4 +94,8 @@ interface ReeddService {
      *  to be hand-delivered instead. */
     @POST("api/admin/users")
     suspend fun inviteUser(@Body body: InviteRequestDto): InviteResultDto
+
+    /** Revokes a user's access; the server refuses to delete the caller's own account. */
+    @DELETE("api/admin/users/{userId}")
+    suspend fun deleteUser(@Path("userId") userId: String): UserDeleteDto
 }

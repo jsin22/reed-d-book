@@ -41,6 +41,7 @@ Admin-only (see "Sharing with others" below):
 | `POST /api/admin/jobs/{id}/public` | `{"public": bool}` — flips a job's visibility. |
 | `GET /api/admin/users` | every invited user. |
 | `POST /api/admin/users` | `{"email": str}` — invites a user and emails them a token. |
+| `DELETE /api/admin/users/{user_id}` | revokes a user's access; refuses to delete your own account. |
 | `GET /download/app` | unauthenticated: serves the APK, for an invitee who has no token yet. |
 
 `status` is one of `queued`, `running`, `done`, `error`. Interactive docs are at
@@ -322,7 +323,7 @@ does with a job once it exists.
 cd server && ../audiblez/.venv/bin/python -m unittest discover
 ```
 
-116 tests, no Redis, no network, no TTS stack: the queue is stubbed and the
+124 tests, no Redis, no network, no TTS stack: the queue is stubbed and the
 worker runs against a fake audiblez. To also convert `sample-short.epub` for
 real (needs torch/kokoro/spacy/ffmpeg, ~15s):
 

@@ -130,6 +130,20 @@ class UserStore:
         users.sort(key=lambda u: u.get('created_at') or '', reverse=True)
         return users
 
+    def delete(self, user_id: str) -> None:
+        """Revoke a user's access -- their token stops matching find_by_token
+        the moment this returns. Jobs they own are left alone: their `owner`
+        field simply stops pointing at anyone, which _visible() in main.py
+        already treats as admin-only (the same fallback pre-owner-field jobs
+        get), not deleted or reassigned.
+        """
+        with _lock:
+            users = self._read_all()
+            remaining = [u for u in users if u['user_id'] != user_id]
+            if len(remaining) == len(users):
+                raise UserNotFound(user_id)
+            self._write_all(remaining)
+
 
 def _bootstrap_admin(email: str) -> None:
     from .config import get_settings

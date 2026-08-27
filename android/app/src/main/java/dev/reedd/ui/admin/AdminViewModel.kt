@@ -96,6 +96,27 @@ class AdminViewModel(private val api: ApiProvider) : ViewModel() {
         }
     }
 
+    /**
+     * Revokes a user's access -- `DELETE /api/admin/users/{id}`. Their token
+     * stops working immediately; any jobs they own are left alone (see
+     * `UserStore.delete`'s docstring server-side), same as this screen's own
+     * job list already tolerates an `ownerEmail` that no longer resolves to
+     * anyone. The server itself refuses to delete the caller's own account,
+     * surfaced here as an ordinary error message rather than hidden client-side.
+     */
+    fun deleteUser(userId: String) {
+        viewModelScope.launch {
+            try {
+                api.service().deleteUser(userId)
+                refresh()
+            } catch (e: ApiException) {
+                _message.value = e.detail ?: e.message
+            } catch (e: IOException) {
+                _message.value = e.message ?: "could not reach the server"
+            }
+        }
+    }
+
     fun invite(email: String) {
         if (email.isBlank()) return
         viewModelScope.launch {

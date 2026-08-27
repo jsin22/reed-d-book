@@ -119,6 +119,13 @@ data class InviteResultDto(
 @Serializable
 data class PublicUpdateDto(val public: Boolean)
 
+/** `DELETE /api/admin/users/{user_id}`'s response. */
+@Serializable
+data class UserDeleteDto(
+    @SerialName("user_id") val userId: String,
+    val deleted: Boolean,
+)
+
 /** The server's status strings, plus a bucket for anything newer than this app. */
 enum class JobStatus {
     QUEUED, RUNNING, DONE, ERROR, UNKNOWN;

@@ -477,6 +477,47 @@ class AdminTest(ApiTestCase):
         emails = {u['email'] for u in self.client.get('/api/admin/users').json()['users']}
         self.assertEqual(emails, {self.user['email'], 'admin@example.com'})
 
+    def test_admin_can_delete_a_user(self):
+        admin, admin_token = self.make_user('admin@example.com', is_admin=True)
+        self.client.headers['Authorization'] = f'Bearer {admin_token}'
+
+        response = self.client.delete(f"/api/admin/users/{self.user['user_id']}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {'user_id': self.user['user_id'], 'deleted': True})
+        emails = {u['email'] for u in self.client.get('/api/admin/users').json()['users']}
+        self.assertEqual(emails, {'admin@example.com'})
+
+    def test_deleted_users_token_stops_working(self):
+        _, admin_token = self.make_user('admin@example.com', is_admin=True)
+        self.client.headers['Authorization'] = f'Bearer {admin_token}'
+        self.client.delete(f"/api/admin/users/{self.user['user_id']}")
+
+        self.client.headers['Authorization'] = f'Bearer {self.token}'
+        self.assertEqual(self.client.get('/api/me').status_code, 401)
+
+    def test_admin_cannot_delete_their_own_account(self):
+        admin, admin_token = self.make_user('admin@example.com', is_admin=True)
+        self.client.headers['Authorization'] = f'Bearer {admin_token}'
+
+        response = self.client.delete(f"/api/admin/users/{admin['user_id']}")
+
+        self.assertEqual(response.status_code, 400)
+        emails = {u['email'] for u in self.client.get('/api/admin/users').json()['users']}
+        self.assertIn('admin@example.com', emails)
+
+    def test_deleting_an_unknown_user_is_404(self):
+        _, admin_token = self.make_user('admin@example.com', is_admin=True)
+        self.client.headers['Authorization'] = f'Bearer {admin_token}'
+        response = self.client.delete('/api/admin/users/9d0b6c4f-5e2a-4b3c-8a1b-000000000000')
+        self.assertEqual(response.status_code, 404)
+
+    def test_non_admin_cannot_delete_a_user(self):
+        _, other_token = self.make_user('other@example.com')
+        self.client.headers['Authorization'] = f'Bearer {other_token}'
+        response = self.client.delete(f"/api/admin/users/{self.user['user_id']}")
+        self.assertEqual(response.status_code, 403)
+
 
 class InviteTest(ApiTestCase):
     def setUp(self):

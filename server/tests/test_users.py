@@ -66,6 +66,22 @@ class UserStoreTest(TempDataDirTestCase):
         self.assertEqual(leftovers, [])
         json.loads((self.settings.data_dir / 'users.json').read_text())
 
+    def test_delete_removes_the_user(self):
+        user, token = self.store.create('a@example.com')
+        self.store.delete(user['user_id'])
+        self.assertIsNone(self.store.find_by_token(token))
+        self.assertEqual(self.store.list(), [])
+
+    def test_delete_leaves_other_users_alone(self):
+        keep, keep_token = self.store.create('keep@example.com')
+        gone, _ = self.store.create('gone@example.com')
+        self.store.delete(gone['user_id'])
+        self.assertEqual([u['user_id'] for u in self.store.list()], [keep['user_id']])
+        self.assertIsNotNone(self.store.find_by_token(keep_token))
+
+    def test_deleting_an_unknown_user_raises(self):
+        self.assertRaises(UserNotFound, self.store.delete, 'nonsense')
+
 
 if __name__ == '__main__':
     import unittest

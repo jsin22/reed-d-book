@@ -36,6 +36,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.reedd.data.remote.JobDto
+import dev.reedd.data.remote.UserDto
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -50,6 +51,7 @@ fun AdminScreen(
 
     var email by remember { mutableStateOf("") }
     var pendingDelete by remember { mutableStateOf<JobDto?>(null) }
+    var pendingUserDelete by remember { mutableStateOf<UserDto?>(null) }
 
     Scaffold(
         topBar = {
@@ -124,20 +126,7 @@ fun AdminScreen(
 
             Text("Users", style = MaterialTheme.typography.titleMedium)
             users.forEach { user ->
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(user.email, style = MaterialTheme.typography.bodyMedium)
-                    if (user.isAdmin) {
-                        Text(
-                            "admin",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                }
+                UserRow(user, onDelete = { pendingUserDelete = user })
             }
 
             HorizontalDivider()
@@ -183,6 +172,60 @@ fun AdminScreen(
                 TextButton(onClick = { pendingDelete = null }) { Text("Cancel") }
             },
         )
+    }
+
+    // Same reasoning as the job-delete confirmation above: revoking access is
+    // immediate and the server refuses to undo it by re-issuing the same
+    // token, so a stray tap deserves a confirmation, not a silent action.
+    pendingUserDelete?.let { user ->
+        AlertDialog(
+            onDismissRequest = { pendingUserDelete = null },
+            title = { Text("Remove this user?") },
+            text = {
+                Text(
+                    "${user.email} will lose access immediately. Their uploaded books are not " +
+                        "deleted -- they just stop belonging to anyone in particular, same as any " +
+                        "job whose owner no longer exists. Inviting them again later creates a new " +
+                        "account with a new token."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    viewModel.deleteUser(user.userId)
+                    pendingUserDelete = null
+                }) { Text("Remove") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingUserDelete = null }) { Text("Cancel") }
+            },
+        )
+    }
+}
+
+@Composable
+private fun UserRow(user: UserDto, onDelete: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+            Text(user.email, style = MaterialTheme.typography.bodyMedium)
+            if (user.isAdmin) {
+                Text(
+                    "  admin",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        IconButton(onClick = onDelete) {
+            Icon(
+                Icons.Filled.Delete,
+                contentDescription = "Remove ${user.email}",
+                tint = MaterialTheme.colorScheme.error,
+            )
+        }
     }
 }
 
