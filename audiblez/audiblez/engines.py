@@ -14,22 +14,11 @@ never pulls in the TTS stack. voices.py, pocket_tts_voices.py and
 supertonic_voices.py follow the same discipline for the same reason.
 """
 
-import tempfile
 from pathlib import Path
-
-import numpy as np
-import soundfile
 
 from audiblez import pocket_tts_voices
 from audiblez import supertonic_voices
 from audiblez import voices as kokoro_voices
-
-#: A neutral, clean line synthesized once via Kokoro at ExpressiveEngine
-#: construction time, to hand CosyVoice3 as its voice-cloning reference --
-#: whichever Kokoro voice the book was given becomes the voice CosyVoice3
-#: clones, so expressive lines and plain narration sound like the same
-#: narrator. Deliberately unrelated to any book's actual content.
-_REFERENCE_CLIP_TEXT = "The story continues, carrying us further into its world."
 
 
 def split_long_sentence(text, max_length=400):
@@ -229,89 +218,23 @@ class SupertonicEngine(TTSEngine):
         return [wav.reshape(-1)]
 
 
-class ExpressiveEngine(TTSEngine):
-    """Kokoro for plain narration, CosyVoice3 (cloned from that same Kokoro
-    voice) for LLM-flagged expressive lines -- newplan.md's pipeline. See
-    audiblez.literary_analysis for how sentences get flagged and
-    audiblez.cosyvoice_bridge for why CosyVoice3 has to run out-of-process.
-
-    Unlike the other engines, construction here does real, book-level work
-    up front (one local-LLM call per chapter, via Ollama -- see
-    audiblez.literary_analysis) rather than just loading a model, which is
-    why it needs `chapter_texts` -- every other engine's __init__ only needs
-    `voice`. This is also why this engine is not wired into the parallel
-    chapter-worker path (_init_chapter_worker in core.py): it is only ever
-    constructed once for the whole book, in the main process, matching
-    resolve_worker_count()'s GPU behavior of returning 1 worker whenever CUDA
-    is available -- true for both Kokoro-on-GPU and CosyVoice3-on-GPU, so the
-    parallel path was never going to apply here.
-
-    Construction order matters: the literary-analysis pass runs *before*
-    CosyVoice3 loads, not after, so Ollama's model and CosyVoice3 are never
-    both resident in the 2060's 6GB VRAM at once -- Ollama's own model
-    unloads itself (default keep_alive) once this process stops calling it,
-    well before CosyVoice3's subprocess starts up.
-    """
-
-    sample_rate = 24000  # Kokoro and CosyVoice3 both confirmed at 24000Hz -- no resampling needed to splice them.
-
-    def __init__(self, voice, threads=None, chapter_texts=None):
-        if not chapter_texts:
-            raise ValueError(
-                'ExpressiveEngine needs chapter_texts (the whole book\'s chapter texts, '
-                'for its one-local-LLM-call-per-chapter annotation pass) -- got none. '
-                'Pass engine="expressive" through core.main(), not load_engine() directly.')
-
-        from audiblez import literary_analysis
-        from audiblez.cosyvoice_bridge import CosyVoiceBridge
-        from audiblez.quote_split import split_into_spans
-
-        self.kokoro = KokoroEngine(voice, threads=threads)
-
-        print(f'Analyzing {len(chapter_texts)} chapter(s) for expressive delivery moments...')
-        self.annotations = literary_analysis.analyze_book(chapter_texts, split_into_spans)
-        print(f'Expressive delivery: {len(self.annotations)} sentence(s) flagged across the whole book.')
-
-        reference_segments = self.kokoro.synthesize(_REFERENCE_CLIP_TEXT, voice, speed=1.0)
-        reference_audio = np.concatenate(reference_segments) if len(reference_segments) > 1 else reference_segments[0]
-        self._reference_wav_path = tempfile.NamedTemporaryFile(suffix='.wav', delete=False).name
-        soundfile.write(self._reference_wav_path, reference_audio, self.kokoro.sample_rate)
-
-        self.cosyvoice = CosyVoiceBridge(self._reference_wav_path)
-
-    def synthesize(self, text, voice, speed):
-        instruction = self.annotations.get(text)
-        if instruction is None:
-            return self.kokoro.synthesize(text, voice, speed)
-        return [self.cosyvoice.synthesize(text, instruction)]
-
-
 # engine name -> (engine class, {lang/country code: [voice names]})
 ENGINES = {
     'kokoro': (KokoroEngine, kokoro_voices.voices),
     'pocket_tts': (PocketTTSEngine, pocket_tts_voices.voices),
     'supertonic': (SupertonicEngine, supertonic_voices.voices),
-    # Narrator voice is still a plain Kokoro voice name -- ExpressiveEngine
-    # only changes delivery on flagged lines, never voice identity.
-    'expressive': (ExpressiveEngine, kokoro_voices.voices),
 }
 
 DEFAULT_ENGINE = 'kokoro'
 
 
-def load_engine(engine_name, voice, threads=None, **kwargs):
-    """Construct and return the named engine, loaded and ready to synthesize.
-
-    `**kwargs` exists only for ExpressiveEngine's `chapter_texts` -- every
-    other engine's __init__ takes just (voice, threads), so passing kwargs
-    for those would raise TypeError; callers should only pass kwargs when
-    engine_name == 'expressive'.
-    """
+def load_engine(engine_name, voice, threads=None):
+    """Construct and return the named engine, loaded and ready to synthesize."""
     entry = ENGINES.get(engine_name)
     if entry is None:
         raise ValueError(f'unknown engine: {engine_name!r}')
     cls, _voices_by_lang = entry
-    return cls(voice, threads=threads, **kwargs)
+    return cls(voice, threads=threads)
 
 
 def known_voices(engine_name):

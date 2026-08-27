@@ -129,21 +129,10 @@ def main(file_path, voice, pick_manually, speed, output_folder='.',
 
     worker_count = resolve_worker_count(workers, len(to_synthesize))
     if worker_count > 1:
-        if engine == 'expressive':
-            # ExpressiveEngine is never constructed in a worker process (see
-            # its docstring in engines.py) -- it only makes sense sequential,
-            # which is also what resolve_worker_count() already returns
-            # whenever CUDA is available, true for both engines it wraps.
-            raise ValueError(
-                'engine="expressive" needs a single-process (GPU) run; got '
-                f'worker_count={worker_count}, which would need CUDA to not be available.')
         _run_chapters_parallel(to_synthesize, voice, speed, max_sentences, worker_count, engine,
                                 stats, post_event, timeline, chapter_wav_files)
     else:
-        engine_kwargs = {}
-        if engine == 'expressive':
-            engine_kwargs['chapter_texts'] = [text for _i, _chapter, text, _path in to_synthesize]
-        tts_engine = load_engine(engine, voice, **engine_kwargs)
+        tts_engine = load_engine(engine, voice)
         _run_chapters_sequential(tts_engine, to_synthesize, voice, speed, max_sentences,
                                   stats, post_event, timeline, chapter_wav_files)
 
@@ -383,12 +372,9 @@ def gen_audio_segments(engine, text, voice, speed, stats=None, max_sentences=Non
     Splitting into sentences happens here, once, for every engine -- any
     further splitting a specific backend needs (Kokoro's own long-sentence
     workaround, for instance) is that engine's own concern, inside its
-    `synthesize()`. Uses the same quote-aware splitter literary_analysis.py's
-    per-chapter annotation call does (see quote_split.py), so an
-    ExpressiveEngine's flagged-sentence lookup lines up exactly with what
-    actually gets synthesized here -- a plain (non-quote-aware) split would
-    produce different sentence boundaries around dialogue in this kind of
-    prose, breaking that lookup.
+    `synthesize()`. Uses the quote-aware splitter in quote_split.py rather
+    than a plain split, since a plain split would produce different sentence
+    boundaries around dialogue in this kind of prose.
     """
     audio_segments = []
     sentences = [sentence for _kind, sentence in split_into_spans(text)]
