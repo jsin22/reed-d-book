@@ -41,8 +41,25 @@ class BookDetailViewModel(
     val book: StateFlow<BookEntity?> =
         repository.book(bookId).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
+    /**
+     * Whether the current token belongs to an admin, checked fresh here rather
+     * than trusted from [dev.reedd.ui.library.LibraryViewModel] -- this screen
+     * is only ever reachable through that one's own admin gate today, but this
+     * keeps [delete] correct on its own if that ever changes. Defaults false,
+     * the safe side: an unresolved or failed check must not grant [delete] the
+     * permanent, cross-device server deletion.
+     */
+    private val _isAdmin = MutableStateFlow(false)
+    val isAdmin: StateFlow<Boolean> = _isAdmin.asStateFlow()
+
     private val _message = MutableStateFlow<String?>(null)
     val message: StateFlow<String?> = _message.asStateFlow()
+
+    init {
+        viewModelScope.launch {
+            _isAdmin.value = runCatching { api.service().me().isAdmin }.getOrDefault(false)
+        }
+    }
 
     private val _log = MutableStateFlow<String?>(null)
     val log: StateFlow<String?> = _log.asStateFlow()
@@ -111,13 +128,27 @@ class BookDetailViewModel(
         }
     }
 
-    /** Delete the book locally, and its job on the server. */
+    /**
+     * Delete the book. For an ordinary user this only ever touches this device
+     * -- the server keeps its job, since deleting it by default would mean
+     * losing a conversion (possibly hours of TTS) that another device, or its
+     * owner, might still want. An admin's delete is the permanent, alternate
+     * path to the same action the Admin screen's own trash icon performs:
+     * `DELETE /api/jobs/{id}`, which the server allows an admin to call on any
+     * job regardless of ownership (see `_owns_or_admin` in
+     * `server/app/main.py`) -- it removes the job everywhere, not just here.
+     */
     fun delete() {
         viewModelScope.launch {
             UploadWorker.cancel(context, bookId)
             DownloadWorker.cancel(context, bookId)
-            repository.deleteBook(bookId)
+            repository.deleteBook(bookId, deleteServerJob = _isAdmin.value)
         }
+    }
+
+    /** The Download button: fetch a finished job's audiobook and sync file. */
+    fun download() {
+        DownloadWorker.enqueue(context, bookId)
     }
 
     fun consumeMessage() {

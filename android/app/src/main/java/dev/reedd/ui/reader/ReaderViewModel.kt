@@ -32,28 +32,23 @@ import org.readium.r2.shared.publication.Publication
 import org.readium.r2.shared.publication.services.positions
 import org.readium.r2.shared.util.AbsoluteUrl
 import java.io.File
-import kotlin.math.roundToInt
 
 /**
- * Where you are in the book, for the page indicator.
+ * Where you are in the current chapter, for the page indicator.
  *
- * A reflowable epub has no real page numbers — the count depends on font size and
- * screen — so these are Readium's *positions*: stable, evenly-sized slices of the
- * publication, which is the closest honest equivalent and does not change when the
- * text is resized. [percent] is the fallback for a publication whose positions
- * cannot be computed.
+ * Deliberately per-chapter, not whole-book: Readium's `PaginationListener` reports
+ * the real, currently-rendered page count for whatever chapter is loaded, updated
+ * live whenever the WebView re-paginates -- including on a font-size change, which
+ * is the whole point (see BUGS.md). A true whole-book count is not shown because
+ * getting one would mean laying out and measuring every chapter at the current
+ * font size, not just the one on screen -- expensive, and would make changing text
+ * size noticeably slower on a long book. `page`/[total] are both 1-based.
  */
 data class PageInfo(
-    val page: Int?,
+    val page: Int,
     val total: Int,
-    val percent: Int?,
 ) {
-    val label: String
-        get() = when {
-            page != null && total > 0 -> "$page / $total"
-            percent != null -> "$percent%"
-            else -> ""
-        }
+    val label: String get() = if (total > 0) "$page / $total" else ""
 }
 
 sealed interface ReaderState {
@@ -100,9 +95,6 @@ class ReaderViewModel(
     private val _pageInfo = MutableStateFlow<PageInfo?>(null)
     val pageInfo: StateFlow<PageInfo?> = _pageInfo.asStateFlow()
 
-    /** Total Readium positions, computed once per book; 0 until it is known. */
-    private var totalPositions = 0
-
     init {
         viewModelScope.launch { open() }
     }
@@ -127,12 +119,6 @@ class ReaderViewModel(
                     initialLocator = book.readingLocator?.toLocator(),
                     tableOfContents = publication.tableOfContents,
                 )
-                // Off the critical path: computing positions walks every resource,
-                // so the book opens first and the page count fills in after.
-                viewModelScope.launch {
-                    totalPositions = runCatching { publication.positions().size }.getOrDefault(0)
-                    _pageInfo.value = _pageInfo.value?.copy(total = totalPositions)
-                }
             },
             onFailure = { _state.value = ReaderState.Failed(it.message ?: "could not open this epub") },
         )
@@ -158,17 +144,25 @@ class ReaderViewModel(
                     repository.updateReadingPosition(bookId, locator.toJSON().toString())
                 }
         }
-        // Undebounced and separate: the page indicator should move as soon as the
-        // page turns, whereas the database write above deliberately waits.
-        viewModelScope.launch {
-            fragment.currentLocator.collect { locator ->
-                _pageInfo.value = PageInfo(
-                    page = locator.locations.position,
-                    total = totalPositions,
-                    percent = locator.locations.totalProgression?.let { (it * 100).roundToInt() },
-                )
-            }
-        }
+    }
+
+    /**
+     * Called from [EpubNavigatorFragment.PaginationListener.onPageChanged], wired
+     * up where the fragment is created (`ReaderScreen.kt`) -- Readium's own report
+     * of the current chapter's real, currently-rendered page count, fired again
+     * whenever the WebView re-paginates. That includes a font-size change, which
+     * is the whole reason this replaced the old whole-book byte-position estimate
+     * (see [PageInfo], BUGS.md): this one is honest about being per-chapter, but
+     * it is real and it responds to the setting that visibly changes it.
+     *
+     * @param pageIndex 0-based -- inferred, not documented, from decompiling
+     *   `EpubNavigatorFragment`: its own internal page-change plumbing
+     *   (`PageChangeListener`) extends `ViewPager.SimpleOnPageChangeListener`,
+     *   whose `onPageSelected(position: Int)` is 0-based by Android convention.
+     *   +1 here for a human-facing "page 3 of 7".
+     */
+    fun onPageChanged(pageIndex: Int, pageCount: Int) {
+        _pageInfo.value = PageInfo(page = pageIndex + 1, total = pageCount)
     }
 
     fun onNavigatorGone() {

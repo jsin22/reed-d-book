@@ -14,9 +14,22 @@ never pulls in the TTS stack. voices.py, pocket_tts_voices.py and
 supertonic_voices.py follow the same discipline for the same reason.
 """
 
+import tempfile
+from pathlib import Path
+
+import numpy as np
+import soundfile
+
 from audiblez import pocket_tts_voices
 from audiblez import supertonic_voices
 from audiblez import voices as kokoro_voices
+
+#: A neutral, clean line synthesized once via Kokoro at ExpressiveEngine
+#: construction time, to hand CosyVoice3 as its voice-cloning reference --
+#: whichever Kokoro voice the book was given becomes the voice CosyVoice3
+#: clones, so expressive lines and plain narration sound like the same
+#: narrator. Deliberately unrelated to any book's actual content.
+_REFERENCE_CLIP_TEXT = "The story continues, carrying us further into its world."
 
 
 def split_long_sentence(text, max_length=400):
@@ -94,24 +107,75 @@ class KokoroEngine(TTSEngine):
         return segments
 
 
+#: Named voices resolved to a local reference clip rather than one of Pocket
+#: TTS's own HF-hosted ones -- see pocket_tts_voices.CLONED_VOICES. Pocket
+#: TTS's own name resolution (TTSModel.get_state_for_audio_prompt) only
+#: special-cases names in its *own* catalog and otherwise treats a bare str as
+#: a URL to fetch, so a local file has to be handed in as a Path to hit its
+#: "read this audio and clone it" branch instead.
+_CLONED_VOICE_PROMPTS = {
+    'af_heart_clone': Path(__file__).parent / 'voice_prompts' / 'af_heart.wav',
+}
+
+
 class PocketTTSEngine(TTSEngine):
     """Kyutai's Pocket TTS (github.com/kyutai-labs/pocket-tts): ~100M params,
     designed to run well on CPU rather than needing a GPU to be usable at all.
+    `TTSModel.load_model()` always loads onto CPU regardless -- moved onto
+    CUDA here, same auto-detect KokoroEngine relies on, when one is present.
+    Measured 85.5 -> 322.4 chars/sec (~3.8x) on an RTX 2060 eGPU.
 
     `speed` is accepted for interface symmetry with KokoroEngine but has no
     effect -- pocket_tts.TTSModel.generate_audio has no speed control.
+
+    Long sentences get more conservative generation settings than short ones
+    (see `_stable_settings_for`): Pocket TTS silently re-splits anything over
+    `MAX_TOKEN_PER_CHUNK` tokens into independently-generated chunks with no
+    continuity between them (its own source has a TODO acknowledging this),
+    and that seam is where a repeated/garbled word has been confirmed, twice,
+    on real long sentences (BUGS.md). Short sentences never reach that seam
+    and keep the library's own default temperature/noise for full
+    expressiveness; only sentences long enough to risk it trade some of that
+    away for stability -- confirmed by an A/B listen not to sound bad, just
+    less varied.
     """
 
     sample_rate = 24000
 
+    #: More conservative than the library's own defaults (temp=0.7, no
+    #: clamp). Chosen from one A/B comparison, not tuned further -- see
+    #: BUGS.md for the samples that led here.
+    _STABLE_TEMP = 0.5
+    _STABLE_NOISE_CLAMP = 2.5
+
     def __init__(self, voice, threads=None):
+        import torch
         from pocket_tts import TTSModel
+        from pocket_tts.default_parameters import MAX_TOKEN_PER_CHUNK
         self.model = TTSModel.load_model()
-        self.voice_state = self.model.get_state_for_audio_prompt(voice)
+        if torch.cuda.is_available():
+            self.model = self.model.to('cuda')
+        audio_prompt = _CLONED_VOICE_PROMPTS.get(voice, voice)
+        self.voice_state = self.model.get_state_for_audio_prompt(audio_prompt)
+        self._default_temp = self.model.temp
+        self._default_noise_clamp = self.model.noise_clamp
+        self._tokenizer = self.model.flow_lm.conditioner.tokenizer
+        self._max_tokens_per_chunk = MAX_TOKEN_PER_CHUNK
 
     def synthesize(self, text, voice, speed):
+        # self.model.temp/.noise_clamp are read fresh on every generation
+        # step (tts_model.py's _run_flow_lm), so mutating them here on the
+        # one shared model instance takes effect for this call without
+        # needing a second model loaded.
+        n_tokens = len(self._tokenizer(text).tokens[0].tolist())
+        if n_tokens > self._max_tokens_per_chunk:
+            self.model.temp = self._STABLE_TEMP
+            self.model.noise_clamp = self._STABLE_NOISE_CLAMP
+        else:
+            self.model.temp = self._default_temp
+            self.model.noise_clamp = self._default_noise_clamp
         audio = self.model.generate_audio(self.voice_state, text)
-        return [audio.numpy()]
+        return [audio.cpu().numpy()]
 
 
 class SupertonicEngine(TTSEngine):
@@ -119,12 +183,29 @@ class SupertonicEngine(TTSEngine):
     params, ONNX Runtime rather than PyTorch. Ten built-in named voices
     (M1-M5, F1-F5), multilingual, and -- unlike Pocket TTS -- `speed` is
     genuinely supported by the backend itself.
+
+    The library hardcodes `CPUExecutionProvider` in its own
+    `supertonic.loader.DEFAULT_ONNX_PROVIDERS` (its own comment: "GPU support
+    can be added by extending this list") and never exposes a `providers`
+    argument through `TTS()`, so CUDA is enabled here by patching that list
+    before constructing `TTS`, when onnxruntime actually has CUDA available
+    -- same auto-detect KokoroEngine/PocketTTSEngine rely on. Measured
+    44.1 -> 541.4 chars/sec (~12x) on an RTX 2060 eGPU. Needs
+    `onnxruntime-gpu` (not plain `onnxruntime`) pinned to a version built
+    against the CUDA/cuDNN major versions actually installed -- the latest
+    onnxruntime-gpu at the time (1.29) silently fell back to CPU because it
+    requires CUDA 13, while this machine's torch-provided CUDA libraries are
+    12.4; onnxruntime-gpu==1.20.2 is the one confirmed working here.
     """
 
     sample_rate = 44100
 
     def __init__(self, voice, threads=None):
+        import onnxruntime as ort
+        import supertonic.loader as _supertonic_loader
         from supertonic import TTS
+        if 'CUDAExecutionProvider' in ort.get_available_providers():
+            _supertonic_loader.DEFAULT_ONNX_PROVIDERS = ['CUDAExecutionProvider', 'CPUExecutionProvider']
         # Not torch: torch.set_num_threads() (what constrains the other two
         # engines' CPU usage per parallel worker) has no effect on an
         # onnxruntime session. This is the equivalent knob for this engine.
@@ -148,23 +229,89 @@ class SupertonicEngine(TTSEngine):
         return [wav.reshape(-1)]
 
 
+class ExpressiveEngine(TTSEngine):
+    """Kokoro for plain narration, CosyVoice3 (cloned from that same Kokoro
+    voice) for LLM-flagged expressive lines -- newplan.md's pipeline. See
+    audiblez.literary_analysis for how sentences get flagged and
+    audiblez.cosyvoice_bridge for why CosyVoice3 has to run out-of-process.
+
+    Unlike the other engines, construction here does real, book-level work
+    up front (one local-LLM call per chapter, via Ollama -- see
+    audiblez.literary_analysis) rather than just loading a model, which is
+    why it needs `chapter_texts` -- every other engine's __init__ only needs
+    `voice`. This is also why this engine is not wired into the parallel
+    chapter-worker path (_init_chapter_worker in core.py): it is only ever
+    constructed once for the whole book, in the main process, matching
+    resolve_worker_count()'s GPU behavior of returning 1 worker whenever CUDA
+    is available -- true for both Kokoro-on-GPU and CosyVoice3-on-GPU, so the
+    parallel path was never going to apply here.
+
+    Construction order matters: the literary-analysis pass runs *before*
+    CosyVoice3 loads, not after, so Ollama's model and CosyVoice3 are never
+    both resident in the 2060's 6GB VRAM at once -- Ollama's own model
+    unloads itself (default keep_alive) once this process stops calling it,
+    well before CosyVoice3's subprocess starts up.
+    """
+
+    sample_rate = 24000  # Kokoro and CosyVoice3 both confirmed at 24000Hz -- no resampling needed to splice them.
+
+    def __init__(self, voice, threads=None, chapter_texts=None):
+        if not chapter_texts:
+            raise ValueError(
+                'ExpressiveEngine needs chapter_texts (the whole book\'s chapter texts, '
+                'for its one-local-LLM-call-per-chapter annotation pass) -- got none. '
+                'Pass engine="expressive" through core.main(), not load_engine() directly.')
+
+        from audiblez import literary_analysis
+        from audiblez.cosyvoice_bridge import CosyVoiceBridge
+        from audiblez.quote_split import split_into_spans
+
+        self.kokoro = KokoroEngine(voice, threads=threads)
+
+        print(f'Analyzing {len(chapter_texts)} chapter(s) for expressive delivery moments...')
+        self.annotations = literary_analysis.analyze_book(chapter_texts, split_into_spans)
+        print(f'Expressive delivery: {len(self.annotations)} sentence(s) flagged across the whole book.')
+
+        reference_segments = self.kokoro.synthesize(_REFERENCE_CLIP_TEXT, voice, speed=1.0)
+        reference_audio = np.concatenate(reference_segments) if len(reference_segments) > 1 else reference_segments[0]
+        self._reference_wav_path = tempfile.NamedTemporaryFile(suffix='.wav', delete=False).name
+        soundfile.write(self._reference_wav_path, reference_audio, self.kokoro.sample_rate)
+
+        self.cosyvoice = CosyVoiceBridge(self._reference_wav_path)
+
+    def synthesize(self, text, voice, speed):
+        instruction = self.annotations.get(text)
+        if instruction is None:
+            return self.kokoro.synthesize(text, voice, speed)
+        return [self.cosyvoice.synthesize(text, instruction)]
+
+
 # engine name -> (engine class, {lang/country code: [voice names]})
 ENGINES = {
     'kokoro': (KokoroEngine, kokoro_voices.voices),
     'pocket_tts': (PocketTTSEngine, pocket_tts_voices.voices),
     'supertonic': (SupertonicEngine, supertonic_voices.voices),
+    # Narrator voice is still a plain Kokoro voice name -- ExpressiveEngine
+    # only changes delivery on flagged lines, never voice identity.
+    'expressive': (ExpressiveEngine, kokoro_voices.voices),
 }
 
 DEFAULT_ENGINE = 'kokoro'
 
 
-def load_engine(engine_name, voice, threads=None):
-    """Construct and return the named engine, loaded and ready to synthesize."""
+def load_engine(engine_name, voice, threads=None, **kwargs):
+    """Construct and return the named engine, loaded and ready to synthesize.
+
+    `**kwargs` exists only for ExpressiveEngine's `chapter_texts` -- every
+    other engine's __init__ takes just (voice, threads), so passing kwargs
+    for those would raise TypeError; callers should only pass kwargs when
+    engine_name == 'expressive'.
+    """
     entry = ENGINES.get(engine_name)
     if entry is None:
         raise ValueError(f'unknown engine: {engine_name!r}')
     cls, _voices_by_lang = entry
-    return cls(voice, threads=threads)
+    return cls(voice, threads=threads, **kwargs)
 
 
 def known_voices(engine_name):

@@ -20,7 +20,10 @@ MIN_SPEED = 0.5
 MAX_SPEED = 2.0
 
 ENGINES = ('kokoro', 'pocket_tts', 'supertonic')
-DEFAULT_ENGINE = 'kokoro'
+# The Android app no longer lets the user choose an engine and always sends
+# 'pocket_tts' explicitly (ImportSheet.kt) -- this is the fallback for
+# whatever does not, e.g. a request that omits the field entirely.
+DEFAULT_ENGINE = 'pocket_tts'
 
 # Kokoro's default voice comes from Settings.default_voice (env-configurable,
 # 'af_heart'), since that setting predates multi-engine support and there is

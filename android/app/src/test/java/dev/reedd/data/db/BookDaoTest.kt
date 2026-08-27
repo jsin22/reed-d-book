@@ -46,7 +46,7 @@ class BookDaoTest {
         )
         dao.markJobMissing("b1")
 
-        dao.attachJob("b1", jobId = "job-2", status = JobStatus.QUEUED, voice = "af_sky", speed = 1.25)
+        dao.attachJob("b1", jobId = "job-2", status = JobStatus.QUEUED, voice = "af_sky", speed = 1.25, engine = "kokoro")
 
         val book = dao.get("b1")!!
         assertEquals("job-2", book.jobId)
@@ -144,25 +144,33 @@ class BookDaoTest {
     }
 
     @Test
-    fun `awaitingDownload selects finished conversions that are not on disk yet`() = runTest {
-        dao.insert(book("done-not-fetched", addedAt = 1, jobId = "j1", jobStatus = JobStatus.DONE))
+    fun `awaitingDownload resumes downloads already started, not ones nobody asked for`() = runTest {
+        // Never tapped "Download" -- this is the card's job, not the poller's.
+        dao.insert(book("never-asked", addedAt = 1, jobId = "j1", jobStatus = JobStatus.DONE))
         dao.insert(
             book(
-                "done-and-fetched", addedAt = 2, jobId = "j2", jobStatus = JobStatus.DONE,
+                "already-fetched", addedAt = 2, jobId = "j2", jobStatus = JobStatus.DONE,
                 downloadState = DownloadState.DONE,
             )
         )
-        dao.insert(book("still-running", addedAt = 3, jobId = "j3", jobStatus = JobStatus.RUNNING))
-        // A failed download must be picked up again, not abandoned.
+        dao.insert(book("still-converting", addedAt = 3, jobId = "j3", jobStatus = JobStatus.RUNNING))
+        // A download the user started must be picked up again if it was
+        // interrupted or failed, not abandoned.
         dao.insert(
             book(
-                "download-failed", addedAt = 4, jobId = "j4", jobStatus = JobStatus.DONE,
+                "interrupted", addedAt = 4, jobId = "j4", jobStatus = JobStatus.DONE,
+                downloadState = DownloadState.RUNNING,
+            )
+        )
+        dao.insert(
+            book(
+                "download-failed", addedAt = 5, jobId = "j5", jobStatus = JobStatus.DONE,
                 downloadState = DownloadState.FAILED,
             )
         )
 
         assertEquals(
-            listOf("done-not-fetched", "download-failed"),
+            listOf("interrupted", "download-failed"),
             dao.awaitingDownload().map { it.id },
         )
     }

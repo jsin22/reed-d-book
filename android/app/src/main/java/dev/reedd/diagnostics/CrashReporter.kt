@@ -4,9 +4,16 @@ import android.content.Context
 import android.os.Build
 import android.util.Log
 import dev.reedd.BuildConfig
+import dev.reedd.data.remote.ServerAddress
+import dev.reedd.data.settings.SettingsStore
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.runBlocking
 import java.io.File
 import java.io.PrintWriter
 import java.io.StringWriter
+import java.net.HttpURLConnection
+import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -57,6 +64,59 @@ object CrashReporter {
 
     fun clear(context: Context) {
         directory(context).listFiles()?.forEach { it.delete() }
+    }
+
+    /**
+     * Best-effort attempt to send any already-pending report(s) *before*
+     * [dev.reedd.di.AppContainer] is built -- so a crash that happens during
+     * the container's own construction, and so recurs on every launch, still
+     * gets off the phone instead of being trapped forever behind the very
+     * code path it broke. [CrashLog]'s normal send (wired after the
+     * container exists) still runs afterwards and is what actually deletes
+     * the file once the server confirms it -- this path only ever adds a
+     * send, it never removes anything, so sending a file twice here and
+     * again there is harmless (two identical log lines on the server).
+     *
+     * Deliberately minimal: plain [HttpURLConnection] rather than the app's
+     * usual OkHttp/Retrofit stack, run on its own bare [Thread] rather than
+     * a coroutine dispatcher, and reads the server address/token straight
+     * out of [SettingsStore] -- as few moving parts as possible, since the
+     * whole point is to still work when something else in the app does not.
+     */
+    fun sendPendingEarly(context: Context) {
+        val files = pending(context)
+        if (files.isEmpty()) return
+        val appContext = context.applicationContext
+        Thread({
+            runCatching {
+                val settings = SettingsStore(appContext, CoroutineScope(SupervisorJob()))
+                val current = runBlocking { settings.current() }
+                val base = ServerAddress.normalize(current.baseUrl) ?: return@runCatching
+                val token = current.token?.filterNot { it.isWhitespace() }?.takeIf { it.isNotBlank() }
+                for (file in files) {
+                    runCatching { postPlain(base, token, file.readText()) }
+                        .onFailure { Log.i(TAG, "early send of ${file.name} failed: ${it.message}") }
+                }
+            }.onFailure { Log.i(TAG, "early crash send skipped: ${it.message}") }
+        }, "reedd-early-crash-send").start()
+    }
+
+    private fun postPlain(base: String, token: String?, body: String) {
+        val connection = URL(base.trimEnd('/') + "/api/diagnostics/crash")
+            .openConnection() as HttpURLConnection
+        connection.requestMethod = "POST"
+        connection.doOutput = true
+        connection.connectTimeout = 5_000
+        connection.readTimeout = 5_000
+        connection.setRequestProperty("Content-Type", "text/plain; charset=utf-8")
+        if (token != null) connection.setRequestProperty("Authorization", "Bearer $token")
+        try {
+            connection.outputStream.use { it.write(body.toByteArray()) }
+            val code = connection.responseCode
+            Log.i(TAG, "early crash send: HTTP $code")
+        } finally {
+            connection.disconnect()
+        }
     }
 
     private fun write(context: Context, thread: Thread, throwable: Throwable) {

@@ -147,6 +147,32 @@ class ConversionTest(TaskTestCase):
         self.run_task(job_id, audiblez=watcher)
         self.assertEqual(writes, [7])
 
+    def test_a_stuck_percentage_still_refreshes_the_eta_periodically(self):
+        # BUG-21 (audiblez/BUGS.md): audiblez now revises its ETA every
+        # sentence, but a long book's whole-number percentage can sit at 0 (or
+        # any other single value) for well over a minute -- without a
+        # time-based reason to write too, that fresher ETA never reached the
+        # manifest at all, and the app showed a stale one for as long as the
+        # percentage did not move.
+        job_id = self.make_job()
+        etas = []
+
+        def watcher(file_path, voice, pick_manually, speed, output_folder, post_event=None, **kw):
+            with mock.patch.object(JobStore, 'write', autospec=True,
+                                   side_effect=lambda s, j, m: etas.append(m['eta'])):
+                # Same whole-number percentage throughout -- only elapsed time
+                # (not a percent change) can be the reason any of these land.
+                with mock.patch('app.tasks.time.monotonic', side_effect=[0.0, 0.1, 2.1, 2.2, 4.3]):
+                    for i in range(5):
+                        post_event('CORE_PROGRESS', stats=SimpleNamespace(progress=0, eta=f'eta-{i}'))
+            fake_audiblez(events=False)(file_path, voice, pick_manually, speed, output_folder)
+
+        self.run_task(job_id, audiblez=watcher)
+        # eta-0: first call, always saved. eta-1 (t=0.1): too soon, skipped.
+        # eta-2 (t=2.1): >= 2s since the last save, saved. eta-3 (t=2.2): too
+        # soon again. eta-4 (t=4.3): >= 2s since eta-2's save, saved.
+        self.assertEqual(etas, ['eta-0', 'eta-2', 'eta-4'])
+
     def test_intermediate_wavs_are_deleted_but_deliverables_are_kept(self):
         job_id = self.make_job()
         self.run_task(job_id)

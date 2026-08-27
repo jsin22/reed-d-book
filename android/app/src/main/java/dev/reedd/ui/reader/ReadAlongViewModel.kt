@@ -237,14 +237,32 @@ class ReadAlongViewModel(
         _state.value = _state.value.copy(player = player.state.value)
     }
 
-    /** Play from the start of a sentence, e.g. because the reader tapped it. */
+    /**
+     * Play from the start of a sentence, e.g. because the reader tapped it.
+     *
+     * Explicitly requests the page move there (`_navigateTo.value =
+     * chunkIndex`, the same thing `resumeFollowing()` does) rather than
+     * leaving it to the poll loop's own "did the sentence change" check. That
+     * check compares real playback position against `_state.value.currentIndex`
+     * -- which this function itself sets to `chunkIndex` immediately, before
+     * `player.seekTo()` has actually landed there (ExoPlayer's seek completes
+     * asynchronously). The first poll tick after this runs would then see
+     * *stale, pre-seek* audio position against an *already-updated*
+     * currentIndex, "detect" a change to the old position, and send the page
+     * there instead -- and once the seek genuinely completes and playback
+     * position catches up to the real target, currentIndex already matches it,
+     * so the poll loop never corrects it either. Confirmed real, not
+     * theoretical: this was the actual cause behind BUG-17's repeated
+     * "still broken" reports, none of which were actually in `ChunkIndex` at
+     * all despite three rounds of fixes there.
+     */
     fun playFrom(chunkIndex: Int) {
         val target = index.seekPositionFor(chunkIndex) ?: return
         follower.onSeekRequested()
         player.seekTo(target)
         player.play()
         _state.value = _state.value.copy(currentIndex = chunkIndex, following = true)
-        follower.onNavigated(chunkIndex)
+        _navigateTo.value = chunkIndex
     }
 
     /**
@@ -272,10 +290,21 @@ class ReadAlongViewModel(
      * "Read from here" can be hidden for a passage that has no audio mapped to it
      * instead of failing after the reader picks it.
      */
-    fun onWordTapped(word: String, resourceHref: String?, blockText: String, offset: Int, anchorX: Int, anchorY: Int) {
+    fun onWordTapped(
+        word: String,
+        resourceHref: String?,
+        blockText: String,
+        offset: Int,
+        readingProgression: Double?,
+        anchorX: Int,
+        anchorY: Int,
+    ) {
         _tappedWord.value = TappedWordTarget(
             word = word,
-            sentenceIndex = index.indexOfTap(resourceHref, blockText, offset),
+            // readingProgression: where the reader is looking on screen, not
+            // audio playback position -- see ChunkIndex.indexOfTap for why that
+            // distinction matters.
+            sentenceIndex = index.indexOfTap(resourceHref, blockText, offset, readingProgression),
             anchorX = anchorX,
             anchorY = anchorY,
         )

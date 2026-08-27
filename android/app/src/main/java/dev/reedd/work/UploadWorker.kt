@@ -64,6 +64,7 @@ class UploadWorker(
         val settings = container.settings.current()
         val voice = book.voice ?: settings.voice
         val speed = book.speed ?: settings.speed
+        val engine = book.engine ?: settings.engine
 
         // OkHttp calls the progress callback on a thread that cannot suspend, so
         // byte counts cross into coroutine land through a conflated channel: the
@@ -92,6 +93,7 @@ class UploadWorker(
                 file = MultipartBody.Part.createFormData("file", book.originalFilename, body),
                 voice = voice?.toRequestBody(TEXT),
                 speed = speed.toString().toRequestBody(TEXT),
+                engine = engine?.toRequestBody(TEXT),
             )
 
             container.repository.updateUploadedBytes(bookId, epub.length())

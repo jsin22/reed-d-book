@@ -77,7 +77,7 @@ class MigrationTest {
 
     private fun openMigrated(): ReeddDatabase =
         Room.databaseBuilder(context, ReeddDatabase::class.java, DB_NAME)
-            .addMigrations(MIGRATION_1_2)
+            .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
             .allowMainThreadQueries()
             .build()
 

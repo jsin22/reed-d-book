@@ -54,7 +54,6 @@ class ServerLibraryAdopterTest {
         val api = ApiProvider(baseUrl = { server.url("/").toString() }, token = { null })
         val files = BookFiles(context)
         adopter = ServerLibraryAdopter(
-            context = context,
             repository = BookRepository(db.books(), db.sync(), api),
             api = api,
             files = files,

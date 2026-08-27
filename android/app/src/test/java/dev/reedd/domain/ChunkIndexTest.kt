@@ -138,6 +138,28 @@ class ChunkIndexTest {
             resourceHref = href, textHighlight = text, progression = 0.1 * ordinal,
         )
 
+    @Test
+    fun `a degenerate one-character chunk never wins a content match by coincidence`() {
+        // Regression, confirmed on a real device via a temporary diagnostic
+        // snackbar: "Read from here" resolved to a chunk whose own text was a
+        // lone "," -- an audiblez sentence-splitting edge case -- instead of the
+        // real tapped sentence, because a single character trivially satisfies
+        // "the selection contains this chunk's text" for almost any real
+        // sentence (nearly every paragraph has a comma somewhere), regardless of
+        // where that chunk actually sits in the book.
+        val degenerate = ChunkIndex(
+            listOf(
+                aligned(0, ","),
+                aligned(1, "It was a bright, cold day in April."),
+                aligned(2, "The clocks were striking thirteen."),
+            )
+        )
+        // Long enough to defeat strategy 1 (no single chunk's own text contains
+        // the whole thing) and force strategy 2, where the bug lived.
+        val selection = "It was a bright, cold day in April. The clocks were striking thirteen."
+        assertEquals(1, degenerate.indexOfSelection("EPUB/c1.xhtml", selection))
+    }
+
     private val selectable = ChunkIndex(
         listOf(
             aligned(0, "The quick brown fox jumps over the lazy dog."),
@@ -264,11 +286,76 @@ class ChunkIndexTest {
     }
 
     @Test
-    fun `a block whose whitespace differs falls back to window matching`() {
+    fun `a distant duplicate does not steal a match reading position would keep nearby`() {
+        // Regression, reproduced against a real book: a short, common line
+        // ("What do you mean?", "She said.") recurring many times in one chapter
+        // used to always resolve to its *first* occurrence, because the walk
+        // assigns a match to whichever candidate it reaches first in chapter
+        // order -- with no notion of where the reader actually is, an identical
+        // line pages before the tapped paragraph is exactly as good a candidate
+        // as the reader's own. This held even though the primary match and its
+        // normalization were both working exactly as intended -- BUG-17's fix
+        // did not cover this case.
+        val chunks = mutableListOf(aligned(0, "What do you mean?"))
+        for (i in 1..99) chunks.add(aligned(i, "Filler sentence number $i."))
+        chunks.add(aligned(100, "What do you mean?"))
+        val index = ChunkIndex(chunks)
+
+        val block = "He shook his head. What do you mean? She stared back."
+        val offset = block.indexOf("What do you mean?") + 5
+
+        // No reading position given: falls back to exactly the old, buggy
+        // behaviour -- the far occurrence wins, because nothing says otherwise.
+        assertEquals(0, index.indexOfTap("EPUB/c1.xhtml", block, offset))
+
+        // A reading position near the true occurrence (index 100 of 101
+        // candidates, so progression ~0.99) excludes the distant duplicate from
+        // the primary walk entirely, so the nearby one -- the one actually on
+        // screen -- wins instead.
+        assertEquals(100, index.indexOfTap("EPUB/c1.xhtml", block, offset, readingProgression = 0.99))
+    }
+
+    @Test
+    fun `a stale or missing reading position still falls back to a correct, if unrestricted, match`() {
+        // The reading position is a hint, not a requirement -- an unknown
+        // position (no locator yet) or one that happens to sit far from both
+        // occurrences must not make tapping stop working, only lose the extra
+        // precision.
+        val chunks = mutableListOf(aligned(0, "What do you mean?"))
+        for (i in 1..99) chunks.add(aligned(i, "Filler sentence number $i."))
+        chunks.add(aligned(100, "What do you mean?"))
+        val index = ChunkIndex(chunks)
+
+        val block = "He shook his head. What do you mean? She stared back."
+        val offset = block.indexOf("What do you mean?") + 5
+
+        assertEquals(0, index.indexOfTap("EPUB/c1.xhtml", block, offset, readingProgression = null))
+        // Progression ~0.5 (near candidate 50) is far from *either* occurrence,
+        // finds nothing in its own window, and falls back to the unrestricted
+        // walk, same as no reading position at all.
+        assertEquals(0, index.indexOfTap("EPUB/c1.xhtml", block, offset, readingProgression = 0.5))
+    }
+
+    @Test
+    fun `a block whose whitespace differs still resolves precisely`() {
         // The WebView's text content will not always match the stored text byte for
-        // byte; the tap should still land somewhere sensible rather than nowhere.
+        // byte -- the normalized primary match (same folding as TextNormalizer
+        // uses for the aligner) absorbs this rather than falling through to the
+        // position-blind window fallback.
         val reflowed = "He nodded.\n   Digital file formats are the   foundation of modern computing."
         assertEquals(1, tappable.indexOfTap("EPUB/c1.xhtml", reflowed, 45))
+    }
+
+    @Test
+    fun `a repeated sentence pair still resolves by position when the exact block differs`() {
+        // Same shape as "tapping a repeated sentence picks the occurrence tapped,
+        // not the first" above, but through a block whose whitespace does not
+        // match byte for byte -- the normalized primary walk (this test's real
+        // point) still has to track *which* occurrence, not just *that* the text
+        // is somewhere in the chunk list.
+        val reflowed = "He  nodded.\nDigital file formats are the foundation of modern computing.\nHe  nodded."
+        val secondOccurrence = reflowed.lastIndexOf("He")
+        assertEquals(2, tappable.indexOfTap("EPUB/c1.xhtml", reflowed, secondOccurrence + 4))
     }
 
     @Test

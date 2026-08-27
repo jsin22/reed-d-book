@@ -44,6 +44,7 @@ class BookRepository(
             status = JobStatus.fromWire(job.status),
             voice = job.voice,
             speed = job.speed,
+            engine = job.engine,
         )
     }
 
@@ -133,6 +134,21 @@ class BookRepository(
             .forEach { runCatching { File(it).delete() } }
         // sync_chunks and sync_chapters cascade with the row.
         bookDao.delete(bookId)
+    }
+
+    /**
+     * Removes only the downloaded audiobook and sync file from this device --
+     * the epub, cover, book row and the server's job are all left untouched, so
+     * the card stays in the library exactly where it was, just back in the
+     * "ready to download" state. This is the "free up space, keep the book"
+     * action; [deleteBook] is the "forget this book entirely" one.
+     */
+    suspend fun deleteDownloadedContent(bookId: String) {
+        val book = bookDao.get(bookId) ?: return
+        listOfNotNull(book.audiobookPath, book.syncPath).forEach { runCatching { File(it).delete() } }
+        updateDownload(bookId, DownloadState.NONE, downloadedBytes = 0, totalBytes = 0, error = null)
+        setAudiobook(bookId, null)
+        setSync(bookId, null, null)
     }
 
     /**

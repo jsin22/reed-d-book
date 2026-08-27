@@ -76,7 +76,7 @@ class AppContainer(context: Context) {
     }
 
     val libraryAdopter: ServerLibraryAdopter by lazy {
-        ServerLibraryAdopter(appContext, repository, api, files, importer, downloader)
+        ServerLibraryAdopter(repository, api, files, importer, downloader)
     }
 
     val watcher: ConversionWatcher by lazy {

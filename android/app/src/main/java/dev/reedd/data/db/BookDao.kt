@@ -60,13 +60,22 @@ interface BookDao {
     )
     suspend fun awaitingConversion(): List<BookEntity>
 
-    /** Conversions that finished but whose files are not on the device yet. */
+    /**
+     * Downloads the user already started that did not finish -- interrupted
+     * (QUEUED/RUNNING) or failed, so they get resumed/retried automatically.
+     *
+     * Deliberately excludes [DownloadState.NONE]: a finished conversion nobody
+     * has tapped "Download" for yet is *not* picked up here -- that is the
+     * library card's job, not the background poller's. Downloading a book's
+     * `.m4b` (often hundreds of MB) is a deliberate user action now, not
+     * something that starts itself the moment a job finishes.
+     */
     @Query(
         """
         SELECT * FROM books
         WHERE jobStatus = 'DONE'
           AND jobId IS NOT NULL
-          AND downloadState != 'DONE'
+          AND downloadState NOT IN ('NONE', 'DONE')
         ORDER BY addedAt ASC
         """
     )
@@ -80,6 +89,7 @@ interface BookDao {
             jobStatus = :status,
             voice = :voice,
             speed = :speed,
+            engine = :engine,
             jobProgress = 0,
             jobEta = NULL,
             jobChaptersDone = 0,
@@ -90,7 +100,7 @@ interface BookDao {
         WHERE id = :id
         """
     )
-    suspend fun attachJob(id: String, jobId: String, status: JobStatus, voice: String?, speed: Double?)
+    suspend fun attachJob(id: String, jobId: String, status: JobStatus, voice: String?, speed: Double?, engine: String?)
 
     /** Everything a poll learns, written in one statement. */
     @Query(

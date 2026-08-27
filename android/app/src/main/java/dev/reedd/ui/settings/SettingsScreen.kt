@@ -128,7 +128,7 @@ fun SettingsScreen(
 
                 is ConnectionCheck.Reachable -> Card {
                     Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text("Server reached", style = MaterialTheme.typography.titleSmall)
+                        Text("Server reached, logged in as ${result.loggedInAs}", style = MaterialTheme.typography.titleSmall)
                         result.dataDir?.let {
                             Text(
                                 "data: $it",
@@ -141,6 +141,23 @@ fun SettingsScreen(
                                 style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
                             )
                         }
+                    }
+                }
+
+                is ConnectionCheck.InvalidToken -> Card {
+                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(
+                            "Server reached, but this token was rejected",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                        Text(
+                            "The address is right, but the API token is not valid on this server. " +
+                                "Clear the field and paste your invite token again -- a stray character " +
+                                "from copying it (a trailing newline, a missing digit) is the usual cause.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
                 }
 

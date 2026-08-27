@@ -38,6 +38,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -72,6 +73,7 @@ import org.readium.r2.navigator.epub.css.RsProperties
 import org.readium.r2.navigator.input.DragEvent
 import org.readium.r2.navigator.input.InputListener
 import org.readium.r2.navigator.input.TapEvent
+import org.readium.r2.shared.publication.Locator
 
 /** Log tag for the word-tap path, which can only be diagnosed on hardware. */
 private const val TAG_TAP = "ReeddTap"
@@ -136,6 +138,15 @@ fun ReaderScreen(
         } else {
             controller.show(WindowInsetsCompat.Type.systemBars())
         }
+    }
+
+    // Reading and listening along both go long stretches with no touch input, which
+    // is exactly what the system screen timeout is watching for -- without this the
+    // screen dims and locks mid-chapter. Cleared on dispose so leaving the reader
+    // (closing the book, backgrounding the app) does not keep the whole device awake.
+    DisposableEffect(Unit) {
+        view.keepScreenOn = true
+        onDispose { view.keepScreenOn = false }
     }
 
     // With the e-ink theme the whole screen becomes paper, not just the page: a grey
@@ -225,7 +236,11 @@ fun ReaderScreen(
                         viewModel = viewModel,
                         readAlongViewModel = readAlongViewModel,
                         settings = settings,
-                        onToggleImmersive = { immersive = !immersive },
+                        // One-way on purpose: entering fullscreen is the toolbar
+                        // button's job alone now (BUGS.md). A tap landing on nothing
+                        // can still close it, or there would be no way back once the
+                        // toolbar with the button on it is itself hidden.
+                        onExitImmersive = { immersive = false },
                         onMessage = { text -> scope.launch { snackbar.showSnackbar(text) } },
                     )
                 }
@@ -321,7 +336,7 @@ private fun EpubNavigator(
     viewModel: ReaderViewModel,
     readAlongViewModel: ReadAlongViewModel,
     settings: ReaderSettings,
-    onToggleImmersive: () -> Unit,
+    onExitImmersive: () -> Unit,
     onMessage: (String) -> Unit,
 ) {
     val context = LocalContext.current
@@ -331,6 +346,13 @@ private fun EpubNavigator(
     val highlightTint = MaterialTheme.colorScheme.primary.copy(alpha = 0.35f).toArgbCompat()
     val scope = rememberCoroutineScope()
     val book by viewModel.book.collectAsStateWithLifecycle()
+
+    // The locator from the most recent page turn, per PaginationListener below --
+    // used by the tap handler further down as a fresher source of "where is the
+    // reader looking" than fragment.currentLocator.value, which updates through a
+    // separate onProgressionChanged path that lagged behind rapid page turns
+    // enough to send "Read from here" to the wrong page (BUGS.md BUG-17).
+    var lastPageLocator by remember { mutableStateOf<Locator?>(null) }
 
     var navigator by remember { mutableStateOf<EpubNavigatorFragment?>(null) }
     val readAlong by readAlongViewModel.state.collectAsStateWithLifecycle()
@@ -347,6 +369,17 @@ private fun EpubNavigator(
             listener = ExternalLinkOpener { url ->
                 runCatching {
                     context.startActivity(Intent(Intent.ACTION_VIEW, url.toString().toUri()))
+                }
+            },
+            // The real, currently-rendered page count for whichever chapter is
+            // loaded -- fired again whenever the WebView re-paginates, including on
+            // a font-size change. See ReaderViewModel.onPageChanged/PageInfo and
+            // BUGS.md for why this replaced a whole-book byte-size estimate that
+            // never moved when text size did.
+            paginationListener = object : EpubNavigatorFragment.PaginationListener {
+                override fun onPageChanged(pageIndex: Int, totalPages: Int, locator: Locator) {
+                    viewModel.onPageChanged(pageIndex, totalPages)
+                    lastPageLocator = locator
                 }
             },
             // A "Read from here" item added to the text-selection toolbar, for a
@@ -537,8 +570,10 @@ private fun EpubNavigator(
              * A single tap anywhere resolves the word under it. Page turning is
              * swipe-only -- there is deliberately no tap-to-turn-page zone, so a tap
              * always means "what word is this" and nothing else. When nothing is
-             * under the finger it either dismisses an outstanding menu or toggles the
-             * toolbars, so a tap is never a dead action.
+             * under the finger it either dismisses an outstanding menu or, if the
+             * toolbars are currently hidden, brings them back -- but never hides
+             * them: entering fullscreen is the toolbar button's job alone, so a tap
+             * on the page can never start it, only end it.
              */
             override fun onTap(event: TapEvent): Boolean {
                 scope.launch {
@@ -553,11 +588,21 @@ private fun EpubNavigator(
                     )
 
                     if (tapped != null) {
+                        // Prefer the locator from the most recent page turn over
+                        // fragment.currentLocator.value directly -- the latter
+                        // updates through a separate, laggier path (BUGS.md
+                        // BUG-17) and was measured stale enough after rapid page
+                        // turns to send a tap's resourceHref/progression to the
+                        // wrong page.
+                        val locator = lastPageLocator ?: fragment.currentLocator.value
                         readAlongViewModel.onWordTapped(
                             word = tapped.word,
-                            resourceHref = fragment.currentLocator.value.href.toString(),
+                            resourceHref = locator.href.toString(),
                             blockText = tapped.blockText,
                             offset = tapped.offset,
+                            // Where the reader is looking on screen, not audio
+                            // playback position -- see ChunkIndex.indexOfTap.
+                            readingProgression = locator.locations.progression,
                             // Just below the word, so the menu does not cover it.
                             anchorX = (tapped.left * density).toInt(),
                             anchorY = (tapped.bottom * density).toInt(),
@@ -569,7 +614,7 @@ private fun EpubNavigator(
                         readAlongViewModel.dismissWordMenu()
                         TapTextResolver.clearHighlight(fragment)
                     } else {
-                        onToggleImmersive()
+                        onExitImmersive()
                     }
                 }
                 return true

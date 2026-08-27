@@ -29,20 +29,27 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.reedd.data.settings.ServerSettings
 
+/** The only engine the app offers -- see the class doc below for why. */
+private const val ENGINE = "pocket_tts"
+
 /**
  * Voice and speed for one conversion.
  *
- * The voice list comes from `GET /api/voices`, which is the server asking audiblez.
- * When that list is empty the server has no TTS stack installed and skips
- * validation, so this falls back to a free-text field rather than an empty picker
- * the user cannot get past.
+ * The engine itself is not a choice here: `pocket_tts` is the one this app
+ * offers, a deliberate simplification -- the server still supports Kokoro and
+ * Supertonic (`GET /api/engines`), reachable directly for anything that wants
+ * them, but this app locks to the one voice found to sound best. Voices still
+ * come from that same endpoint, scoped to `pocket_tts`'s own catalog. When the
+ * server does not report `pocket_tts` at all (no TTS stack installed, or an
+ * older server) this falls back to a free-text voice field submitted with no
+ * engine chosen, rather than an empty picker the user cannot get past.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ImportSheet(
     viewModel: LibraryViewModel,
     onDismiss: () -> Unit,
-    onConfirm: (voice: String?, speed: Double) -> Unit,
+    onConfirm: (voice: String?, speed: Double, engine: String?) -> Unit,
 ) {
     val options by viewModel.options.collectAsStateWithLifecycle()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
@@ -52,10 +59,13 @@ fun ImportSheet(
     var voice by remember { mutableStateOf<String?>(null) }
     var freeTextVoice by remember { mutableStateOf("") }
     var speed by remember { mutableFloatStateOf(settings.speed.toFloat()) }
+    val engineAvailable = options.engines.any { it.id == ENGINE }
 
-    // Default to whatever the user last chose, else what the server suggests.
-    LaunchedEffect(options.defaultVoice, settings.voice) {
-        if (voice == null) voice = settings.voice ?: options.defaultVoice
+    LaunchedEffect(options.engines) {
+        val voicesForEngine = options.voicesFor(ENGINE)
+        if (voice !in voicesForEngine) {
+            voice = (settings.voice?.takeIf { it in voicesForEngine }) ?: options.defaultVoiceFor(ENGINE)
+        }
     }
 
     ModalBottomSheet(onDismissRequest = onDismiss) {
@@ -77,10 +87,10 @@ fun ImportSheet(
                     color = MaterialTheme.colorScheme.error,
                 )
 
-                options.voices.isEmpty() -> {
+                !engineAvailable -> {
                     Text("Voice", style = MaterialTheme.typography.titleSmall)
                     Text(
-                        "The server did not report any voices, so it is not validating them. Type one audiblez accepts, or leave this blank for the server's default.",
+                        "The server did not report the $ENGINE engine, so it is not validating voices. Type one audiblez accepts, or leave this blank for the server's default.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -94,14 +104,23 @@ fun ImportSheet(
                 }
 
                 else -> {
+                    val voicesForEngine = options.voicesFor(ENGINE)
                     Text("Voice", style = MaterialTheme.typography.titleSmall)
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        options.voices.forEach { candidate ->
-                            FilterChip(
-                                selected = voice == candidate,
-                                onClick = { voice = candidate },
-                                label = { Text(candidate) },
-                            )
+                    if (voicesForEngine.isEmpty()) {
+                        Text(
+                            "This engine reported no voices; using its server-side default.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    } else {
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            voicesForEngine.forEach { candidate ->
+                                FilterChip(
+                                    selected = voice == candidate,
+                                    onClick = { voice = candidate },
+                                    label = { Text(candidate) },
+                                )
+                            }
                         }
                     }
                 }
@@ -119,8 +138,9 @@ fun ImportSheet(
 
             Button(
                 onClick = {
-                    val chosen = if (options.voices.isEmpty()) freeTextVoice.ifBlank { null } else voice
-                    onConfirm(chosen, speed.toDouble())
+                    val chosenVoice = if (engineAvailable) voice else freeTextVoice.ifBlank { null }
+                    val chosenEngine = if (engineAvailable) ENGINE else null
+                    onConfirm(chosenVoice, speed.toDouble(), chosenEngine)
                 },
                 enabled = !options.loading,
                 modifier = Modifier.fillMaxWidth(),

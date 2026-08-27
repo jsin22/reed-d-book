@@ -190,6 +190,587 @@ Kept rather than deleted: each one records *why* it happened, which is the part 
 having when something similar shows up later.
 
 
+### BUG-23 — A pasted API token containing a newline crashed the app on every launch
+
+**Reported** 2026-08-24 -- "i added the api token, tried uploading a book and
+the app crashed", then "closed the app and opened it back up and it crashed
+automatically" on every subsequent launch, even after clearing app storage
+and re-adding the token. **Fixed** 2026-08-24. **Severity** critical -- total
+loss of app function for anyone whose token has this shape, and it silently
+defeats the app's own crash-reporting (see below), which made this by far the
+hardest bug in the project to get a stack trace for.
+
+**Symptom.** App unusable: crashed immediately on every launch once a
+per-user token was saved (see the multi-user sharing feature). No crash
+report ever reached the server (`GET /api/diagnostics/crashes`) despite
+several rounds of hardening `CrashLog`/`CrashReporter` to send earlier and
+more aggressively. Eventually diagnosed from the phone's own OS-level crash
+capture (OPPO/ColorOS `crashbox`), pulled off-device by hand once adb/USB
+debugging turned out not to be available:
+
+```
+java.lang.IllegalArgumentException: Unexpected char 0x0a at 50 in Authorization value
+    at okhttp3.internal._HeadersCommonKt.headersCheckValue(-HeadersCommon.kt:157)
+    at dev.reedd.data.remote.AuthInterceptor.intercept(AuthInterceptor.kt:23)
+    at okhttp3.internal.connection.RealCall$AsyncCall.run(RealCall.kt:580)
+    at java.lang.Thread.run(Thread.java:1572)
+```
+
+**Cause.** The pasted token contained an embedded newline (`0x0a`) --
+almost certainly picked up from copying it out of a chat bubble or terminal
+block whose selection included a trailing line break. `SettingsStore.
+setServer()` already called `token.trim()`, which strips *leading/trailing*
+whitespace, but not one embedded mid-string by however the paste actually
+landed in a Compose `OutlinedTextField(singleLine = true)` -- `singleLine`
+does not reliably strip an embedded `\n` from pasted text, only from typed
+input. `AuthInterceptor` then built `"Bearer $value"` and handed it to
+OkHttp's `Request.Builder.header()`, which validates header values per RFC
+and throws `IllegalArgumentException` on any raw control character -- a real
+safety check (this is exactly what stops header/response-splitting
+attacks), just not one anything downstream was prepared for.
+
+The exception was **thrown on OkHttp's own async dispatcher thread**
+(`RealCall$AsyncCall.run` → `Thread.run`), never on the calling coroutine at
+all -- so it never reached any of `LibraryViewModel`'s `runCatching` blocks,
+and crashed the whole process via the JVM's default uncaught-exception
+handler on every request the app made, starting from the very first one at
+launch (`ConversionWatcher.reconcile()` polling the server). This is also
+why no crash report ever reached the server: `CrashLog.upload()` and the
+`sendPendingEarly()` hardening added while chasing this bug both send the
+report through the *same* `Authorization` header, so every report-send
+attempt failed (or crashed) the same way the original request did.
+
+**Fix.** Strip all whitespace from the token, not just the edges, in two
+places: `SettingsStore.setServer()` (fixes it at the source, so a bad paste
+is never saved), and `AuthInterceptor.intercept()` itself (defense in depth,
+and critically it *self-heals* a token already saved bad -- no need to
+re-enter it in Settings after updating). `CrashReporter.postPlain()`'s early
+-send path got the same filter for consistency. Confirmed against the
+device's own crash captures: the same `IllegalArgumentException` at
+`AuthInterceptor.kt:23` appears identically across five separate process
+launches (five different PIDs) in the captured `crash_log`, i.e. it really
+was 100% reproducible from the moment the bad token was saved, not
+intermittent.
+
+**Lesson for next time.** Whatever crash-reporting exists must not itself
+depend on the exact thing most likely to be broken (here: a valid,
+correctly-encoded auth token) -- `sendPendingEarly()`'s early-send hardening
+was the right instinct but could not have worked while the auth header
+itself was what crashed every request, including its own. A future
+diagnostic path (or the crash reporter itself) should have a way to reach
+the server with **no** headers at all as a last resort.
+
+### BUG-22 — A dialogue-heavy chapter could stall for 20+ minutes before synthesis even started
+
+**Reported** 2026-08-20 -- as a re-test of BUG-21's fix ("just kicked off
+another book to test. verify its working"), which surfaced this instead: the
+same book stuck at 0% for 90+ seconds looked identical to BUG-21 at first, but
+turned out to be a completely different, far more serious bug hiding behind
+it. **Fixed** 2026-08-20. **Severity** high -- not cosmetic like BUG-21, this
+was real, massive, silent wall-clock time.
+
+**Symptom.** Progress and ETA genuinely frozen (not just stale, as in
+BUG-21) for well over 90 seconds on `a-scandal-in-bohemia.epub`,
+`pocket_tts`. Diagnosed from process-level evidence: the celery worker was
+at 70%+ CPU the whole time but `nvidia-smi` showed 0% GPU utilization (`py-spy`
+was tried for a live stack trace but this machine has no root, and it needs
+ptrace permission it does not have; `/proc/<pid>/task/*/wchan` substituted --
+the main thread showed as actively running, not blocked, ruling out a
+deadlock) -- and `worker.log` showed the tiny cached chapter 1 finishing in
+1.44s followed by *nothing at all* for chapter 2, not even the "starting timer
+now!" line `_generate_audio_stream_short_text` logs before any actual
+generation. Whatever was consuming that CPU was happening *before*
+`engine.synthesize()` was ever called for chapter 2's first sentence -- which,
+combined with a plain, no-TTS reproduction script hanging on nothing but epub
+parsing and sentence splitting, pointed at `quote_split`/`text_split` rather
+than Pocket TTS itself.
+
+**Cause, confirmed by direct measurement.** `text_split.py`'s
+`split_sentences()` calls `spacy.load('xx_ent_wiki_sm')` **fresh from disk on
+every single call** -- never cached. Measured a single *cold* call at 2.6
+seconds. `quote_split.py`'s `split_into_spans()` -- which every chapter's
+synthesis goes through, called once at the top of `core.py`'s
+`gen_audio_segments()`, before its own per-sentence loop even begins -- calls
+`split_sentences()` once per narration/quote span, not once per chapter.
+Doyle's dialogue-heavy prose in this specific chapter has 268 quote spans,
+~536 total narration+quote spans once narration in between is counted: a
+naive 536 x 2.6s puts the upper bound around 23 minutes of pure, repeated
+model-reloading, invisible to any progress or ETA tracking because it all
+happens before `gen_audio_segments()`'s counted work starts. (The real
+figure was lower in practice -- see Verified below -- almost certainly
+because the OS's file cache warms up after the first load, so most of the 536
+were cheaper than that one cold measurement, not free.) This is not new, not
+related to any change this session -- almost certainly been quietly costing
+every dialogue-heavy book a large multiple of its real synthesis time for as
+long as `quote_split.py` has existed, just never isolated and measured
+before.
+
+**Fix.** `text_split.py` now loads the spaCy model into a module-level
+global once per process, not once per call -- `nlp.add_pipe('sentencizer')`
+moved inside the same one-time initialization (calling it twice on a reused
+`nlp` would itself raise, since the pipe would already exist). Measured
+directly, same chapter, in isolation, before and after: `split_into_spans()`
+on this exact 46,586-character chapter went from an untimed multi-minute
+stall to a measured 2.04 seconds.
+
+**Verified against real, whole-book conversions**, same book/engine/voice
+throughout: the last run *before* this fix (`82ac5f90`, 2026-08-19) took
+**10m37s** end to end. Two runs *after* the fix (`7ddf0abd` and `f8cb63b6`,
+2026-08-20) took **3m31s** and **3m29s** -- a real ~3x speedup in production,
+not just the isolated measurement above.
+
+Unverified: whether any other caller relies on getting a *fresh* spaCy
+pipeline per call (none found -- `split_sentences()`'s only other caller,
+`literary_analysis.py`, wants the same shared splitter by design, per
+`text_split.py`'s own module docstring) -- and whether per-process caching
+interacts correctly with `_run_chapters_parallel`'s worker pool, where each
+worker process would still pay the one-time load cost independently (expected
+and fine -- once per process, not once per span, is the entire fix).
+
+### BUG-21 — Conversion's estimated time was way off, and could stay stuck for minutes
+
+**Reported** 2026-08-19, revised again 2026-08-20 after the first fix did not
+fully cover it. **Fixed** 2026-08-20. **Severity** low -- cosmetic, but
+actively misleading.
+
+**Symptom, first report:** the ETA read as too optimistic for a whole
+`pocket_tts` conversion and never corrected itself. **Symptom, second report:**
+"the estimated time is way off. its stuck on 1m 33s and 0% and its been a
+couple mins. can't we take the total number of words and divide by estimate
+words per second for the model?"
+
+**Cause, first pass.** `core.py`'s `_run_chapters_sequential` (the path every
+GPU job uses, since `resolve_worker_count()` falls back to one process
+whenever CUDA is available) computed each chapter's real chars/sec
+(`chars_per_sec = len(text) / delta_seconds`) but only used it for a log
+line -- it never wrote that back into `stats.chars_per_sec`, which the ETA is
+computed from. So the ETA stayed pinned to `main()`'s initial guess (500
+chars/sec on CUDA, 50 on CPU) for the whole run. Measured Pocket TTS at ~314
+chars/sec real GPU throughput -- well under the 500 guess -- so the ETA read
+as finishing sooner than it really would. First fix: revise
+`stats.chars_per_sec` from real, cumulative throughput after every chapter,
+matching what `_run_chapters_parallel` already did.
+
+**Cause, second pass -- the first fix was not granular enough.** That
+revision only happens *between chapters*. For a book whose first real chapter
+is large (or, as reported, whose actual chapter 1 is a tiny cached
+table-of-contents file and the real content is chapter 2), the ETA stays at
+the initial guess for as long as that first chapter takes to finish -- which
+can be minutes, exactly as reported ("stuck... a couple mins"). The user's own
+suggestion (words-so-far / real elapsed time) was the right shape of fix, just
+needed applying more often than "once per chapter."
+
+**Fix.** `stats` gained a `start_time`, set once when the whole job starts.
+`gen_audio_segments`' existing per-*sentence* progress update now also revises
+`stats.chars_per_sec` from `stats.processed_chars / (now - stats.start_time)`
+on every sentence (after a 2-second grace period, so one unusually fast or
+slow first sentence cannot swing the estimate wildly) -- not just at chapter
+boundaries. `_run_chapters_sequential`'s own now-redundant per-chapter
+revision was removed; the per-sentence one supersedes it, including on the
+chapter's last sentence. `_run_chapters_parallel` is unchanged -- it runs
+chapters in separate worker processes with no cheap way to get per-sentence
+progress out of them, so chapter-boundary granularity is what it has to work
+with, but it never runs on CUDA in practice anyway.
+
+**Cause, third pass -- a second bug in the server, found while verifying the
+above.** Testing the fix against a live job showed the worker's own log
+printing a fresh, correct ETA every sentence exactly as intended, but
+`GET /api/jobs/{id}` -- what the app actually polls -- kept reporting the same
+stale one. `server/app/tasks.py`'s `_Progress` (the class that turns audiblez'
+`post_event` stream into writes to `job.json`) only wrote to disk when the
+whole-number percentage changed, on the reasoning that `CORE_PROGRESS` fires
+once per sentence and a novel would otherwise be tens of thousands of writes.
+That reasoning held when percentage was the only thing worth refreshing; once
+the ETA started changing every sentence too (this same bug, second pass), a
+book whose percentage sits at a single value for a long stretch -- 0%, for the
+first couple of minutes of a big book -- meant the fresher ETA underneath it
+never reached the manifest at all, exactly the second report's "stuck on 1m
+33s and 0%."
+
+**Fix.** `_Progress` also writes now if at least `PROGRESS_SAVE_INTERVAL_SECONDS`
+(2.0) have passed since its last write, even when the percentage has not moved
+-- bounded, time-based freshness instead of relying on percentage alone to
+decide when the ETA is worth persisting. Covered by a new test
+(`test_a_stuck_percentage_still_refreshes_the_eta_periodically`, mocking
+`time.monotonic` rather than sleeping) alongside the existing
+`test_repeated_percentages_do_not_rewrite_the_manifest`, which still holds --
+14/14 server tests passing.
+
+Verified twice against real conversions (`the-tell-tale-heart.epub`,
+`pocket_tts`, `af_heart_clone`) -- once by watching `worker.log`, which caught
+the third-pass bug (the log looked correct while the API did not, which is
+what pointed at persistence rather than the ETA math itself), and again after
+the fix by polling `GET /api/jobs/{id}` directly: progress and ETA now
+visibly move every few seconds from the very first sentence, converging
+smoothly to 0 rather than sitting frozen until a chapter completes or a
+percentage point ticks over.
+
+### BUG-20 — The page count did not change with text size
+
+**Reported** 2026-08-20. **Fixed** 2026-08-20. **Severity** low, but confusing --
+made the page indicator look broken.
+
+**Symptom** "as the text size changes the number of pages should change...
+currently i'll see page 21 on two pages."
+
+**Cause.** The page indicator (`ReaderViewModel.PageInfo`) was Readium's
+`Publication.positions()` -- not real pages at all. Traced the actual formula by
+decompiling `readium-streamer`'s `EpubPositionsService` (no public docs on the
+exact number): one "position" is **1024 bytes of a chapter's raw XHTML markup**
+(`EpubPositionsService.ReflowableStrategy.ArchiveEntryLength`, the library's own
+`getRecommended()` default), and the whole-book total is the sum of that across
+every chapter. It is a proxy for how far into the book's underlying markup you
+are, bucketed into ~1KB chunks -- entirely independent of font size, screen
+size, or how the text is actually laid out, which is exactly why resizing text
+never moved it: the underlying markup byte count does not change just because
+it now takes more physical swipes to read the same amount of it.
+
+**Fix.** Replaced it with Readium's `EpubNavigatorFragment.PaginationListener`
+(`onPageChanged(pageIndex, pageCount, locator)`), wired up where the fragment is
+created (`ReaderScreen.kt`) and forwarded to `ReaderViewModel.onPageChanged`.
+This reports the real, currently-rendered page count for whichever chapter is
+loaded, fired again every time the WebView re-paginates -- including on a
+font-size change, so the count now genuinely responds to it. Deliberately
+**per-chapter, not whole-book**: a true whole-book count would mean laying out
+and measuring every chapter at the current font size on every resize, not just
+the one on screen, which would make changing text size noticeably slower on a
+long book. The label is unchanged ("21 / 340"), but now means "page 21 of this
+chapter's 340" rather than a whole-book estimate -- a real, deliberate scope
+change discussed with the user before implementing, not a silent one.
+
+Unverified: whether Readium's page index is really 0-based (inferred by
+decompiling `EpubNavigatorFragment`'s own internal `PageChangeListener`, which
+extends `ViewPager.SimpleOnPageChangeListener` -- 0-based by Android convention
+-- not from any doc or test); and whether `onPageChanged` fires sensibly in
+scroll mode, where "page" has no real meaning (the existing empty-label guard
+should just hide the indicator there, but this has not been confirmed on a
+device).
+
+### BUG-19 — Pocket TTS occasionally duplicated a word that is not in the text
+
+**Reported** 2026-08-19, on `the-tell-tale-heart.epub`, `pocket_tts` engine,
+`af_heart_clone` voice. **Fixed** 2026-08-19, after a second report. **Severity**
+low -- an occasional artifact, not a correctness bug, but audible.
+
+**Symptom** "some words were duplicated in the audio but not the text." Seen
+again later on `OceanofPDF.com_Supermarket_-_Bobby_Hall.epub`, page 20: "the
+words 'then burgers' repeated" -- traced to the book's own text, "...then went
+on to fries, then burgers, then cashier, then shift manager..." (a long,
+comma-heavy list sentence).
+
+**Cause.** Not an app bug -- checked `core.py`'s per-sentence synthesis loop
+for a pipeline cause (a retry that doesn't discard a partial attempt, chunk
+overlap) and it is clean, one `engine.synthesize()` call per sentence. Pocket
+TTS itself silently re-splits any sentence over 50 tokens
+(`MAX_TOKEN_PER_CHUNK`) into independently-generated chunks with **no
+continuity between them** -- its own source has a TODO acknowledging this ("a
+very simplistic way of handling long texts... we could do much better using
+teacher forcing"). Both reported cases were long: Poe's sentences in the first
+book measured 71-84 tokens, the Supermarket list sentence in the second was
+comparably long -- both well over the 50-token threshold, so both hit this
+seam. A repeated word right at a chunk boundary is exactly what a missing
+teacher-forcing continuity would produce. (A second contributing factor also
+confirmed, not fixed: Pocket TTS samples with `temp=0.7` and no noise clamp by
+default, genuine stochastic variance that is part of what gives it more
+expressive delivery than Kokoro, at the cost of occasional instability
+regardless of sentence length.)
+
+**First decision, after the first report:** generated the same real sentences
+at default settings and at a more conservative one (`temp=0.5`,
+`noise_clamp=2.5`) for an A/B listen, and chose to **keep the defaults** --
+not worth the expressiveness trade for an occasional artifact. Revisited after
+the second report landed on a real, different sentence.
+
+**Fix**, in `engines.py`'s `PocketTTSEngine`: rather than trading
+expressiveness away for the *whole* book, `synthesize()` now tokenizes each
+sentence with Pocket TTS's own tokenizer before generating it and only
+switches to the more conservative settings (`temp=0.5`, `noise_clamp=2.5`)
+when it is actually longer than `MAX_TOKEN_PER_CHUNK` -- the one case
+confirmed at real risk of the chunk-boundary seam. Short sentences (the vast
+majority of dialogue) keep the library's own default temperature and full
+expressiveness. `model.temp`/`.noise_clamp` are read fresh on every generation
+step (`tts_model.py`'s `_run_flow_lm`), so mutating them on the one shared
+model instance per call works without a second model loaded -- confirmed
+directly (`e.model.temp` before/after a short vs. a 69-token sentence) and
+through a real end-to-end conversion.
+
+Unverified: whether this fully eliminates the artifact, or only reduces its
+odds -- `temp=0.5`/`noise_clamp=2.5` was chosen from one earlier A/B listen,
+not tuned specifically against this failure mode, and Pocket TTS's chunk
+splitter operates on its own tokenization of the *prepared* prompt, not the
+raw sentence text checked here, so the exact token count this compares
+against is an approximation of the library's real internal threshold, not a
+byte-for-byte match.
+
+### BUG-18 — A tap on blank page space could enter fullscreen, not just leave it
+
+**Reported** 2026-08-19. **Fixed** 2026-08-19. **Severity** low, but a surprising
+gesture the user did not ask for.
+
+**Symptom** "we should not allow going to fullscreen mode by clicking an area in
+the page. fullscreen should only happen via the fullscreen button on the
+toolbar."
+
+**Cause.** `ReaderScreen.kt`'s tap handler treated a tap landing on nothing (no
+word resolved, no menu open) as `onToggleImmersive()` -- a plain toggle, so it
+both entered and left fullscreen depending on the current state. Only the
+toolbar's own button was meant to be a way *in*; the toggle made blank space do
+the same thing.
+
+**Fix.** The callback into `EpubNavigator` is one-way now (`onExitImmersive`,
+`{ immersive = false }`), never a toggle. A page tap can still *close*
+fullscreen -- there is no other way back, since the toolbar carrying the
+button is itself hidden while immersive -- but can no longer open it. Only
+`IconButton(onClick = { immersive = true })` on the toolbar does that.
+
+### BUG-17 — Word tap unreliable, and "Read from here" sometimes jumped pages back
+
+**Reported** 2026-08-19. **Fixed** 2026-08-19. **Severity** high -- this is the
+read-along feature's core interaction.
+
+**Symptom** "some times i click on a word to get the context menu and it
+doesnt work. other times i click on a word and select read from here and it
+jumps to a spot several pages back."
+
+**Cause.** `ChunkIndex.indexOfTap` matches the word a tap resolved to against
+the sync mapping by walking the block's sentences and text together with a
+cursor, requiring each sentence's stored `textHighlight` to appear as a
+*literal, unnormalized* substring of the tapped block's text. That text comes
+from two different parsers on the same epub markup: `textHighlight` was
+extracted at conversion time with jsoup (`EpubTextExtractor`), the tapped
+block's text comes from the WebView's rendered DOM at tap time (Blink). The
+two usually agree byte-for-byte but not always -- a differently decoded
+entity, a stray smart quote -- and when they didn't, the literal match failed
+silently and fell through to a fallback that searched the *entire chapter* for
+matching content and returned the first occurrence. For any phrase that
+repeats ("he nodded," a dialogue tag, anything common), that first occurrence
+can be pages before the tap -- exactly the reported symptom. This is also
+almost certainly what caused some taps to seem to "not work": a tap that
+should have opened the menu on the correct word could resolve to a match many
+paragraphs away, distant enough from the tap's own screen position that
+nothing visibly happened where the finger was.
+
+**Fix**, in `ChunkIndex.kt`:
+1. The primary cursor-walk now compares `textHighlight` against the tapped
+   block's text in the same normalized space (case, whitespace, quotes, dashes
+   folded) `TextNormalizer` already uses for the aligner, rather than requiring
+   a literal match. This alone should resolve the large majority of cases,
+   since it is exactly the kind of superficial difference two parsers produce.
+2. When even that fails, the fallback -- reworked to share its three-strategy
+   content match with `indexOfSelection` via a new private `matchByContent`,
+   rather than being a weaker, one-strategy reimplementation of it -- now tries
+   candidates at-or-after whichever sentence the walk last successfully placed
+   *before* falling back to an unrestricted, whole-chapter search. A repeated
+   phrase now resolves to its nearest occurrence, not its first.
+
+Covered by two new/renamed unit tests in `ChunkIndexTest.kt` (30/30 passing).
+Unverified on a device beyond the reported case: whether every real-world
+jsoup/Blink discrepancy is one `TextNormalizer` already folds, versus one that
+still needs the position-scoped fallback.
+
+**Follow-up, same day: still jumped back, on a real book.** Reported again on
+the device: "saw the bug again where i select read from here and it jumps
+back. page 15 of the supermarket book. it jumps back to page 11." This was a
+deeper, different bug than the one above -- not a match *failing* at all.
+
+**Cause, confirmed against the real generated sync file** (9,724 chunks, 32
+chapters): `indexOfTap`'s cursor walk iterates every aligned chunk in the
+*whole chapter*, in chapter order, and assigns a match to whichever candidate
+it reaches first whose text is found anywhere in the tapped block. That is
+correct when a sentence's wording is unique within the chapter, but this
+book's dialogue is not: `"What do you mean?"` appears 3 times in one chapter,
+`"she interrupted."` twice 234 chunks apart, `"Think about it, man."` twice
+only 11 chunks apart -- 59 distinct duplicated lines in this book alone,
+several within a few hundred chunks of each other (roughly a handful of pages,
+by the book's own 9,724 chunks / ~400 minutes). Tapping the *second*
+occurrence of such a line, on its own paragraph, with a perfectly good
+normalized match available, still resolved to the *first* occurrence in the
+chapter -- because the walk had no notion of *where the reader currently is*,
+so an identical line pages earlier was exactly as valid a candidate as the
+reader's own paragraph, and chapter order always favoured the earlier one.
+
+**Fix**, in `ChunkIndex.kt`: `indexOfTap` takes an optional `anchorIndex` --
+the reader's approximate current position, threaded through from
+`ReadAlongViewModel.onWordTapped` as `ReadAlongState.currentIndex` (the
+currently playing or last-known sentence). The cursor walk now runs first
+against only candidates within `ANCHOR_WINDOW` (40 chunks) of that anchor,
+which excludes a duplicate several pages away from contention entirely before
+chapter-order bias can pick it; only if nothing matches nearby does it retry
+unrestricted, so a reader paused and paged well ahead of or behind the audio
+(or with no playback position yet) still gets a tap resolved, just without the
+extra precision. `ANCHOR_WINDOW` is a reasoned guess, not a measurement --
+pagination depends on font size and screen, which `ChunkIndex` has no way to
+know, so there is no way to derive a true chunks-per-page figure here.
+
+Covered by two new unit tests reproducing the exact mechanism (a distant
+duplicate winning with no anchor, an anchor correcting it, a stale/missing
+anchor still falling back correctly) -- 32/32 passing. Unverified beyond the
+reported case: whether 40 chunks is the right window on other books, and
+whether `currentIndex` is usually close enough to the true tap position in
+practice (it will be stale if the reader has paged far ahead of playback with
+"follow" off).
+
+**Follow-up, next day: the anchor fix made it worse, not better.** Reported:
+"with the latest changes the read from here feature is completely broken. the
+pages jump around." The "unverified" concern above was the actual bug, and it
+was worse than a stale anchor -- it was almost always the *wrong kind* of
+anchor.
+
+**Cause.** `currentIndex` is the currently-*playing* (or last-*played*)
+sentence. "Read from here" exists specifically to move listening to somewhere
+*other* than where it currently is -- paused and browsing ahead, resuming
+after a break, starting the book before ever pressing play -- so audio
+position and tap position agreeing was the exception, not the rule. Any tap
+under this feature's own primary use case anchored the windowed search to a
+position with no real relationship to the tap, and unlike a merely *stale*
+anchor (which finds nothing nearby and correctly falls back to the
+unrestricted search), a *wrong* anchor within `ANCHOR_WINDOW` of *something*
+routinely found a coincidental match and returned it with full confidence --
+consistent, and consistently wrong, which is what "pages jump around" was:
+not a small offset like the original bug, but a resolution that tracked
+wherever playback last happened to be, unrelated to where the reader tapped.
+
+**Fix.** Replaced the anchor's source entirely. `indexOfTap` now takes
+`readingProgression`, a 0.0-1.0 fraction *within the current resource* --
+Readium's own `Locator.Locations.progression` from `fragment.currentLocator`
+at the moment of the tap, threaded through `ReaderScreen.kt` ->
+`ReadAlongViewModel.onWordTapped` -> `ChunkIndex.indexOfTap`, which converts
+it into an approximate position among that resource's own candidates
+internally (no absolute chunk index needs to leave `ChunkIndex` for this).
+This reflects where the reader is *looking*, not where audio last was --
+by construction always near the tap, regardless of playback state, which is
+the property the fix actually needed. `ANCHOR_WINDOW` (40 chunks) and the
+windowed-then-unrestricted structure are otherwise unchanged.
+
+The two tests from the previous fix were updated to the new parameter (a
+progression fraction, not a raw index) rather than replaced -- same
+mechanism, same regression coverage, now exercising the corrected anchor
+source. 32/32 passing.
+
+Unverified: whether `Locations.progression` is reliably populated at tap
+time on a real device for every book (a locator missing it degrades to no
+reading-position hint, i.e. the pre-anchor behaviour, not a crash -- but this
+has not been confirmed against real Readium output beyond the unit tests).
+
+**Follow-up, still broken: "was on page 16 of chapter 3 and it jumped to page
+2 of chapter 3."** Same chapter this time, ruling out a resource/href mixup --
+narrowed to *where within the chapter* the anchor itself was pointing.
+
+**Cause, inferred from decompiling `EpubNavigatorFragment` (not confirmed on
+a device -- no way to attach a debugger or logger to a real reading session
+from here).** `fragment.currentLocator` is updated by
+`WebViewListener.onProgressionChanged()` -> `notifyCurrentLocation()`, a
+*different* path than the one that reports page turns
+(`WebViewListener.onPageChanged(Int, Int, String)`, bridged up to the
+`PaginationListener` this app already listens to for BUG-20). If
+`currentLocator` updates on a different cadence than the page turns
+themselves -- plausible for a progression-change notification, not confirmed
+-- then a tap read from `fragment.currentLocator.value` right after several
+quick page turns could still reflect an earlier page, closer to wherever the
+chapter was first entered than to where the reader actually is. "Jumped to
+page 2" -- close to the start of chapter 3 -- fits a stale locator still
+anchored near the chapter's beginning.
+
+**Fix.** The `PaginationListener` registered for BUG-20 already receives a
+`Locator` argument on every page change -- Readium's own, guaranteed to be
+for the page just turned to. `ReaderScreen.kt` now stores it
+(`lastPageLocator`) and the tap handler reads from that first, falling back
+to `fragment.currentLocator.value` only if no page change has been observed
+yet, for both the tap's `resourceHref` and `readingProgression` -- removing
+the question of whether `currentLocator` itself is caught up at all.
+
+**This fix is not verified against a real device or a real Readium session.**
+The mechanism (a second, possibly-lagging update path for `currentLocator`)
+is inferred from bytecode structure -- real method names and call graph, not
+guessed -- but its actual timing under real page-turn gestures has not been
+observed directly, only reasoned about.
+
+**Follow-up, still broken, no further detail given ("still broken").** Three
+rounds of fixes to `ChunkIndex.indexOfTap` in a row had not moved the needle
+at all -- worth treating as a signal in itself that the resolved sentence
+index was probably fine all along, and the bug was somewhere *after* it.
+Checked that assumption directly this time instead of proposing a fourth
+theory about matching.
+
+**Cause, actually confirmed by reading the code paths involved, not
+inferred.** `ReadAlongViewModel.playFrom(chunkIndex)` -- what "Read from
+here" calls -- seeks the player and sets `_state.value.currentIndex =
+chunkIndex` **immediately**, but never touches `_navigateTo`, the signal
+`ReaderScreen.kt`'s `LaunchedEffect(navigator, navigateTo)` actually acts on
+to move the page (`fragment.go(locator, ...)`). The only other way
+`_navigateTo` gets set is the poll loop, gated on
+`nextIndex != _state.value.currentIndex` where `nextIndex` comes from real
+playback position (`index.indexAt(player.currentPositionMs())`). `ExoPlayer`
+completes a seek asynchronously, so the very next poll tick after `playFrom`
+can still read the *pre-seek* position -- a `nextIndex` that differs from the
+`currentIndex` `playFrom` already overwrote, which reads to the poll loop as
+"the sentence changed" and sends the page to the *stale* position instead.
+Once the seek genuinely lands and `nextIndex` catches up to the real target,
+it now equals `currentIndex` (already set), so the condition is false and the
+correct destination is never sent at all. Deterministic, not timing-flaky in
+principle -- explains a *consistent* wrong destination, not an occasional one,
+matching every report in this bug's history. `resumeFollowing()` elsewhere in
+the same file already sets `_navigateTo.value` directly for exactly this
+reason ("move to the current sentence... even if it was the last target");
+`playFrom` was simply missing the equivalent line.
+
+**Fix.** `playFrom` now sets `_navigateTo.value = chunkIndex` directly,
+matching `resumeFollowing()`'s pattern, instead of relying on the racy poll-
+loop detection. Also dropped `playFrom`'s own direct `follower.onNavigated()`
+call, now premature and redundant -- `ReaderScreen.kt`'s effect already calls
+`onNavigationHandled()` (which calls it properly) once the real navigation
+completes.
+
+Not covered by a unit test: `ReadAlongViewModel` has no test suite of its own
+-- `FollowController` was deliberately pulled out as a plain state machine
+specifically because this class needs a device to exercise
+(`FollowController.kt`'s own docstring). Needs real-device confirmation.
+
+**Follow-up, still broken -- and this time actually confirmed, not
+theorized.** Four fixes in a row (normalization, an anchor from playback
+position, an anchor from reading position, a fresher page locator) had not
+helped. Rather than propose a fifth theory, added a temporary diagnostic
+snackbar (same approach as BUG-9's history) showing exactly which chunk got
+selected and navigated to, and asked for a real repro. Screenshots came back
+showing `idx=488 prog=0.045 href=ch03.html hl=","` -- the resolved chunk's
+own stored text was a **single comma**, not the tapped sentence, sitting near
+the very start of chapter 3. That matches "jumped to page 2" exactly, and
+explains why nothing about anchoring or locator freshness ever helped: the
+bug was never about *where* the search looked, it was about a degenerate
+match winning regardless of where it looked.
+
+**Cause, confirmed.** `ChunkIndex.matchByContent`'s second strategy ("the
+selection spans sentences; start at the first one inside it") checks
+`needle.contains(chunk.text)` with no minimum length on `chunk.text`. A
+chunk whose own text is a lone `","` -- an audiblez sentence-splitting edge
+case, evidently a real one in this book -- trivially satisfies that check for
+almost *any* real paragraph, since nearly every sentence contains a comma
+somewhere. Once the primary (position-aware) match failed for any reason at
+all, this fallback would find such a fragment and return it immediately,
+completely independent of position -- explaining why every round of "fix the
+anchor" was aimed at the wrong mechanism. `MIN_PARTIAL_MATCH` (8 characters)
+already encoded "below this many characters a match is more likely a
+coincidence than intent" for the third (shrinking-prefix) strategy; the same
+reasoning had just never been applied to the first two.
+
+**Fix.** Both of `matchByContent`'s first two strategies now require at least
+`MIN_PARTIAL_MATCH` characters on whichever side of `contains()` could
+otherwise be degenerate (the needle for strategy 1, the chunk's own text for
+strategy 2) before considering a match at all.
+
+**Verified, not just reasoned about this time**: reverted the fix locally,
+confirmed the new regression test
+(`a degenerate one-character chunk never wins a content match by
+coincidence`, built directly from the real `","` chunk reported) fails
+without it, then restored the fix and confirmed all 33 tests pass.
+
+**Confirmed fixed on device.** Retested after the caching issue that had
+been serving a stale APK (unrelated -- browser/Downloads reused an old file
+by name; fixed by deleting it before re-downloading) was sorted out. The
+temporary diagnostic snackbars (`ReadAlongViewModel.debugInfo`, the
+`onMessage("go: ...")` call in `ReaderScreen.kt`) have been removed now that
+this is confirmed, same as BUG-9's precedent.
+
 ### BUG-16 — Continuous scroll re-centered after every single sentence
 
 **Reported** 2026-08-18. **Fixed** 2026-08-18. **Severity** low, but the exact
@@ -1000,7 +1581,6 @@ text against the chunk list — which the existing `TextNormalizer` already make
 - **A job disappearing from the server after download.** The app deletes a finished
   job once both files are on the device, because the server has no cleanup policy of
   its own. Toggleable in Settings.
-
 ---
 
 ## Unverified

@@ -21,6 +21,10 @@ class ReeddApp : Application() {
         // First, before anything else can fail: this is what makes a crash during
         // container construction legible rather than a silent disappearance.
         CrashReporter.install(this)
+        // Also before AppContainer: if construction itself is what crashed last
+        // time, the normal CrashLog.start() below never runs, and a bug that
+        // reproduces on every launch would otherwise never get reported at all.
+        CrashReporter.sendPendingEarly(this)
         // Debug builds only: the reader's layout bugs (BUGS.md BUG-12) turned out
         // to depend on exactly what CSS a specific book ships, which static
         // analysis can diagnose but not fully verify without a device. With this

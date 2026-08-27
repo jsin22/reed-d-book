@@ -24,7 +24,12 @@ import java.io.IOException
 sealed interface ConnectionCheck {
     data object Idle : ConnectionCheck
     data object Checking : ConnectionCheck
-    data class Reachable(val dataDir: String?, val broker: String?) : ConnectionCheck
+    data class Reachable(val dataDir: String?, val broker: String?, val loggedInAs: String) : ConnectionCheck
+    /** The address is right (health answered), but the token was rejected. Its own
+     *  case rather than folded into [Unreachable] -- see BUGS.md BUG-23, where a
+     *  bad token silently looked identical to "everything is fine" because
+     *  /api/health never checks it. */
+    data class InvalidToken(val dataDir: String?, val broker: String?) : ConnectionCheck
     data class Unreachable(val reason: String) : ConnectionCheck
 }
 
@@ -74,11 +79,17 @@ class SettingsViewModel(
     }
 
     /**
-     * Hits `GET /api/health`.
+     * Hits `GET /api/health` first, then `GET /api/me`.
      *
-     * That endpoint never requires the token, so a success here means "this really
-     * is the conversion server" even when the token is wrong -- which is what makes
-     * it useful for separating a typo in the address from a typo in the token.
+     * `/api/health` never requires the token, so a success there means "this
+     * really is the conversion server" even when the token is wrong -- which is
+     * what separates a typo in the address from a typo in the token. But it says
+     * nothing about the token *itself*: every other endpoint requires a valid
+     * per-user one now (see server/README.md, "Sharing with others"), so a bad
+     * token still needs its own explicit check, or "server reached" reads as
+     * "everything is fine" when the app actually cannot do anything useful yet
+     * -- exactly what made BUG-23 (BUGS.md) so hard to diagnose from the user's
+     * side: nothing in this screen ever said the token itself was the problem.
      */
     fun testConnection(baseUrl: String, token: String) {
         viewModelScope.launch {
@@ -90,10 +101,21 @@ class SettingsViewModel(
             _check.value = ConnectionCheck.Checking
             _check.value = try {
                 val health = api.service().health()
-                if (health.status == "ok") {
-                    ConnectionCheck.Reachable(health.dataDir, health.broker)
-                } else {
+                if (health.status != "ok") {
                     ConnectionCheck.Unreachable("The server answered '${health.status}'.")
+                } else {
+                    try {
+                        val me = api.service().me()
+                        _me.value = me
+                        ConnectionCheck.Reachable(health.dataDir, health.broker, me.email)
+                    } catch (e: ApiException) {
+                        if (e.isUnauthorized) {
+                            _me.value = null
+                            ConnectionCheck.InvalidToken(health.dataDir, health.broker)
+                        } else {
+                            throw e
+                        }
+                    }
                 }
             } catch (e: ServerNotConfigured) {
                 ConnectionCheck.Unreachable("No address set.")

@@ -105,6 +105,21 @@ class ReeddServiceTest {
     }
 
     @Test
+    fun `a token with an embedded newline is sanitised rather than crashing the request`() = runBlocking {
+        // Real-world cause: pasting the token out of a chat bubble or terminal
+        // block whose selection included a trailing line break. A raw \n in an
+        // OkHttp header value throws IllegalArgumentException on OkHttp's own
+        // dispatcher thread -- outside any coroutine try/catch -- which crashed
+        // the whole app on every request. See BUGS.md BUG-23.
+        token = "s3cret\n"
+        enqueueJson("""{"jobs":[]}""")
+
+        provider().service().listJobs()
+
+        assertEquals("Bearer s3cret", server.takeRequest().headers["Authorization"])
+    }
+
+    @Test
     fun `health is sent without the token, so a host can be checked before credentials`() = runBlocking {
         token = "s3cret"
         enqueueJson("""{"status":"ok","data_dir":"/srv/data","broker":"redis://127.0.0.1:6379/0"}""")

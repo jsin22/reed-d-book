@@ -74,6 +74,28 @@ class AdminViewModel(private val api: ApiProvider) : ViewModel() {
         }
     }
 
+    /**
+     * Removes a job from the server entirely -- `DELETE /api/jobs/{id}`, the
+     * same endpoint the owner's own device uses to delete a book, except an
+     * admin is allowed to call it on *any* job, not just their own (see
+     * `_owns_or_admin` in `server/app/main.py`). This deletes the job's whole
+     * directory server-side: the epub, the audiobook, the sync file, all of
+     * it -- there is no undo, and every device (owner's included) stops
+     * seeing it on its next poll.
+     */
+    fun deleteJob(jobId: String) {
+        viewModelScope.launch {
+            try {
+                api.service().deleteJob(jobId)
+                refresh()
+            } catch (e: ApiException) {
+                _message.value = e.detail ?: e.message
+            } catch (e: IOException) {
+                _message.value = e.message ?: "could not reach the server"
+            }
+        }
+    }
+
     fun invite(email: String) {
         if (email.isBlank()) return
         viewModelScope.launch {

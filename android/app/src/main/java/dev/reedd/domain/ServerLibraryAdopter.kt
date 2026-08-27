@@ -1,6 +1,5 @@
 package dev.reedd.domain
 
-import android.content.Context
 import dev.reedd.data.BookRepository
 import dev.reedd.data.download.ResumableDownloader
 import dev.reedd.data.local.BookFiles
@@ -8,7 +7,6 @@ import dev.reedd.data.local.EpubImporter
 import dev.reedd.data.remote.ApiProvider
 import dev.reedd.data.remote.JobDto
 import dev.reedd.data.remote.JobStatus
-import dev.reedd.work.DownloadWorker
 import java.util.UUID
 
 /**
@@ -24,11 +22,11 @@ import java.util.UUID
  * through TTS a second time. Nothing about how a conversion happens changes to
  * make this work: audiblez, the queue and the job.json lifecycle (`server/`) are
  * exactly as they were, and this class never touches them -- it only decides
- * which already-finished jobs the device has not seen the row for yet, then
- * hands an adopted one to [DownloadWorker] exactly as a live completion would.
+ * which already-finished jobs the device has not seen the row for yet, and
+ * fetches enough (the epub) to show a card for it. The audiobook/sync files are
+ * left for the user's own Download tap, same as any other finished job.
  */
 class ServerLibraryAdopter(
-    private val context: Context,
     private val repository: BookRepository,
     private val api: ApiProvider,
     private val files: BookFiles,
@@ -51,14 +49,15 @@ class ServerLibraryAdopter(
 
     private suspend fun adoptOne(job: JobDto) {
         val bookId = UUID.randomUUID().toString()
+        // Only the epub -- small, and needed for the card itself (title, author,
+        // cover) plus the reader's text. The audiobook/sync files are the
+        // hundreds-of-megabytes part, and are not fetched until the user taps
+        // Download on the card, same as a conversion this device started itself.
         downloader.download(url = api.url("api/jobs/${job.jobId}/epub"), target = files.epub(bookId))
         val book = importer.fromServerCopy(bookId, job.filename)
         repository.insert(book)
         repository.attachJob(bookId, job)
         repository.applyJobState(bookId, job)
-        // The same transition a live conversion finishing takes: DownloadWorker
-        // fetches the audiobook and sync file exactly as it always does.
-        DownloadWorker.enqueue(context, bookId)
     }
 
     companion object {

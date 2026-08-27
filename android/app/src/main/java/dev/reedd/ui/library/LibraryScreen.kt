@@ -2,8 +2,10 @@ package dev.reedd.ui.library
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -19,14 +21,20 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.MenuBook
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.Icon
@@ -55,6 +63,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import dev.reedd.data.db.BookEntity
+import dev.reedd.data.db.DownloadState
 import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -69,6 +78,9 @@ fun LibraryScreen(
     val message by viewModel.message.collectAsStateWithLifecycle()
     val importing by viewModel.importing.collectAsStateWithLifecycle()
     val playerState by viewModel.playerState.collectAsStateWithLifecycle()
+    val authStatus by viewModel.authStatus.collectAsStateWithLifecycle()
+    val refreshing by viewModel.refreshing.collectAsStateWithLifecycle()
+    val isAdmin by viewModel.isAdmin.collectAsStateWithLifecycle()
     val nowPlaying = books.find { it.id == playerState.bookId }
     val snackbar = remember { SnackbarHostState() }
     var showImport by remember { mutableStateOf(false) }
@@ -95,6 +107,10 @@ fun LibraryScreen(
             TopAppBar(
                 title = { Text("Library") },
                 actions = {
+                    IconButton(onClick = viewModel::refresh, enabled = !refreshing) {
+                        if (refreshing) CircularProgressIndicator(Modifier.size(20.dp))
+                        else Icon(Icons.Filled.Refresh, contentDescription = "Refresh")
+                    }
                     IconButton(onClick = onOpenSettings) {
                         Icon(Icons.Filled.Settings, contentDescription = "Settings")
                     }
@@ -133,22 +149,40 @@ fun LibraryScreen(
             )
         },
     ) { padding ->
-        if (books.isEmpty()) {
-            EmptyLibrary(Modifier.fillMaxSize().padding(padding))
-        } else {
-            LazyColumn(
-                modifier = Modifier.fillMaxSize().padding(padding),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                items(books, key = { it.id }) { book ->
-                    BookCard(
-                        book = book,
-                        nowPlaying = book.id == playerState.bookId,
-                        isPlaying = playerState.isPlaying,
-                        onClick = { if (book.isPlayable) onOpenBook(book.id) else onOpenDetail(book.id) },
-                        onLongClick = { onOpenDetail(book.id) },
-                    )
+        Column(Modifier.fillMaxSize().padding(padding)) {
+            AuthStatusBanner(authStatus, onOpenSettings)
+            if (books.isEmpty()) {
+                EmptyLibrary(Modifier.fillMaxSize())
+            } else {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    items(books, key = { it.id }) { book ->
+                        BookCard(
+                            book = book,
+                            nowPlaying = book.id == playerState.bookId,
+                            isPlaying = playerState.isPlaying,
+                            showDetails = isAdmin,
+                            onClick = {
+                                if (book.isPlayable) onOpenBook(book.id)
+                                // A failure now retries right from the card (see
+                                // onRetryConversion/onDownload below), so a
+                                // non-admin not being able to reach Detail no
+                                // longer loses them any action -- Cancel, for a
+                                // still-in-flight upload/conversion, is the one
+                                // Detail-only action left unreplaced.
+                                else if (isAdmin) onOpenDetail(book.id)
+                            },
+                            onLongClick = if (isAdmin) ({ onOpenDetail(book.id) }) else null,
+                            onRead = { onOpenBook(book.id) },
+                            onDownload = { viewModel.downloadBook(book.id) },
+                            onDeleteDownloaded = { viewModel.deleteDownloadedContent(book.id) },
+                            onRetryConversion = { viewModel.retryConversion(book.id) },
+                            onCancel = { viewModel.cancelConversion(book.id) },
+                        )
+                    }
                 }
             }
         }
@@ -168,12 +202,55 @@ fun LibraryScreen(
                 showImport = false
                 pickedUri = null
             },
-            onConfirm = { voice, speed ->
-                pickedUri?.let { viewModel.importAndUpload(it, voice, speed) }
+            onConfirm = { voice, speed, engine ->
+                pickedUri?.let { viewModel.importAndUpload(it, voice, speed, engine) }
                 showImport = false
                 pickedUri = null
             },
         )
+    }
+}
+
+/**
+ * Surfaces a missing/invalid token or an unreachable server right on the
+ * library, instead of an empty list that looks identical to "no books yet"
+ * -- see BUGS.md BUG-23, where exactly that ambiguity made a bad token very
+ * hard to diagnose from the user's side. Silent for [AuthStatus.Unknown]
+ * (nothing checked yet) and [AuthStatus.Ok].
+ */
+@Composable
+private fun AuthStatusBanner(status: AuthStatus, onOpenSettings: () -> Unit) {
+    val message = when (status) {
+        is AuthStatus.NeedsToken -> "No valid API token. Add one from your invite in Settings."
+        is AuthStatus.Unreachable -> status.reason
+        AuthStatus.Unknown, AuthStatus.Ok -> null
+    } ?: return
+
+    Card(
+        Modifier
+            .fillMaxWidth()
+            .padding(16.dp),
+        colors = androidx.compose.material3.CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.errorContainer,
+        ),
+    ) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Text(
+                message,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onErrorContainer,
+                modifier = Modifier.weight(1f),
+            )
+            if (status is AuthStatus.NeedsToken) {
+                androidx.compose.material3.TextButton(onClick = onOpenSettings) { Text("Settings") }
+            }
+        }
     }
 }
 
@@ -203,62 +280,205 @@ private fun EmptyLibrary(modifier: Modifier) {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+/** Whether there is a local audiobook/sync file to offer clearing -- includes a
+ *  partial/interrupted download, not just a finished one, so the trash icon can
+ *  also recover a stuck [BookStage.FAILED] or [BookStage.DOWNLOADING] card. */
+private fun BookEntity.hasLocalDownload(): Boolean =
+    audiobookPath != null || syncPath != null || downloadedBytes > 0
+
+/** While a job is still in flight server-side (or the upload to start one is),
+ *  matching exactly the stages [ProgressLine] draws a bar for -- the point
+ *  where "cancel" means something to terminate, as opposed to a download in
+ *  progress (see BookDetailViewModel.cancel, which this mirrors and which
+ *  likewise never offers to cancel a download, only the job itself). */
+private fun BookEntity.isCancellable(): Boolean =
+    stage() == BookStage.QUEUED || stage() == BookStage.CONVERTING || stage() == BookStage.UPLOADING
+
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 private fun BookCard(
     book: BookEntity,
     nowPlaying: Boolean,
     isPlaying: Boolean,
+    /** Whether this card may navigate to the detail screen at all -- non-admins
+     *  cannot, so both the long-press menu and the FAILED/LOST shortcut below
+     *  are omitted entirely for them rather than shown and then rejected. */
+    showDetails: Boolean,
     onClick: () -> Unit,
-    onLongClick: () -> Unit,
+    onLongClick: (() -> Unit)?,
+    onRead: () -> Unit,
+    onDownload: () -> Unit,
+    onDeleteDownloaded: () -> Unit,
+    onRetryConversion: () -> Unit,
+    onCancel: () -> Unit,
 ) {
-    Card(
-        Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-    ) {
-        Row(Modifier.padding(12.dp)) {
-            Cover(book, Modifier.size(width = 56.dp, height = 80.dp))
-            Column(
-                Modifier
-                    .padding(start = 12.dp)
-                    .fillMaxWidth()
-            ) {
-                Text(
-                    book.title,
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
+    var showMenu by remember { mutableStateOf(false) }
+
+    Box {
+        Card(
+            Modifier
+                .fillMaxWidth()
+                .combinedClickable(
+                    onClick = onClick,
+                    onLongClick = onLongClick?.let { { showMenu = true } },
                 )
-                book.author?.let {
+        ) {
+            Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                Cover(book, Modifier.size(width = 56.dp, height = 80.dp))
+                Column(
+                    Modifier
+                        .padding(start = 12.dp)
+                        .weight(1f)
+                ) {
                     Text(
-                        it,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
+                        book.title,
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                     )
-                }
-                Row(
-                    Modifier.padding(top = 8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    StageChip(book, nowPlaying = nowPlaying, isPlaying = isPlaying)
-                    if (book.stage() == BookStage.FAILED || book.stage() == BookStage.LOST) {
+                    book.author?.let {
                         Text(
-                            "Details",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.clickable(onClick = onLongClick),
+                            it,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    // Blank once a book has never been sent for conversion (no
+                    // engine/voice chosen yet), rather than showing a stray "·".
+                    val engineVoice = listOfNotNull(book.engine, book.voice).joinToString(" · ")
+                    if (engineVoice.isNotEmpty()) {
+                        Text(
+                            engineVoice,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    Row(
+                        Modifier.padding(top = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        StageChip(book, nowPlaying = nowPlaying, isPlaying = isPlaying)
+                        if (showDetails && onLongClick != null &&
+                            (book.stage() == BookStage.FAILED || book.stage() == BookStage.LOST)
+                        ) {
+                            Text(
+                                "Details",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.clickable(onClick = onLongClick),
+                            )
+                        }
+                    }
+                    // The specific reason, surfaced right here: this is what lets
+                    // the card be self-sufficient (retry included) without a trip
+                    // to Detail, which non-admins cannot reach at all any more.
+                    failureReason(book)?.let {
+                        Text(
+                            it,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(top = 4.dp),
+                        )
+                    }
+                    ProgressLine(book)
+                }
+                CardAction(book, onRead = onRead, onDownload = onDownload, onRetryConversion = onRetryConversion)
+                if (book.isCancellable()) {
+                    IconButton(onClick = onCancel) {
+                        Icon(Icons.Filled.Close, contentDescription = "Cancel")
+                    }
+                }
+                if (book.hasLocalDownload()) {
+                    IconButton(onClick = onDeleteDownloaded) {
+                        Icon(
+                            Icons.Filled.Delete,
+                            contentDescription = "Delete downloaded content",
+                            tint = MaterialTheme.colorScheme.error,
                         )
                     }
                 }
-                ProgressLine(book)
+            }
+        }
+        // The only way to reach the detail/metadata screen for a book that is
+        // already playing -- tapping it opens the reader instead -- so this is
+        // the one entry point that works for every stage, not just failures.
+        // Admin-only: see [showDetails] and [onLongClick].
+        if (onLongClick != null) {
+            DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+                DropdownMenuItem(
+                    text = { Text("Details") },
+                    onClick = {
+                        showMenu = false
+                        onLongClick()
+                    },
+                )
             }
         }
     }
+}
+
+/**
+ * The card's trailing button: Download once a conversion is on the server
+ * waiting to be fetched, Read once it is on the device. Nested inside the
+ * card's own [combinedClickable] -- Compose gives a clickable child first
+ * crack at a tap, so pressing this never also triggers the card's onClick.
+ */
+@Composable
+private fun CardAction(
+    book: BookEntity,
+    onRead: () -> Unit,
+    onDownload: () -> Unit,
+    onRetryConversion: () -> Unit,
+) {
+    when {
+        book.stage() == BookStage.AVAILABLE -> IconButton(onClick = onDownload) {
+            Icon(Icons.Filled.Download, contentDescription = "Download")
+        }
+        book.stage() == BookStage.READY -> IconButton(onClick = onRead) {
+            Icon(Icons.Filled.PlayArrow, contentDescription = "Read along")
+        }
+        // Checked before the generic FAILED/LOST branch below: book.stage()
+        // already collapses every failure cause into BookStage.FAILED (see
+        // BookEntity.stage()), so downloadState is what actually tells a
+        // failed download apart from a failed upload/conversion here.
+        book.downloadState == DownloadState.FAILED -> IconButton(onClick = onDownload) {
+            Icon(Icons.Filled.Download, contentDescription = "Retry download")
+        }
+        // LOCAL alongside FAILED/LOST: a book cancelled mid-upload or
+        // mid-conversion (LibraryViewModel.cancelConversion) lands back on
+        // LOCAL, same as a book that was never sent at all -- either way,
+        // (re)starting the upload is the right action.
+        book.stage() == BookStage.FAILED || book.stage() == BookStage.LOST || book.stage() == BookStage.LOCAL ->
+            IconButton(onClick = onRetryConversion) {
+                Icon(Icons.Filled.Refresh, contentDescription = "Retry")
+            }
+        else -> Unit
+    }
+}
+
+/**
+ * The specific reason a card is showing a failure, for the error line next to
+ * [StageChip] -- null for everything else. [BookEntity.stage] only ever says
+ * *that* something is FAILED/LOST, not which of upload, conversion or
+ * download it was, so this reads the underlying fields directly the same way
+ * [CardAction] does to pick the right retry action.
+ */
+private fun failureReason(book: BookEntity): String? = when {
+    book.stage() == BookStage.LOST ->
+        "The server no longer has this job. Retry will send it again."
+    book.downloadState == DownloadState.FAILED ->
+        book.downloadError ?: "The download failed."
+    book.stage() == BookStage.FAILED ->
+        book.jobError ?: book.uploadError ?: "Something went wrong."
+    else -> null
 }
 
 @Composable
@@ -298,6 +518,7 @@ private fun StageChip(book: BookEntity, nowPlaying: Boolean, isPlaying: Boolean)
             append("Converting ${book.jobProgress}%")
             book.jobEta?.let { append(" · ${it.humanEta()}") }
         } to MaterialTheme.colorScheme.primary
+        BookStage.AVAILABLE -> "Ready to download" to MaterialTheme.colorScheme.primary
         BookStage.DOWNLOADING -> "Downloading" to MaterialTheme.colorScheme.primary
         BookStage.READY -> "Ready to read along" to MaterialTheme.colorScheme.primary
         BookStage.FAILED -> "Failed" to MaterialTheme.colorScheme.error

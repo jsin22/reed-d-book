@@ -43,3 +43,20 @@ val MIGRATION_1_2 = object : Migration(1, 2) {
         )
     }
 }
+
+/**
+ * 2 -> 3: engine selection.
+ *
+ * The server has supported multiple TTS backends (`GET /api/engines`) since
+ * before this column existed; the app just never asked. Nullable, no default
+ * needed beyond SQLite's implicit NULL: an existing row's job was submitted
+ * before this app version could choose an engine, so there is nothing truthful
+ * to backfill it with -- the server's own default is what it actually ran with,
+ * and [BookEntity.engine] being null already means "use the default" everywhere
+ * it is read.
+ */
+val MIGRATION_2_3 = object : Migration(2, 3) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE books ADD COLUMN engine TEXT")
+    }
+}

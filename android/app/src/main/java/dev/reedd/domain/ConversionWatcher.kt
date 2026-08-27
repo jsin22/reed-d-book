@@ -69,11 +69,13 @@ class ConversionWatcher(
         val status = JobStatus.fromWire(dto.status)
 
         when (status) {
-            JobStatus.DONE -> {
-                // Idempotent: the worker is unique per book, so being told twice
-                // does not start two downloads.
-                DownloadWorker.enqueue(context, bookId)
-            }
+            // Deliberately no download here: fetching the .m4b is a user action
+            // now (the card's Download button), not something a finished job
+            // starts on its own. The row just sits at BookStage.AVAILABLE until
+            // then -- see awaitingDownload() in BookDao for the one case where a
+            // download *does* resume itself: one already started that got
+            // interrupted or failed.
+            JobStatus.DONE -> Unit
             JobStatus.ERROR -> {
                 // Only on the transition, so reopening the app does not re-notify
                 // about a failure the user already saw and dismissed.
@@ -96,9 +98,9 @@ class ConversionWatcher(
      * while:
      *
      *  * jobs still converting need polling;
-     *  * jobs that *finished* while the app was closed have files waiting on the
-     *    server that were never fetched, and a download that failed halfway needs
-     *    picking up again.
+     *  * a download the user had already started -- interrupted mid-transfer, or
+     *    failed -- needs picking up again. A finished job nobody has tapped
+     *    Download for yet is not resumed here; see [dev.reedd.data.db.BookDao.awaitingDownload].
      *
      * @return how many books are still waiting on the server, so a caller can
      *   stop scheduling itself when the answer is zero.

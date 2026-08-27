@@ -27,6 +27,7 @@ from pick import pick
 
 from audiblez import sync
 from audiblez.engines import DEFAULT_ENGINE, engine_sample_rate, load_engine
+from audiblez.quote_split import split_into_spans
 
 sample_rate = 24000
 
@@ -76,7 +77,15 @@ def main(file_path, voice, pick_manually, speed, output_folder='.',
     stats = SimpleNamespace(
         total_chars=sum(map(len, texts)),
         processed_chars=0,
-        chars_per_sec=500 if torch.cuda.is_available() else 50)
+        chars_per_sec=500 if torch.cuda.is_available() else 50,
+        # For the ETA: real elapsed time since the whole job started, so
+        # gen_audio_segments can revise chars_per_sec continuously (every
+        # sentence) instead of only between chapters. That per-chapter
+        # revision (_run_chapters_sequential/_run_chapters_parallel) left the
+        # ETA stuck at this initial guess for as long as the *first* chapter
+        # took -- minutes, for a long one -- which is what was actually
+        # reported ("stuck on 1m 33s and 0%... a couple minutes").
+        start_time=time.time())
     print('Started at:', time.strftime('%H:%M:%S'))
     print(f'Total characters: {stats.total_chars:,}')
     print('Total words:', len(' '.join(texts).split()))
@@ -120,10 +129,21 @@ def main(file_path, voice, pick_manually, speed, output_folder='.',
 
     worker_count = resolve_worker_count(workers, len(to_synthesize))
     if worker_count > 1:
+        if engine == 'expressive':
+            # ExpressiveEngine is never constructed in a worker process (see
+            # its docstring in engines.py) -- it only makes sense sequential,
+            # which is also what resolve_worker_count() already returns
+            # whenever CUDA is available, true for both engines it wraps.
+            raise ValueError(
+                'engine="expressive" needs a single-process (GPU) run; got '
+                f'worker_count={worker_count}, which would need CUDA to not be available.')
         _run_chapters_parallel(to_synthesize, voice, speed, max_sentences, worker_count, engine,
                                 stats, post_event, timeline, chapter_wav_files)
     else:
-        tts_engine = load_engine(engine, voice)
+        engine_kwargs = {}
+        if engine == 'expressive':
+            engine_kwargs['chapter_texts'] = [text for _i, _chapter, text, _path in to_synthesize]
+        tts_engine = load_engine(engine, voice, **engine_kwargs)
         _run_chapters_sequential(tts_engine, to_synthesize, voice, speed, max_sentences,
                                   stats, post_event, timeline, chapter_wav_files)
 
@@ -229,12 +249,14 @@ def _run_chapters_parallel(to_synthesize, voice, speed, max_sentences, workers, 
         (i, text, voice, speed, str(chapter_wav_path), max_sentences)
         for i, _chapter, text, chapter_wav_path in to_synthesize
     ]
-    # stats.chars_per_sec starts out as a single-process guess (main()'s 50
-    # chars/sec on CPU) and is never revised by the sequential path either, but
-    # here that guess is off by roughly `workers`x once real throughput exists
-    # to replace it with -- otherwise the ETA this reports would stay several
-    # times too pessimistic for the whole run, undoing exactly what
-    # parallelizing was for.
+    # stats.chars_per_sec starts out as a single-process guess (main()'s 500
+    # chars/sec on CUDA, 50 on CPU), but here that guess is off by roughly
+    # `workers`x once real throughput exists to replace it with -- otherwise
+    # the ETA this reports would stay several times too pessimistic for the
+    # whole run, undoing exactly what parallelizing was for. (This path never
+    # runs on CUDA in practice -- resolve_worker_count() falls back to one
+    # process whenever it is available -- but the revision below is what keeps
+    # this path's own ETA honest regardless.)
     start_time = time.time()
     with billiard.pool.Pool(
         processes=workers, initializer=_init_chapter_worker, initargs=(engine, voice, threads_per_worker),
@@ -267,6 +289,8 @@ def _run_chapters_parallel(to_synthesize, voice, speed, max_sentences, workers, 
 
 def _run_chapters_sequential(engine, to_synthesize, voice, speed, max_sentences,
                               stats, post_event, timeline, chapter_wav_files):
+    # stats.chars_per_sec/eta are revised continuously, every sentence, inside
+    # gen_audio_segments (from stats.start_time) -- nothing to redo here.
     for i, chapter, text, chapter_wav_path in to_synthesize:
         start_time = time.time()
         if post_event: post_event('CORE_CHAPTER_STARTED', chapter_index=chapter.chapter_index)
@@ -279,8 +303,7 @@ def _run_chapters_sequential(engine, to_synthesize, voice, speed, max_sentences,
             soundfile.write(chapter_wav_path, final_audio, engine.sample_rate)
             _, relative_chunks = timeline.end_chapter()
             sync.save_chapter_sync(chapter_wav_path, len(final_audio) / engine.sample_rate, relative_chunks)
-            end_time = time.time()
-            delta_seconds = end_time - start_time
+            delta_seconds = time.time() - start_time
             chars_per_sec = len(text) / delta_seconds
             print('Chapter written to', chapter_wav_path)
             if post_event: post_event('CORE_CHAPTER_FINISHED', chapter_index=chapter.chapter_index)
@@ -360,19 +383,15 @@ def gen_audio_segments(engine, text, voice, speed, stats=None, max_sentences=Non
     Splitting into sentences happens here, once, for every engine -- any
     further splitting a specific backend needs (Kokoro's own long-sentence
     workaround, for instance) is that engine's own concern, inside its
-    `synthesize()`.
+    `synthesize()`. Uses the same quote-aware splitter literary_analysis.py's
+    per-chapter annotation call does (see quote_split.py), so an
+    ExpressiveEngine's flagged-sentence lookup lines up exactly with what
+    actually gets synthesized here -- a plain (non-quote-aware) split would
+    produce different sentence boundaries around dialogue in this kind of
+    prose, breaking that lookup.
     """
-    nlp = spacy.load('xx_ent_wiki_sm')
-    nlp.add_pipe('sentencizer')
     audio_segments = []
-    doc = nlp(text)
-    # spaCy's sentencizer occasionally yields a whitespace-only fragment (a
-    # stray newline/punctuation artifact from how the epub's text was
-    # extracted). Kokoro tolerates that silently; Pocket TTS raises
-    # ValueError("Text prompt cannot be empty") -- either way there is no
-    # actual sentence there to synthesize, so it is dropped before any engine
-    # ever sees it.
-    sentences = [s.text for s in doc.sents if s.text.strip()]
+    sentences = [sentence for _kind, sentence in split_into_spans(text)]
 
     for i, sent_text in enumerate(sentences):
         if max_sentences and i > max_sentences: break
@@ -388,6 +407,15 @@ def gen_audio_segments(engine, text, voice, speed, stats=None, max_sentences=Non
         if stats:
             stats.processed_chars += len(sent_text)
             stats.progress = stats.processed_chars * 100 // stats.total_chars
+            # Revised every sentence from real elapsed time, not just between
+            # chapters: the per-chapter revision alone left the ETA stuck at
+            # main()'s initial guess for as long as the first chapter took to
+            # finish -- minutes, for a long one. A couple of seconds' grace
+            # before trusting it avoids one unusually fast/slow first sentence
+            # swinging the estimate wildly.
+            elapsed = time.time() - stats.start_time
+            if elapsed > 2:
+                stats.chars_per_sec = stats.processed_chars / elapsed
             stats.eta = strfdelta((stats.total_chars - stats.processed_chars) / stats.chars_per_sec)
             if post_event: post_event('CORE_PROGRESS', stats=stats)
             print(f'Estimated time remaining: {stats.eta}')
@@ -497,15 +525,15 @@ def concat_wavs_with_ffmpeg(chapter_files, output_folder, filename):
             # ffmpeg's concat demuxer resolves relative paths against the list
             # file's own directory, not the cwd, so these have to be absolute.
             f.write(f"file '{Path(wav_file).resolve()}'\n")
-    concat_file_path = Path(output_folder) / filename.replace('.epub', '.tmp.mp4')
-    # libfdk_aac is absent from most distro ffmpeg builds (it is not GPL-compatible),
-    # and create_m4b re-encodes this to 64k aac anyway, so the native encoder is fine.
-    encoder = 'libfdk_aac' if has_ffmpeg_encoder('libfdk_aac') else 'aac'
+    concat_file_path = Path(output_folder) / filename.replace('.epub', '.tmp.wav')
+    # Lossless (pcm), not AAC: this used to encode to AAC here and then
+    # create_m4b encoded *again* to AAC for the final file -- two lossy passes
+    # compounding artifacts for no benefit, since this file is deleted the
+    # moment create_m4b finishes with it. One AAC encode, in create_m4b, is
+    # enough.
     proc = subprocess.run([
         'ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', wav_list_txt,
-        # '-c', 'copy',
-        '-c:a',  encoder,
-        '-b:a',  '192k',
+        '-c:a', 'pcm_s16le',
         concat_file_path])
     Path(wav_list_txt).unlink()
     if proc.returncode != 0 or not Path(concat_file_path).exists():
@@ -542,8 +570,18 @@ def create_m4b(chapter_files, filename, cover_image, output_folder):
         *cover_image_args,  # Cover image (if provided)
 
         '-map', '0:a',  # Map audio
-        '-c:a', 'aac',  # Convert to AAC
-        '-b:a', '48k',  # Reduce bitrate for smaller size -- mono speech, not music
+        # libfdk_aac is absent from most distro ffmpeg builds (not
+        # GPL-compatible); the native encoder is the fallback.
+        '-c:a', 'libfdk_aac' if has_ffmpeg_encoder('libfdk_aac') else 'aac',
+        # The only lossy encode now (concat above is pcm) -- 48k here on top
+        # of the since-removed intermediate pass was audibly worse than
+        # either alone. 64k mono, single-pass, was confirmed clearer than
+        # the old double-encoded 48k, and chosen over 96k/128k for the
+        # smaller file size -- ffmpeg's native aac encoder self-limits mono
+        # 24kHz audio to roughly 90-96kbps regardless of a higher request
+        # anyway (measured: 96k and 128k both landed at ~96kbps actual), so
+        # 96k+ buys clarity headroom this content mostly doesn't use.
+        '-b:a', '64k',
 
         '-map_metadata', '1', # Map metadata
 

@@ -10,6 +10,7 @@ substitute a fake.
 import contextlib
 import os
 import sys
+import time
 import traceback
 from pathlib import Path
 
@@ -42,12 +43,24 @@ def output_names(epub_filename):
             epub_filename.replace('.epub', '.json'))
 
 
+#: Floor between two CORE_PROGRESS-driven disk writes when the whole-number
+#: percentage has not moved. Percentage alone used to gate every write, but
+#: audiblez now revises its ETA every sentence (see audiblez/BUGS.md BUG-21),
+#: and a long book's percentage can sit at a single value -- especially 0 --
+#: for well over a minute while the ETA underneath it is moving continuously;
+#: without a second, time-based reason to write, that fresher ETA never
+#: reached the manifest at all. Small enough that the app's poll (every few
+#: seconds while a screen is open) reliably sees a value no older than this.
+PROGRESS_SAVE_INTERVAL_SECONDS = 2.0
+
+
 class _Progress:
     """Translates audiblez' post_event stream into manifest updates.
 
     CORE_PROGRESS fires once per *sentence*, which for a novel is tens of
-    thousands of writes, so it only touches the disk when the whole-number
-    percentage actually moves.
+    thousands of times, so it only touches the disk when the whole-number
+    percentage moves, or -- see PROGRESS_SAVE_INTERVAL_SECONDS -- often
+    enough to keep the ETA it also carries from going stale.
     """
 
     def __init__(self, store, job_id):
@@ -55,6 +68,7 @@ class _Progress:
         self.job_id = job_id
         self.percent = -1
         self.chapters_done = 0
+        self.last_saved_at = 0.0
 
     def __call__(self, event, **kwargs):
         if event == 'CORE_PROGRESS':
@@ -64,9 +78,12 @@ class _Progress:
             # overshoots -- a real run of the sample epub reports 105. Clamp it
             # rather than hand the app a progress bar that goes past full.
             percent = min(100, max(0, int(getattr(stats, 'progress', 0) or 0)))
-            if percent == self.percent:
+            now = time.monotonic()
+            percent_changed = percent != self.percent
+            if not percent_changed and now - self.last_saved_at < PROGRESS_SAVE_INTERVAL_SECONDS:
                 return
             self.percent = percent
+            self.last_saved_at = now
             self.save(progress=percent, eta=getattr(stats, 'eta', None))
         elif event == 'CORE_CHAPTER_FINISHED':
             self.chapters_done += 1

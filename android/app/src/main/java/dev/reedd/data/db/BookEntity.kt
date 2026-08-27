@@ -47,9 +47,10 @@ data class BookEntity(
     val jobError: String? = null,
     val jobStartedAt: String? = null,
     val jobFinishedAt: String? = null,
-    /** Voice and speed the job was submitted with, so a retry can reuse them. */
+    /** Voice, speed and engine the job was submitted with, so a retry can reuse them. */
     val voice: String? = null,
     val speed: Double? = null,
+    val engine: String? = null,
     /**
      * The server no longer holds this job.
      *

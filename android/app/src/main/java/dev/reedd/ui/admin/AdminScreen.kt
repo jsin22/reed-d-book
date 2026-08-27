@@ -10,6 +10,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -21,6 +23,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -46,6 +49,7 @@ fun AdminScreen(
     val message by viewModel.message.collectAsStateWithLifecycle()
 
     var email by remember { mutableStateOf("") }
+    var pendingDelete by remember { mutableStateOf<JobDto?>(null) }
 
     Scaffold(
         topBar = {
@@ -140,7 +144,11 @@ fun AdminScreen(
 
             Text("Every job", style = MaterialTheme.typography.titleMedium)
             jobs.forEach { job ->
-                JobRow(job, onTogglePublic = { viewModel.togglePublic(job.jobId, it) })
+                JobRow(
+                    job,
+                    onTogglePublic = { viewModel.togglePublic(job.jobId, it) },
+                    onDelete = { pendingDelete = job },
+                )
             }
 
             message?.let {
@@ -148,16 +156,44 @@ fun AdminScreen(
             }
         }
     }
+
+    // A confirmation, unlike the library's own "Delete from device" (which only
+    // ever removes the requester's local copy and can be undone by
+    // re-downloading): this deletes another person's job off the server
+    // entirely -- the epub, audiobook and sync file, all of it -- with no undo,
+    // so a stray tap here is a much bigger mistake to make silently.
+    pendingDelete?.let { job ->
+        AlertDialog(
+            onDismissRequest = { pendingDelete = null },
+            title = { Text("Delete this book?") },
+            text = {
+                Text(
+                    "\"${job.filename}\" (uploaded by ${job.ownerEmail ?: "unknown owner"}) will be " +
+                        "permanently removed from the server -- the epub, audiobook and sync file. " +
+                        "It will disappear from every device, including theirs. This cannot be undone."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    viewModel.deleteJob(job.jobId)
+                    pendingDelete = null
+                }) { Text("Delete") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDelete = null }) { Text("Cancel") }
+            },
+        )
+    }
 }
 
 @Composable
-private fun JobRow(job: JobDto, onTogglePublic: (Boolean) -> Unit) {
+private fun JobRow(job: JobDto, onTogglePublic: (Boolean) -> Unit, onDelete: () -> Unit) {
     Row(
         Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Column(Modifier.fillMaxWidth(0.75f)) {
+        Column(Modifier.weight(1f)) {
             Text(job.filename, style = MaterialTheme.typography.bodyMedium)
             Text(
                 "${job.ownerEmail ?: "unknown owner"} · ${job.status}",
@@ -166,5 +202,12 @@ private fun JobRow(job: JobDto, onTogglePublic: (Boolean) -> Unit) {
             )
         }
         Switch(checked = job.public, onCheckedChange = onTogglePublic)
+        IconButton(onClick = onDelete) {
+            Icon(
+                Icons.Filled.Delete,
+                contentDescription = "Delete permanently",
+                tint = MaterialTheme.colorScheme.error,
+            )
+        }
     }
 }

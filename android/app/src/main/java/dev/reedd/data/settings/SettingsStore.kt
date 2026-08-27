@@ -128,7 +128,16 @@ class SettingsStore(context: Context, scope: CoroutineScope) {
     suspend fun setServer(baseUrl: String?, token: String?) {
         dataStore.edit { prefs ->
             if (baseUrl.isNullOrBlank()) prefs.remove(KEY_BASE_URL) else prefs[KEY_BASE_URL] = baseUrl.trim()
-            if (token.isNullOrBlank()) prefs.remove(KEY_TOKEN) else prefs[KEY_TOKEN] = token.trim()
+            // A real token (secrets.token_urlsafe on the server) never legitimately
+            // contains whitespace anywhere, so strip all of it rather than just the
+            // edges -- a `singleLine` Compose TextField does not reliably strip an
+            // embedded newline from pasted text, and one reaching AuthInterceptor
+            // crashes the app on an OkHttp thread outside any try/catch (an
+            // `Authorization` header value may not contain a raw control
+            // character). See AuthInterceptor's own defensive filter for the other
+            // half of this fix, which also self-heals a token already saved bad.
+            val clean = token?.filterNot { it.isWhitespace() }
+            if (clean.isNullOrBlank()) prefs.remove(KEY_TOKEN) else prefs[KEY_TOKEN] = clean
         }
     }
 

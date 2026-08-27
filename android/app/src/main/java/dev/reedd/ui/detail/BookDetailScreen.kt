@@ -12,6 +12,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -27,6 +28,9 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
@@ -55,6 +59,8 @@ fun BookDetailScreen(
     val book by viewModel.book.collectAsStateWithLifecycle()
     val log by viewModel.log.collectAsStateWithLifecycle()
     val loadingLog by viewModel.loadingLog.collectAsStateWithLifecycle()
+    val isAdmin by viewModel.isAdmin.collectAsStateWithLifecycle()
+    var confirmingPermanentDelete by remember { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
@@ -97,6 +103,7 @@ fun BookDetailScreen(
                         }
                     BookStage.QUEUED, BookStage.CONVERTING, BookStage.UPLOADING ->
                         OutlinedButton(onClick = viewModel::cancel) { Text("Cancel") }
+                    BookStage.AVAILABLE -> Button(onClick = viewModel::download) { Text("Download") }
                     BookStage.DOWNLOADING ->
                         if (current.downloadState == DownloadState.FAILED) {
                             Button(onClick = viewModel::retryDownload) { Text("Resume download") }
@@ -105,10 +112,18 @@ fun BookDetailScreen(
                 }
                 TextButton(
                     onClick = {
-                        viewModel.delete()
-                        onDeleted()
+                        // Admin's version is permanent and cross-device, so it gets a
+                        // confirmation the way the Admin screen's own trash icon does;
+                        // an ordinary user's stays a plain, immediate, local-only action
+                        // (unchanged from before -- reversible by re-downloading or
+                        // re-uploading, so a dialog here would just be friction).
+                        if (isAdmin) confirmingPermanentDelete = true
+                        else {
+                            viewModel.delete()
+                            onDeleted()
+                        }
                     }
-                ) { Text("Delete") }
+                ) { Text(if (isAdmin) "Delete permanently from server" else "Delete from device") }
             }
 
             Details(current)
@@ -139,6 +154,31 @@ fun BookDetailScreen(
             }
         }
     }
+
+    if (confirmingPermanentDelete) {
+        val current = book
+        AlertDialog(
+            onDismissRequest = { confirmingPermanentDelete = false },
+            title = { Text("Delete this book?") },
+            text = {
+                Text(
+                    "\"${current?.title ?: "This book"}\" will be permanently removed from the " +
+                        "server -- the epub, audiobook and sync file. It will disappear from every " +
+                        "device, including its owner's. This cannot be undone."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmingPermanentDelete = false
+                    viewModel.delete()
+                    onDeleted()
+                }) { Text("Delete") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmingPermanentDelete = false }) { Text("Cancel") }
+            },
+        )
+    }
 }
 
 @Composable
@@ -163,6 +203,11 @@ private fun StatusCard(book: BookEntity) {
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }
+
+                BookStage.AVAILABLE -> Text(
+                    "The server finished converting this book. Tap Download to fetch it.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
 
                 BookStage.UPLOADING -> if (book.sizeBytes > 0) {
                     LinearProgressIndicator(
@@ -235,6 +280,7 @@ private fun statusHeadline(book: BookEntity): String = when (book.stage()) {
     BookStage.UPLOADING -> "Uploading to the server"
     BookStage.QUEUED -> "Queued on the server"
     BookStage.CONVERTING -> "Converting"
+    BookStage.AVAILABLE -> "Ready to download"
     BookStage.DOWNLOADING -> "Downloading the audiobook"
     BookStage.READY -> "Ready to read along"
     BookStage.FAILED -> "Something went wrong"
@@ -247,12 +293,29 @@ private fun Details(book: BookEntity) {
         Row2("File", book.originalFilename)
         Row2("Size", book.sizeBytes.mb())
         book.author?.let { Row2("Author", it) }
+        book.engine?.let { Row2("Engine", it) }
         book.voice?.let { Row2("Voice", it) }
         book.speed?.let { Row2("Speed", "${it}x") }
         book.jobId?.let { Row2("Job", it) }
+        book.processingDuration()?.let { Row2("Processing time", it) }
         book.audiobookBytes?.let { Row2("Audiobook", it.mb()) }
         book.audioDurationMs?.let { Row2("Audio length", it.duration()) }
     }
+}
+
+/**
+ * Wall-clock time the server spent on this job, from its own `started_at`/
+ * `finished_at` timestamps -- null until both exist, e.g. mid-conversion.
+ */
+private fun BookEntity.processingDuration(): String? {
+    val started = jobStartedAt ?: return null
+    val finished = jobFinishedAt ?: return null
+    return runCatching {
+        java.time.Duration.between(
+            java.time.OffsetDateTime.parse(started),
+            java.time.OffsetDateTime.parse(finished),
+        ).toMillis().duration()
+    }.getOrNull()
 }
 
 @Composable
