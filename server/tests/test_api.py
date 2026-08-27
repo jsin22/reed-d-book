@@ -194,6 +194,51 @@ class EngineTest(ApiTestCase):
         self.assertIn('M1', by_id['supertonic']['voices'])
 
 
+class VoiceSampleTest(ApiTestCase):
+    """`_synthesize_sample` is stubbed throughout: it does real TTS work
+    (torch/pocket_tts), which these tests must run without, same reasoning
+    as ConversionTest in test_tasks.py stubbing `_load_audiblez`.
+    """
+
+    def _fake_synth(self, engine, voice, path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b'RIFF....WAVEfake')
+
+    def test_generates_and_serves_a_sample(self):
+        with mock.patch('app.main._synthesize_sample', side_effect=self._fake_synth) as synth:
+            response = self.client.get('/api/voices/alba/sample')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b'RIFF....WAVEfake')
+        self.assertEqual(response.headers['content-type'], 'audio/wav')
+        synth.assert_called_once_with('pocket_tts', 'alba', mock.ANY)
+
+    def test_a_cached_sample_is_served_without_resynthesizing(self):
+        with mock.patch('app.main._synthesize_sample', side_effect=self._fake_synth) as synth:
+            self.client.get('/api/voices/alba/sample')
+            second = self.client.get('/api/voices/alba/sample')
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(second.content, b'RIFF....WAVEfake')
+        synth.assert_called_once()
+
+    def test_accepts_an_explicit_engine(self):
+        with mock.patch('app.main._synthesize_sample', side_effect=self._fake_synth) as synth:
+            self.client.get('/api/voices/M1/sample', params={'engine': 'supertonic'})
+        synth.assert_called_once_with('supertonic', 'M1', mock.ANY)
+
+    def test_rejects_an_unknown_voice(self):
+        response = self.client.get('/api/voices/not_a_voice/sample')
+        self.assertEqual(response.status_code, 400)
+
+    def test_rejects_an_unknown_engine(self):
+        response = self.client.get('/api/voices/alba/sample', params={'engine': 'not_an_engine'})
+        self.assertEqual(response.status_code, 400)
+
+    def test_requires_a_token(self):
+        del self.client.headers['Authorization']
+        response = self.client.get('/api/voices/alba/sample')
+        self.assertEqual(response.status_code, 401)
+
+
 class PollTest(ApiTestCase):
     def test_reports_progress_written_by_the_worker(self):
         job_id = self.upload().json()['job_id']

@@ -61,6 +61,16 @@ class Settings:
         """
         return self.data_dir / 'crashes'
 
+    @property
+    def voice_samples_dir(self) -> Path:
+        """Cached preview clips for the app's voice browser, one per voice --
+        see `GET /api/voices/{voice}/sample` in app/main.py. Generated once,
+        on first request, and kept forever after; never cleaned up
+        automatically, but each clip is one short sentence, so the total is
+        negligible next to a single job's audiobook.
+        """
+        return self.data_dir / 'voice_samples'
+
 
 def load_settings() -> Settings:
     """Build a Settings from the current environment (not cached)."""

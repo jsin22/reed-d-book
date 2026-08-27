@@ -15,6 +15,8 @@ The contract the Android app codes against:
                                          listing; see README.md
     GET    /api/voices                  voices for one engine (default kokoro), for a picker
     GET    /api/engines                 every engine and its voices, for a two-level picker
+    GET    /api/voices/{voice}/sample   a short fixed-text clip of one voice, generated
+                                         once and cached; see SAMPLE_TEXT below
     GET    /api/me                      the caller's own {user_id, email, is_admin}
     GET    /api/health
 
@@ -33,6 +35,7 @@ Celery worker.  This process never imports torch or kokoro.
 """
 
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -152,6 +155,78 @@ def engines():
         ],
         'default': settings.default_engine,
     }
+
+
+#: What every voice-preview clip says, chosen for having a full range of
+#: ordinary phonemes without leaning on any one emotion -- a fair, neutral
+#: sample of what a voice actually sounds like reading prose.
+SAMPLE_TEXT = ('The city slowly came to life as the morning train arrived on time, '
+               'bringing commuters ready to start another productive week.')
+
+
+def _sample_path(settings, engine: str, voice: str) -> Path:
+    # `engine`/`voice` are only ever reached here after validation against
+    # ENGINES/known_voices() below -- both fixed, code-defined whitelists --
+    # so building a path from them directly is safe; neither is ever
+    # attacker-controlled free text the way a job's uploaded filename is.
+    return settings.voice_samples_dir / engine / f'{voice}.wav'
+
+
+def _synthesize_sample(engine: str, voice: str, path: Path) -> None:
+    """Generate one voice's preview clip and cache it to `path`.
+
+    Deferred imports, same discipline as everywhere else in this file: the
+    web process must not import torch/kokoro/pocket_tts at module level (see
+    this module's own docstring), only from inside a request that actually
+    needs them -- which, for this route, is only the very first request for
+    a voice nobody has previewed yet.
+    """
+    import numpy as np
+    import soundfile
+    from audiblez.engines import engine_sample_rate, load_engine
+
+    tts_engine = load_engine(engine, voice)
+    segments = tts_engine.synthesize(SAMPLE_TEXT, voice, speed=1.0)
+    audio = np.concatenate(segments) if len(segments) > 1 else segments[0]
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f'.{path.name}.{os.getpid()}.tmp')
+    # format='WAV' explicitly: soundfile otherwise infers the format from the
+    # filename's extension, and the temp file's real extension is '.tmp', not
+    # '.wav' -- it raised TypeError here on the very first real request.
+    soundfile.write(tmp, audio, engine_sample_rate(engine), format='WAV')
+    os.replace(tmp, path)
+
+
+@app.get('/api/voices/{voice}/sample')
+def voice_sample(voice: str, engine: str | None = None, user: dict = Depends(require_user)):
+    """A short, fixed-text clip of one voice (see SAMPLE_TEXT), for browsing
+    what each voice sounds like before picking one to convert with.
+
+    Generated once per voice and cached on disk forever after -- browsing
+    every voice must not mean re-synthesizing the same sentence on every
+    tap. Deliberately synchronous (`def`, not `async def`): the first
+    request for an as-yet-unsampled voice does real, CPU-bound TTS work
+    (a few seconds), which has to run on a worker thread, not the event
+    loop, the same reasoning as create_job's upload handling above.
+
+    Requires a token (unlike /api/voices, /api/engines): this does real
+    work server-side, and the server is reachable from the open internet
+    now (see README.md, "Sharing with others") -- an unauthenticated
+    version of this route would be a way for anyone to burn this
+    handheld's CPU for free.
+    """
+    settings = get_settings()
+    engine = engine or settings.default_engine
+    if engine not in ENGINES:
+        raise HTTPException(status_code=400, detail=f'unknown engine: {engine}')
+    if voice not in known_voices(engine):
+        raise HTTPException(status_code=400, detail=f'unknown voice for engine {engine}: {voice}')
+
+    path = _sample_path(settings, engine, voice)
+    if not path.is_file():
+        _synthesize_sample(engine, voice, path)
+    return FileResponse(path, media_type='audio/wav', filename=path.name)
 
 
 @app.post('/api/jobs', status_code=202)

@@ -19,6 +19,8 @@ import dev.reedd.ui.reader.ReaderScreen
 import dev.reedd.ui.reader.ReaderViewModel
 import dev.reedd.ui.settings.SettingsScreen
 import dev.reedd.ui.settings.SettingsViewModel
+import dev.reedd.ui.voices.VoicesScreen
+import dev.reedd.ui.voices.VoicesViewModel
 import kotlinx.serialization.Serializable
 
 @Serializable
@@ -29,6 +31,9 @@ object SettingsRoute
 
 @Serializable
 object AdminRoute
+
+@Serializable
+object VoicesRoute
 
 @Serializable
 data class DetailRoute(val bookId: String)
@@ -96,12 +101,18 @@ fun ReeddNavHost(navController: NavHostController = rememberNavController()) {
                 viewModel = viewModel,
                 onBack = { navController.popBackStack() },
                 onOpenAdmin = { navController.navigate(AdminRoute) },
+                onOpenVoices = { navController.navigate(VoicesRoute) },
             )
         }
 
         composable<AdminRoute> {
             val viewModel: AdminViewModel = viewModel(factory = AdminViewModel.factory(container))
             AdminScreen(viewModel = viewModel, onBack = { navController.popBackStack() })
+        }
+
+        composable<VoicesRoute> {
+            val viewModel: VoicesViewModel = viewModel(factory = VoicesViewModel.factory(container, context))
+            VoicesScreen(viewModel = viewModel, onBack = { navController.popBackStack() })
         }
     }
 }

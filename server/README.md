@@ -29,6 +29,7 @@ Android app ──POST /api/jobs──▶ FastAPI ──▶ Redis ──▶ Cele
 | `GET /api/jobs` | every job, newest first. |
 | `GET /api/voices` | voices for one engine (`?engine=`, default the server's default engine). |
 | `GET /api/engines` | every engine and its own voices/default, for a two-level picker. |
+| `GET /api/voices/{voice}/sample` | a short fixed-text clip of one voice (`?engine=`), generated once and cached. |
 | `GET /api/me` | the caller's own `{user_id, email, is_admin}`. |
 | `GET /api/health` | liveness; never requires a token, so the app can find the server. |
 
@@ -321,7 +322,7 @@ does with a job once it exists.
 cd server && ../audiblez/.venv/bin/python -m unittest discover
 ```
 
-110 tests, no Redis, no network, no TTS stack: the queue is stubbed and the
+116 tests, no Redis, no network, no TTS stack: the queue is stubbed and the
 worker runs against a fake audiblez. To also convert `sample-short.epub` for
 real (needs torch/kokoro/spacy/ffmpeg, ~15s):
 

@@ -44,11 +44,16 @@ fun SettingsScreen(
     viewModel: SettingsViewModel,
     onBack: () -> Unit,
     onOpenAdmin: () -> Unit = {},
+    onOpenVoices: () -> Unit = {},
 ) {
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val check by viewModel.check.collectAsStateWithLifecycle()
     val storage by viewModel.storageBytes.collectAsStateWithLifecycle()
     val me by viewModel.me.collectAsStateWithLifecycle()
+    // Fails closed: while `me` is still loading (or the check failed), this
+    // reads as non-admin, so a moment of uncertainty never shows the fuller,
+    // server-affecting admin view to someone who has not been confirmed one.
+    val isAdmin = me?.isAdmin == true
 
     var baseUrl by remember { mutableStateOf("") }
     var token by remember { mutableStateOf("") }
@@ -80,26 +85,32 @@ fun SettingsScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            Text("Conversion server", style = MaterialTheme.typography.titleMedium)
-            Text(
-                "The machine running the FastAPI server. On the same wifi that is its LAN address; over Tailscale it works from anywhere.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            if (isAdmin) {
+                // Only an admin can see or change where the app points -- every
+                // other user's copy has the server address baked in at build
+                // time (see SettingsStore.DEFAULT_BASE_URL) and never needs to
+                // know it, let alone edit it.
+                Text("Conversion server", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "The machine running the FastAPI server. On the same wifi that is its LAN address; over Tailscale it works from anywhere.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
 
-            OutlinedTextField(
-                value = baseUrl,
-                onValueChange = { baseUrl = it },
-                label = { Text("Address") },
-                placeholder = { Text("192.168.1.101:8000") },
-                supportingText = {
-                    // Shows what the app will actually request, so a missing scheme
-                    // or a stray path is visible before anything is sent.
-                    viewModel.normalizedPreview(baseUrl)?.let { Text("Will use $it") }
-                },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
+                OutlinedTextField(
+                    value = baseUrl,
+                    onValueChange = { baseUrl = it },
+                    label = { Text("Address") },
+                    placeholder = { Text("192.168.1.101:8000") },
+                    supportingText = {
+                        // Shows what the app will actually request, so a missing scheme
+                        // or a stray path is visible before anything is sent.
+                        viewModel.normalizedPreview(baseUrl)?.let { Text("Will use $it") }
+                    },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
 
             OutlinedTextField(
                 value = token,
@@ -111,61 +122,69 @@ fun SettingsScreen(
                 modifier = Modifier.fillMaxWidth(),
             )
 
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = { viewModel.testConnection(baseUrl, token) }) { Text("Test connection") }
-                OutlinedButton(onClick = { viewModel.save(baseUrl, token) }) { Text("Save") }
-            }
-
-            when (val result = check) {
-                is ConnectionCheck.Idle -> Unit
-                is ConnectionCheck.Checking -> Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    CircularProgressIndicator(Modifier.size(16.dp))
-                    Text("Checking", style = MaterialTheme.typography.bodySmall)
+            if (isAdmin) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = { viewModel.testConnection(baseUrl, token) }) { Text("Test connection") }
+                    OutlinedButton(onClick = { viewModel.save(baseUrl, token) }) { Text("Save") }
                 }
 
-                is ConnectionCheck.Reachable -> Card {
-                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text("Server reached, logged in as ${result.loggedInAs}", style = MaterialTheme.typography.titleSmall)
-                        result.dataDir?.let {
-                            Text(
-                                "data: $it",
-                                style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-                            )
+                when (val result = check) {
+                    is ConnectionCheck.Idle -> Unit
+                    is ConnectionCheck.Checking -> Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        CircularProgressIndicator(Modifier.size(16.dp))
+                        Text("Checking", style = MaterialTheme.typography.bodySmall)
+                    }
+
+                    is ConnectionCheck.Reachable -> Card {
+                        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text("Server reached, logged in as ${result.loggedInAs}", style = MaterialTheme.typography.titleSmall)
+                            result.dataDir?.let {
+                                Text(
+                                    "data: $it",
+                                    style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                                )
+                            }
+                            result.broker?.let {
+                                Text(
+                                    "broker: $it",
+                                    style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                                )
+                            }
                         }
-                        result.broker?.let {
+                    }
+
+                    is ConnectionCheck.InvalidToken -> Card {
+                        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             Text(
-                                "broker: $it",
-                                style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                                "Server reached, but this token was rejected",
+                                style = MaterialTheme.typography.titleSmall,
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                            Text(
+                                "The address is right, but the API token is not valid on this server. " +
+                                    "Clear the field and paste your invite token again -- a stray character " +
+                                    "from copying it (a trailing newline, a missing digit) is the usual cause.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
                     }
-                }
 
-                is ConnectionCheck.InvalidToken -> Card {
-                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text(
-                            "Server reached, but this token was rejected",
-                            style = MaterialTheme.typography.titleSmall,
-                            color = MaterialTheme.colorScheme.error,
-                        )
-                        Text(
-                            "The address is right, but the API token is not valid on this server. " +
-                                "Clear the field and paste your invite token again -- a stray character " +
-                                "from copying it (a trailing newline, a missing digit) is the usual cause.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
+                    is ConnectionCheck.Unreachable -> Text(
+                        result.reason,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
                 }
-
-                is ConnectionCheck.Unreachable -> Text(
-                    result.reason,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
-                )
+            } else {
+                // No address to save alongside it and no connection test to
+                // show the result of -- just the token itself. The library
+                // screen's own auth banner (LibraryViewModel.authStatus) is
+                // what tells a non-admin whether it actually worked.
+                OutlinedButton(onClick = { viewModel.saveToken(token) }) { Text("Save") }
             }
 
             me?.let { current ->
@@ -176,7 +195,7 @@ fun SettingsScreen(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text("Logged in as ${current.email}", style = MaterialTheme.typography.bodyMedium)
-                    if (current.isAdmin) {
+                    if (isAdmin) {
                         OutlinedButton(onClick = onOpenAdmin) { Text("Admin") }
                     }
                 }
@@ -190,19 +209,39 @@ fun SettingsScreen(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Column(Modifier.fillMaxWidth(0.75f)) {
-                    Text("Free server disk after downloading", style = MaterialTheme.typography.bodyLarge)
+                    Text("Voices", style = MaterialTheme.typography.bodyLarge)
                     Text(
-                        "Deletes the job on the server once both files are on this device. Off by default: " +
-                            "a book left on the server can be pulled onto another device, or this one again " +
-                            "after a reinstall, without converting it a second time.",
+                        "Hear a sample of every Pocket TTS voice before picking one to convert with.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                Switch(
-                    checked = settings.deleteJobAfterDownload,
-                    onCheckedChange = viewModel::setDeleteJobAfterDownload,
-                )
+                OutlinedButton(onClick = onOpenVoices) { Text("Browse") }
+            }
+
+            if (isAdmin) {
+                HorizontalDivider()
+
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.fillMaxWidth(0.75f)) {
+                        Text("Free server disk after downloading", style = MaterialTheme.typography.bodyLarge)
+                        Text(
+                            "Deletes the job on the server once both files are on this device. Off by default: " +
+                                "a book left on the server can be pulled onto another device, or this one again " +
+                                "after a reinstall, without converting it a second time.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(
+                        checked = settings.deleteJobAfterDownload,
+                        onCheckedChange = viewModel::setDeleteJobAfterDownload,
+                    )
+                }
             }
 
             HorizontalDivider()

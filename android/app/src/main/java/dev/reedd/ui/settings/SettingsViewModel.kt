@@ -62,13 +62,35 @@ class SettingsViewModel(
 
     fun refreshMe() {
         viewModelScope.launch {
-            _me.value = runCatching { api.service().me() }.getOrNull()
+            val result = runCatching { api.service().me() }.getOrNull()
+            _me.value = result
+            // A non-admin must have zero impact on the backend beyond their own
+            // upload -- see SettingsScreen, which hides this toggle from them
+            // entirely -- but the stored preference is per-device and outlives
+            // any single check, so a value left on from before this
+            // restriction (or from when this device's token was an admin's)
+            // is force-cleared the moment a non-admin token is confirmed,
+            // not just hidden from view.
+            if (result != null && !result.isAdmin && settingsStore.current().deleteJobAfterDownload) {
+                settingsStore.setDeleteJobAfterDownload(false)
+            }
         }
     }
 
     fun save(baseUrl: String, token: String) {
         viewModelScope.launch {
             settingsStore.setServer(baseUrl, token)
+            _check.value = ConnectionCheck.Idle
+        }
+        refreshMe()
+    }
+
+    /** The non-admin Save button: the address field is not shown to them (it is
+     *  baked into the app -- see SettingsStore.DEFAULT_BASE_URL), so only the
+     *  token changes; whatever address is already configured is left alone. */
+    fun saveToken(token: String) {
+        viewModelScope.launch {
+            settingsStore.setServer(settingsStore.current().baseUrl, token)
             _check.value = ConnectionCheck.Idle
         }
         refreshMe()
