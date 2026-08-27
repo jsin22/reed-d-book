@@ -134,7 +134,7 @@ object CrashReporter {
     fun report(thread: Thread, throwable: Throwable): String {
         val trace = StringWriter().also { throwable.printStackTrace(PrintWriter(it)) }
         return buildString {
-            appendLine("reed-d-book crash report")
+            appendLine("read-d-book crash report")
             appendLine("when:      ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss z", Locale.US).format(Date())}")
             appendLine("app:       ${BuildConfig.APPLICATION_ID} ${BuildConfig.VERSION_NAME} (${BuildConfig.BUILD_TYPE})")
             appendLine("device:    ${Build.MANUFACTURER} ${Build.MODEL}")

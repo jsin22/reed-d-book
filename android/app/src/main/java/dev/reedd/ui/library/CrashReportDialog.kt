@@ -60,7 +60,7 @@ fun CrashReportDialog(report: String, onDismiss: () -> Unit) {
                     scope.launch {
                         clipboard.setClipEntry(
                             androidx.compose.ui.platform.ClipEntry(
-                                ClipData.newPlainText("reed-d-book crash", report)
+                                ClipData.newPlainText("read-d-book crash", report)
                             )
                         )
                     }

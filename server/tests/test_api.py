@@ -582,7 +582,7 @@ class CrashReportTest(ApiTestCase):
     how a phone hands one over.
     """
 
-    TRACE = ('reed-d-book crash report\n'
+    TRACE = ('read-d-book crash report\n'
              'exception: java.lang.IllegalStateException: boom\n'
              '\tat dev.reedd.ui.library.LibraryViewModel.importAndUpload(LibraryViewModel.kt:133)\n')
 

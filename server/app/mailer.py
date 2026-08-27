@@ -17,7 +17,7 @@ def invite_configured(settings) -> bool:
 
 def _body(settings, token: str) -> str:
     lines = [
-        "You've been invited to reed'd.",
+        "You've been invited to read-d-book.",
         '',
         "Your access token (paste this into the app's Settings screen):",
         token,
@@ -37,7 +37,7 @@ def send_invite(settings, to_email: str, token: str) -> None:
     whether that's fatal -- see app.main.invite_user, which still creates the
     account and returns the token even if this raises."""
     message = EmailMessage()
-    message['Subject'] = "You're invited to reed'd"
+    message['Subject'] = "You're invited to read-d-book"
     message['From'] = settings.smtp_from
     message['To'] = to_email
     message.set_content(_body(settings, token))

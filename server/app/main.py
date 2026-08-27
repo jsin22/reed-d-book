@@ -54,7 +54,7 @@ from .store import (DONE, TERMINAL_STATUSES, JobNotFound, JobStore, UploadTooLar
 from .users import UserNotFound, UserStore
 
 app = FastAPI(
-    title='reed-d-book conversion server',
+    title='read-d-book conversion server',
     description='Converts .epub to .m4b + read-along timing metadata.',
     version='1.0.0',
 )

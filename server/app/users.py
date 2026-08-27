@@ -157,7 +157,7 @@ def _bootstrap_admin(email: str) -> None:
 if __name__ == '__main__':
     import argparse
 
-    parser = argparse.ArgumentParser(description='reed-d-book user management')
+    parser = argparse.ArgumentParser(description='read-d-book user management')
     sub = parser.add_subparsers(dest='command', required=True)
     create_admin = sub.add_parser('create-admin',
                                   help="create an admin account and print its token once")
