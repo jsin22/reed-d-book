@@ -7,7 +7,9 @@ import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.doublePreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import dev.reedd.domain.LibrarySort
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
@@ -88,6 +90,22 @@ data class ReaderSettings(
         const val PAPER = "PAPER"
     }
 }
+
+/**
+ * The library screen's sort order and filter selection -- a view preference
+ * like [ReaderSettings], not a connection detail, and persisted for the same
+ * reason: reopening the app should not silently reset how the library looks.
+ *
+ * @param filterCategory single-valued, null means no category filter (see
+ *   `LibraryFilter`).
+ * @param filterGenres multi-valued and OR'd together; empty means no genre
+ *   filter.
+ */
+data class LibraryViewSettings(
+    val sort: LibrarySort = LibrarySort.RECENTLY_ADDED,
+    val filterCategory: String? = null,
+    val filterGenres: Set<String> = emptySet(),
+)
 
 private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "settings")
 
@@ -181,6 +199,26 @@ class SettingsStore(context: Context, scope: CoroutineScope) {
         }
     }
 
+    val libraryViewSettings: Flow<LibraryViewSettings> = dataStore.data.map { prefs ->
+        LibraryViewSettings(
+            // A bad/renamed enum name (an older or newer install's leftover
+            // value) falls back to the default sort rather than crashing.
+            sort = prefs[KEY_LIBRARY_SORT]?.let { runCatching { LibrarySort.valueOf(it) }.getOrNull() }
+                ?: LibraryViewSettings().sort,
+            filterCategory = prefs[KEY_LIBRARY_FILTER_CATEGORY],
+            filterGenres = prefs[KEY_LIBRARY_FILTER_GENRES] ?: emptySet(),
+        )
+    }
+
+    suspend fun setLibraryViewSettings(settings: LibraryViewSettings) {
+        dataStore.edit { prefs ->
+            prefs[KEY_LIBRARY_SORT] = settings.sort.name
+            if (settings.filterCategory == null) prefs.remove(KEY_LIBRARY_FILTER_CATEGORY)
+            else prefs[KEY_LIBRARY_FILTER_CATEGORY] = settings.filterCategory
+            prefs[KEY_LIBRARY_FILTER_GENRES] = settings.filterGenres
+        }
+    }
+
     private companion object {
         val KEY_BASE_URL = stringPreferencesKey("base_url")
         val KEY_TOKEN = stringPreferencesKey("api_token")
@@ -191,6 +229,9 @@ class SettingsStore(context: Context, scope: CoroutineScope) {
         val KEY_READER_FONT_SIZE = doublePreferencesKey("reader_font_size")
         val KEY_READER_THEME = stringPreferencesKey("reader_theme")
         val KEY_READER_SCROLL = booleanPreferencesKey("reader_scroll")
+        val KEY_LIBRARY_SORT = stringPreferencesKey("library_sort")
+        val KEY_LIBRARY_FILTER_CATEGORY = stringPreferencesKey("library_filter_category")
+        val KEY_LIBRARY_FILTER_GENRES = stringSetPreferencesKey("library_filter_genres")
 
         /** Not a real theme name -- see [readerSettings] and [setReaderSettings]. */
         const val SYSTEM_THEME_SENTINEL = "SYSTEM"

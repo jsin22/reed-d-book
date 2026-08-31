@@ -11,6 +11,7 @@ import dev.reedd.data.local.EpubImporter
 import dev.reedd.data.readium.ReadiumComponents
 import dev.reedd.data.remote.ApiProvider
 import dev.reedd.data.settings.SettingsStore
+import dev.reedd.domain.AuthStatusMonitor
 import dev.reedd.domain.ConversionWatcher
 import dev.reedd.domain.ReadAlongAligner
 import dev.reedd.domain.ServerLibraryAdopter
@@ -76,12 +77,16 @@ class AppContainer(context: Context) {
     }
 
     val libraryAdopter: ServerLibraryAdopter by lazy {
-        ServerLibraryAdopter(repository, api, files, importer, downloader)
+        ServerLibraryAdopter(repository, api, files)
     }
 
     val watcher: ConversionWatcher by lazy {
         ConversionWatcher(appContext, repository, api, notifications, libraryAdopter::adopt)
     }
+
+    /** Shared so a token saved in Settings can update the library's banner
+     *  directly -- see [AuthStatusMonitor]'s own docstring. */
+    val authStatusMonitor: AuthStatusMonitor by lazy { AuthStatusMonitor(settings, api) }
 
     val readAlongAligner: ReadAlongAligner by lazy { ReadAlongAligner(syncStore) }
 

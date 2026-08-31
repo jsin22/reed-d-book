@@ -14,6 +14,13 @@ data class JobDto(
     @SerialName("job_id") val jobId: String,
     val status: String,
     val filename: String,
+    /** Sent by the uploading device from what it already extracted at import
+     *  time (see UploadWorker) -- used both for the server's category/genre
+     *  lookup and, since a job's own manifest already has it, so a *different*
+     *  device adopting this job can show a real title/author immediately,
+     *  without downloading the epub just to find out what it's called. */
+    val title: String? = null,
+    val author: String? = null,
     val voice: String,
     val speed: Double,
     /** Absent on a job created before the server tracked this; treat as the
@@ -34,6 +41,15 @@ data class JobDto(
     val public: Boolean = false,
     /** Only ever present from `GET /api/admin/jobs` -- null everywhere else. */
     @SerialName("owner_email") val ownerEmail: String? = null,
+    /**
+     * Filled in asynchronously by a background lookup keyed on the title/author
+     * sent at upload (see `server/app/book_metadata.py`). Null/empty on a fresh
+     * job, and stays that way if the book could not be identified -- a poll
+     * simply never learns anything new for it, same as any other still-blank
+     * field on a job that will never change again.
+     */
+    val category: String? = null,
+    val genres: List<String> = emptyList(),
 )
 
 @Serializable
@@ -124,6 +140,22 @@ data class PublicUpdateDto(val public: Boolean)
 data class UserDeleteDto(
     @SerialName("user_id") val userId: String,
     val deleted: Boolean,
+)
+
+/**
+ * `GET /api/admin/metadata-health` -- whether the category/genre lookup
+ * (Gemini, the sole source since Open Library/Google Books were removed;
+ * see `LLM_GENRE_ENRICHMENT.md`) is currently working. There is no second
+ * source to quietly fall back to any more, so the admin screen surfaces
+ * this directly rather than letting "books never get tagged" happen with
+ * no visible reason why.
+ */
+@Serializable
+data class MetadataHealthDto(
+    val ok: Boolean,
+    @SerialName("last_error") val lastError: String? = null,
+    @SerialName("last_error_at") val lastErrorAt: String? = null,
+    @SerialName("last_success_at") val lastSuccessAt: String? = null,
 )
 
 /** The server's status strings, plus a bucket for anything newer than this app. */

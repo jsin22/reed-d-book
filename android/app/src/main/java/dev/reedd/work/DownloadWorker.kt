@@ -20,6 +20,7 @@ import dev.reedd.data.remote.ServerNotConfigured
 import dev.reedd.data.sync.SyncFileError
 import dev.reedd.data.sync.SyncFileParser
 import dev.reedd.notify.Notifications
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.SendChannel
 import kotlinx.coroutines.coroutineScope
@@ -29,12 +30,24 @@ import java.io.IOException
 import java.util.concurrent.TimeUnit
 
 /**
- * Fetches a finished conversion: the `.m4b`, then the timing `.json`.
+ * Fetches a finished conversion: the epub (if this book does not have one yet),
+ * then the `.m4b`, then the timing `.json`.
  *
- * In that order deliberately. The audiobook is the hundreds-of-megabytes part and
- * the one likely to be interrupted; the sync file is a few kilobytes. Doing the
- * big one first means a book is never left looking ready because the cheap half
- * arrived.
+ * The epub step only ever does anything for a book [dev.reedd.domain.
+ * ServerLibraryAdopter] adopted from another device -- one this device
+ * originally uploaded and converted already has it. Adoption itself no longer
+ * fetches the epub at all (see that class's own docstring): it used to, purely
+ * to read a title and author out of it, which meant a whole library had to be
+ * downloaded and Readium-parsed just to show cards for it. Now that only
+ * happens here, the moment the user actually wants the book, same as the
+ * audiobook/sync files always worked -- and it is also where the *real*
+ * Readium-derived title/author/cover replace the server manifest's
+ * best-effort ones.
+ *
+ * The audiobook before the sync file deliberately: the audiobook is the
+ * hundreds-of-megabytes part and the one likely to be interrupted; the sync
+ * file is a few kilobytes. Doing the big one first means a book is never left
+ * looking ready because the cheap half arrived.
  *
  * The row only becomes [DownloadState.DONE] once both files are on disk *and* the
  * sync file has parsed into `sync_chunks` -- a book that says "ready" has to be
@@ -97,6 +110,8 @@ class DownloadWorker(
             setForeground(getForegroundInfo())
             container.repository.updateDownload(bookId, DownloadState.RUNNING, error = null)
 
+            ensureEpub(book, jobId)
+
             val audiobook = downloadAudiobook(book, jobId, progress)
             val sync = downloadSync(book, jobId)
             parseSync(book, sync)
@@ -141,10 +156,44 @@ class DownloadWorker(
             // Wifi dropped mid-transfer. The .part file survives, so the next
             // attempt resumes instead of restarting.
             retryOrFail(e)
+        } catch (e: CancellationException) {
+            throw e // never swallow cancellation
+        } catch (e: Throwable) {
+            // Regression: a real crash inside sync parsing/alignment (an
+            // ArrayIndexOutOfBoundsException from TextNormalizer on a
+            // heavily-punctuated chapter, confirmed on a real book) was not
+            // one of the specific types above, so it propagated out of
+            // doWork() uncaught entirely. downloadState was left at RUNNING
+            // -- never advanced to FAILED, since only the catch blocks above
+            // do that -- and ConversionWatcher's awaitingDownload() kept
+            // finding a non-terminal state to resume on every poll, so the
+            // app re-downloaded the whole book and crashed again, forever.
+            // Every code path that can throw here should already be guarded
+            // well before this (see ReadAlongAligner), but this is the last
+            // line of defense against any failure ever getting stuck in a
+            // state nothing can recover it from: whatever it is, downloadState
+            // has to land somewhere terminal.
+            fail(e.message ?: "download failed: ${e.javaClass.simpleName}")
         } finally {
             progress.close()
             writer.join()
         }
+    }
+
+    /**
+     * A book adopted from another device has a row (and a deterministic
+     * [BookEntity.epubPath], see ServerLibraryAdopter) but no file there yet --
+     * a book this device converted or imported itself already does. Fetches
+     * it and replaces the server manifest's best-effort title/author/size with
+     * the real, Readium-derived ones (plus a cover, which the manifest never
+     * had at all).
+     */
+    private suspend fun ensureEpub(book: BookEntity, jobId: String) {
+        val target = File(book.epubPath)
+        if (target.isFile) return
+        container.downloader.download(url = container.api.url("api/jobs/$jobId/epub"), target = target)
+        val imported = container.importer.fromServerCopy(bookId, book.originalFilename)
+        container.repository.updateMetadata(bookId, imported.title, imported.author, imported.coverPath, imported.sizeBytes)
     }
 
     private suspend fun downloadAudiobook(

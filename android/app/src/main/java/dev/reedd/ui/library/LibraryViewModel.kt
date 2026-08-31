@@ -15,11 +15,20 @@ import dev.reedd.data.remote.ApiProvider
 import dev.reedd.data.remote.EngineDto
 import dev.reedd.data.remote.JobStatus
 import dev.reedd.data.remote.ServerNotConfigured
+import dev.reedd.data.settings.LibraryViewSettings
 import dev.reedd.data.settings.ServerSettings
 import dev.reedd.data.settings.SettingsStore
 import dev.reedd.di.AppContainer
 import dev.reedd.diagnostics.CrashLog
+import dev.reedd.domain.AuthStatus
+import dev.reedd.domain.AuthStatusMonitor
 import dev.reedd.domain.ConversionWatcher
+import dev.reedd.domain.LibraryFilter
+import dev.reedd.domain.LibrarySort
+import dev.reedd.domain.availableCategories
+import dev.reedd.domain.availableGenres
+import dev.reedd.domain.filteredBy
+import dev.reedd.domain.librarySorted
 import dev.reedd.playback.PlayerConnection
 import dev.reedd.playback.PlayerState
 import dev.reedd.work.DownloadWorker
@@ -32,6 +41,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -58,23 +69,6 @@ data class ConversionOptions(
         engines.firstOrNull { it.id == engineId }?.defaultVoice
 }
 
-/**
- * Whether this device can actually talk to the server as someone, checked with
- * `GET /api/me` -- distinct from [dev.reedd.ui.settings.ConnectionCheck], which
- * only runs when the user is on the Settings screen actively testing. This is
- * the passive version shown on the library itself, since a missing or wrong
- * token otherwise looks identical to "no books yet" (BUGS.md, BUG-23) -- the
- * whole point is to make that state legible without a trip to Settings first.
- */
-sealed interface AuthStatus {
-    /** Not checked yet, or nothing to report -- shows nothing. */
-    data object Unknown : AuthStatus
-    data object Ok : AuthStatus
-    /** 401, or no token/server configured at all: same actionable fix either way. */
-    data object NeedsToken : AuthStatus
-    data class Unreachable(val reason: String) : AuthStatus
-}
-
 class LibraryViewModel(
     // Typed as Application, not Context: a ViewModel outlives any Activity, and
     // holding a narrower Context here would be a leak.
@@ -86,10 +80,52 @@ class LibraryViewModel(
     private val settingsStore: SettingsStore,
     private val crashLog: CrashLog,
     private val player: PlayerConnection,
+    private val authMonitor: AuthStatusMonitor,
 ) : ViewModel() {
 
     val books: StateFlow<List<BookEntity>> =
         repository.books().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /** How the library is currently sorted/filtered, persisted across launches
+     *  (see [SettingsStore.libraryViewSettings]). */
+    val libraryView: StateFlow<LibraryViewSettings> =
+        settingsStore.libraryViewSettings.stateIn(viewModelScope, SharingStarted.Eagerly, LibraryViewSettings())
+
+    /** [books], sorted and filtered per [libraryView] -- the one list the
+     *  screen actually renders; [books] itself stays the raw, unsorted source
+     *  so [availableCategories]/[availableGenres] can offer every tag in the
+     *  library, not just the ones currently passing the filter. */
+    val visibleBooks: StateFlow<List<BookEntity>> = combine(books, libraryView) { all, view ->
+        all.librarySorted(view.sort).filteredBy(LibraryFilter(view.filterCategory, view.filterGenres))
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /** Every category/genre tag seen in the library today, for the filter
+     *  sheet's own option list -- recomputed from the unfiltered [books] so a
+     *  tag does not vanish from the sheet the moment it is the only thing
+     *  selected. */
+    val availableCategories: StateFlow<List<String>> = books.map { it.availableCategories() }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    val availableGenres: StateFlow<List<String>> = books.map { it.availableGenres() }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    fun setSort(sort: LibrarySort) {
+        viewModelScope.launch { settingsStore.setLibraryViewSettings(libraryView.value.copy(sort = sort)) }
+    }
+
+    fun setFilterCategory(category: String?) {
+        viewModelScope.launch { settingsStore.setLibraryViewSettings(libraryView.value.copy(filterCategory = category)) }
+    }
+
+    fun setFilterGenres(genres: Set<String>) {
+        viewModelScope.launch { settingsStore.setLibraryViewSettings(libraryView.value.copy(filterGenres = genres)) }
+    }
+
+    fun clearFilters() {
+        viewModelScope.launch {
+            settingsStore.setLibraryViewSettings(libraryView.value.copy(filterCategory = null, filterGenres = emptySet()))
+        }
+    }
 
     /**
      * Which book, if any, [player] currently has loaded, and whether it is
@@ -119,8 +155,10 @@ class LibraryViewModel(
     /** The mini-player's play/pause button. */
     fun togglePlayPause() = player.togglePlayPause()
 
-    private val _authStatus = MutableStateFlow<AuthStatus>(AuthStatus.Unknown)
-    val authStatus: StateFlow<AuthStatus> = _authStatus.asStateFlow()
+    /** Shared across screens -- see [AuthStatusMonitor]. Saving a working
+     *  token in Settings updates this directly, so the banner clears without
+     *  waiting for this ViewModel's own next reconcile or a manual Refresh. */
+    val authStatus: StateFlow<AuthStatus> = authMonitor.status
 
     /**
      * Whether the current token belongs to an admin -- gates the Detail screen
@@ -128,8 +166,7 @@ class LibraryViewModel(
      * button is a permanent server-side one. Defaults false, the safe side:
      * an unresolved or failed check must never grant elevated actions.
      */
-    private val _isAdmin = MutableStateFlow(false)
-    val isAdmin: StateFlow<Boolean> = _isAdmin.asStateFlow()
+    val isAdmin: StateFlow<Boolean> = authMonitor.isAdmin
 
     /** True while a manually-triggered [refresh] is in flight, for the toolbar spinner. */
     private val _refreshing = MutableStateFlow(false)
@@ -167,47 +204,12 @@ class LibraryViewModel(
     }
 
     private suspend fun reconcileNow() {
-        checkAuth()
+        authMonitor.check()
         // Repair rows whose files vanished, then catch up on everything the
         // server did while the app was closed (or since the last refresh).
         runCatching { watcher.reconcile() }
         if (repository.awaitingConversion().isNotEmpty()) {
             PollWorker.enqueuePeriodic(context)
-        }
-    }
-
-    /** See [AuthStatus] -- a direct `GET /api/me`, independent of whatever
-     *  [watcher] does with jobs, so a bad token is reported even when there is
-     *  nothing yet to poll or adopt. */
-    private suspend fun checkAuth() {
-        // Settled from DataStore directly, not ApiProvider's cached snapshot:
-        // that cache is filled by a background collector started in
-        // SettingsStore's own init, which is not guaranteed to have delivered
-        // its first value yet by the time this runs (this call fires from
-        // LibraryViewModel's own init, essentially at process start). Racing
-        // that meant a real, saved token could briefly -- and then, since
-        // nothing re-triggered a check, permanently -- read back as "no
-        // token" on a cold launch, showing AuthStatusBanner over a perfectly
-        // valid setup.
-        val settled = settingsStore.current()
-        if (settled.token.isNullOrBlank()) {
-            _authStatus.value = AuthStatus.NeedsToken
-            _isAdmin.value = false
-            return
-        }
-        _authStatus.value = try {
-            val me = api.service().me()
-            _isAdmin.value = me.isAdmin
-            AuthStatus.Ok
-        } catch (e: ApiException) {
-            _isAdmin.value = false
-            if (e.isUnauthorized) AuthStatus.NeedsToken else AuthStatus.Unreachable(describe(e))
-        } catch (e: ServerNotConfigured) {
-            _isAdmin.value = false
-            AuthStatus.NeedsToken
-        } catch (e: IOException) {
-            _isAdmin.value = false
-            AuthStatus.Unreachable(describe(e))
         }
     }
 
@@ -399,6 +401,7 @@ class LibraryViewModel(
                 container.settings,
                 container.crashLog,
                 container.playerConnection,
+                container.authStatusMonitor,
             ) as T
         }
     }

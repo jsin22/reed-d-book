@@ -20,7 +20,17 @@ import dev.reedd.data.remote.JobStatus
  */
 @Entity(
     tableName = "books",
-    indices = [Index("jobId"), Index("jobStatus")],
+    // jobId unique (not just indexed): ServerLibraryAdopter.adopt() decides
+    // which server jobs to pull in from a "known jobIds" snapshot taken
+    // before any of them are inserted -- two overlapping reconcile() calls
+    // (confirmed happening in practice: the Library screen's own launch-time
+    // reconcile racing the Admin screen's "Re-check all book metadata")
+    // could each decide the same job was new and insert it twice. SQLite's
+    // UNIQUE index treats every NULL as distinct from every other NULL, so
+    // any number of not-yet-uploaded local books (jobId still null) stays
+    // fine -- only two rows sharing the same *non-null* jobId is rejected.
+    // See MIGRATION_4_5.
+    indices = [Index("jobId", unique = true), Index("jobStatus")],
 )
 data class BookEntity(
     @PrimaryKey val id: String,
@@ -121,6 +131,18 @@ data class BookEntity(
      */
     @ColumnInfo(defaultValue = "0") val alignedChunks: Int = 0,
     @ColumnInfo(defaultValue = "0") val totalChunks: Int = 0,
+
+    // -- sort/filter (see SORT_GROUP_LIBRARY.md) ------------------------------
+    /**
+     * "Fiction" / "Non-fiction", from the server's best-effort lookup keyed on
+     * title+author (`server/app/book_metadata.py`). Null means "not looked up
+     * yet, or nothing usable was found" -- both read as Unknown; the app never
+     * has enough information itself to tell those two apart.
+     */
+    val category: String? = null,
+    /** Zero or more of a fixed tag set (Horror, Romance, ...), same lookup as
+     *  [category]. A book can carry several at once, unlike [category]. */
+    @ColumnInfo(defaultValue = "[]") val genres: List<String> = emptyList(),
 ) {
     /** Both deliverables are on disk, so the book can be read along with. */
     val isPlayable: Boolean

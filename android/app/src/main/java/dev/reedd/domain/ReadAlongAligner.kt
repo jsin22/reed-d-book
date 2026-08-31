@@ -41,7 +41,13 @@ class ReadAlongAligner(
         // A book that cannot be read still gets its timings stored: playback works,
         // only the highlighting is missing.
         if (resources.isEmpty()) return@withContext AlignmentResult(chunks, aligned = 0, total = chunks.size)
-        aligner.align(chunks, chapters, resources)
+        // Same reasoning as the extraction step just above, now also covering
+        // the aligner itself: this ran unguarded until a real crash there
+        // (an unusually punctuated chapter) propagated all the way up through
+        // DownloadWorker uncaught, leaving a download stuck retrying forever
+        // instead of landing on "no highlighting, but the book still plays."
+        runCatching { aligner.align(chunks, chapters, resources) }
+            .getOrDefault(AlignmentResult(chunks, aligned = 0, total = chunks.size))
     }
 
     /**
@@ -56,7 +62,11 @@ class ReadAlongAligner(
         val resources = runCatching { EpubTextExtractor.extract(epub) }.getOrDefault(emptyList())
         if (resources.isEmpty()) return@withContext null
 
-        val result = aligner.align(chunks, syncDao.chapters(bookId), resources)
+        // See alignForDownload's own comment: the aligner itself can throw on
+        // unusual content, and that must not crash whatever background retry
+        // is calling this rather than just leaving the book unaligned.
+        val result = runCatching { aligner.align(chunks, syncDao.chapters(bookId), resources) }
+            .getOrNull() ?: return@withContext null
         // rowIds are real here, so this can be a targeted update. One transaction:
         // a novel is tens of thousands of chunks, and that many separate writes
         // would be tens of thousands of disk syncs.

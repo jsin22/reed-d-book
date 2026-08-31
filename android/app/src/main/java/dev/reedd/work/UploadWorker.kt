@@ -94,6 +94,8 @@ class UploadWorker(
                 voice = voice?.toRequestBody(TEXT),
                 speed = speed.toString().toRequestBody(TEXT),
                 engine = engine?.toRequestBody(TEXT),
+                title = book.title.toRequestBody(TEXT),
+                author = book.author?.toRequestBody(TEXT),
             )
 
             container.repository.updateUploadedBytes(bookId, epub.length())

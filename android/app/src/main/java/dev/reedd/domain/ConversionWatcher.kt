@@ -6,21 +6,26 @@ import dev.reedd.data.db.BookEntity
 import dev.reedd.data.db.DownloadState
 import dev.reedd.data.remote.ApiException
 import dev.reedd.data.remote.ApiProvider
+import dev.reedd.data.remote.JobDto
 import dev.reedd.data.remote.JobStatus
 import dev.reedd.data.remote.ServerNotConfigured
 import dev.reedd.notify.Notifications
 import dev.reedd.work.DownloadWorker
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.IOException
 
 /**
  * Keeps the local view of every conversion in step with the server.
  *
  * This is the whole of "handle app state properly so the app can resume if the
- * user closes it while waiting" (project_plan Phase 3). The important property is
- * that **it is the same code in all three situations**: the foreground poll while
- * a screen is open, the periodic background poll while the app is closed, and the
- * reconcile on launch all call [pollOnce]. There is no separate path that can
- * drift, and the UI never reads anything but the database.
+ * user closes it while waiting" (project_plan Phase 3). Two entry points, for
+ * two different situations, both writing through the same [applyJobUpdate]:
+ * [pollOnce]/[pollAll] for the frequent, foreground/background poll of jobs
+ * still converting (one book, or a few, checked often); [reconcile] for the
+ * occasional full resync (every book, checked once, in a single request) --
+ * see its own docstring for why it stopped being "call pollOnce in a loop."
+ * Either way, the UI never reads anything but the database.
  *
  * The server was built for this: job state lives in `job.json` on disk rather
  * than in Celery's result backend precisely so an id polled hours later still
@@ -38,10 +43,58 @@ class ConversionWatcher(
      * [dev.reedd.data.local.EpubImporter] and, through it, Readium, which is
      * exactly the weight this class's own tests go out of their way to avoid.
      * Defaults to a no-op for exactly that reason; production wires the real
-     * thing in `di/AppContainer.kt`.
+     * thing in `di/AppContainer.kt`. Takes the job list [reconcile] already
+     * fetched rather than fetching its own -- see [reconcile]'s docstring.
      */
-    private val adoptServerLibrary: suspend (known: Set<String>) -> Unit = {},
+    private val adoptServerLibrary: suspend (jobs: List<JobDto>, known: Set<String>) -> Unit = { _, _ -> },
 ) {
+    /**
+     * Guards [reconcile] against itself. It reads "which jobs already have a
+     * local row" up front and only inserts new ones after that snapshot, so
+     * two calls overlapping (confirmed on a real device: the Library
+     * screen's own launch-time reconcile racing the Admin screen's manual
+     * "Re-check all book metadata") can each decide the same finished job is
+     * new and both adopt it, leaving two rows for the same `jobId`. A plain
+     * [Mutex], not per-book locking: reconcile is already meant to run to
+     * completion before another one starts, and this app never runs more
+     * than one [ConversionWatcher] at a time to make a finer-grained lock
+     * worth the complexity. [BookEntity.jobId]'s unique index (see
+     * `MIGRATION_4_5`) is the backstop for any caller that ever bypasses
+     * this -- belt and suspenders, not either/or.
+     */
+    private val reconcileLock = Mutex()
+
+    /**
+     * Write down what a job's current state says, shared by [pollOnce] (one
+     * network call, one book) and [reconcile] (one network call, every book).
+     */
+    private suspend fun applyJobUpdate(book: BookEntity, dto: JobDto): JobStatus {
+        repository.applyJobState(book.id, dto)
+        val status = JobStatus.fromWire(dto.status)
+
+        when (status) {
+            // Deliberately no download here: fetching the .m4b is a user action
+            // now (the card's Download button), not something a finished job
+            // starts on its own. The row just sits at BookStage.AVAILABLE until
+            // then -- see awaitingDownload() in BookDao for the one case where a
+            // download *does* resume itself: one already started that got
+            // interrupted or failed.
+            JobStatus.DONE -> Unit
+            JobStatus.ERROR -> {
+                // Only on the transition, so reopening the app does not re-notify
+                // about a failure the user already saw and dismissed.
+                if (book.jobStatus != JobStatus.ERROR) {
+                    notifications.post(
+                        Notifications.readyId(book.id),
+                        notifications.failed(book.title, dto.error),
+                    )
+                }
+            }
+            else -> Unit
+        }
+        return status
+    }
+
     /**
      * Poll one job and write down what it said.
      *
@@ -65,30 +118,7 @@ class ConversionWatcher(
             throw e
         }
 
-        repository.applyJobState(bookId, dto)
-        val status = JobStatus.fromWire(dto.status)
-
-        when (status) {
-            // Deliberately no download here: fetching the .m4b is a user action
-            // now (the card's Download button), not something a finished job
-            // starts on its own. The row just sits at BookStage.AVAILABLE until
-            // then -- see awaitingDownload() in BookDao for the one case where a
-            // download *does* resume itself: one already started that got
-            // interrupted or failed.
-            JobStatus.DONE -> Unit
-            JobStatus.ERROR -> {
-                // Only on the transition, so reopening the app does not re-notify
-                // about a failure the user already saw and dismissed.
-                if (book.jobStatus != JobStatus.ERROR) {
-                    notifications.post(
-                        Notifications.readyId(bookId),
-                        notifications.failed(book.title, dto.error),
-                    )
-                }
-            }
-            else -> Unit
-        }
-        return status
+        return applyJobUpdate(book, dto)
     }
 
     /**
@@ -122,18 +152,34 @@ class ConversionWatcher(
     }
 
     /**
-     * Called when the app comes to the foreground.
+     * Called when the app comes to the foreground (and by the Admin screen's
+     * "Re-check all book metadata").
      *
-     * Beyond [pollAll], this repairs rows whose files went missing from disk --
-     * the user cleared the app's storage, or a download was interrupted so hard
-     * that the row still claims DONE. Trusting the database over the filesystem
-     * here would give a book that opens to a missing-file error.
+     * One `GET /api/jobs` call updates *every* local book that has a job --
+     * status, progress, category/genres, all of it -- rather than one
+     * `GET /api/jobs/{id}` per book. Originally this ran [pollOnce] in a loop
+     * (for jobs still converting) plus a second loop for category/genre that
+     * had never resolved, which meant one round trip per book, sequentially,
+     * every single reconcile -- confirmed slow in practice with even a modest
+     * library, especially over a real network rather than localhost. Fetching
+     * the full list once and applying it to everything already known is both
+     * the same number of facts learned and a single request regardless of how
+     * many books there are. This also makes the old "never resolved" carve-out
+     * for category/genre unnecessary: every book's fields are refreshed from
+     * whatever the server currently has on every reconcile, not just ones that
+     * were never checked before, so a book resolved with stale or incomplete
+     * data (an older lookup pipeline, say) catches up automatically too.
      *
-     * It also adopts any book the server has finished converting that this
-     * device does not have a row for -- see [adoptServerLibrary]. Both need the
-     * same book list, fetched once rather than twice.
+     * Also repairs rows whose files went missing from disk -- the user cleared
+     * the app's storage, or a download was interrupted so hard that the row
+     * still claims DONE. Trusting the database over the filesystem here would
+     * give a book that opens to a missing-file error.
+     *
+     * A network failure here degrades to "nothing updated this time," same as
+     * [ServerLibraryAdopter.adopt] already tolerated on its own -- there is
+     * always a later reconcile to try again.
      */
-    suspend fun reconcile(): Int {
+    suspend fun reconcile(): Int = reconcileLock.withLock {
         val books = repository.allBooks()
         for (book in books) {
             if (book.downloadState == DownloadState.DONE && !book.filesPresent()) {
@@ -144,8 +190,31 @@ class ConversionWatcher(
                 )
             }
         }
-        adoptServerLibrary(books.mapNotNull { it.jobId }.toSet())
-        return pollAll()
+
+        val jobs = runCatching { api.service().listJobs(limit = LIST_LIMIT).jobs }.getOrNull()
+        if (jobs != null) {
+            val byJobId = jobs.associateBy { it.jobId }
+            for (book in books) {
+                val jobId = book.jobId ?: continue
+                if (book.jobMissing) continue
+                val dto = byJobId[jobId]
+                if (dto == null) {
+                    // Not in a list of everything visible to this user, up to
+                    // LIST_LIMIT: gone (deleted server-side) or no longer
+                    // visible, the same two cases pollOnce's 404 branch
+                    // handles. A personal library never approaches the limit.
+                    repository.markJobMissing(book.id)
+                } else {
+                    runCatching { applyJobUpdate(book, dto) }
+                }
+            }
+            adoptServerLibrary(jobs, books.mapNotNull { it.jobId }.toSet())
+        }
+
+        for (book in repository.awaitingDownload()) {
+            DownloadWorker.enqueue(context, book.id)
+        }
+        repository.awaitingConversion().size
     }
 
     private fun BookEntity.filesPresent(): Boolean {
@@ -160,5 +229,11 @@ class ConversionWatcher(
         is ApiException -> e.code >= 500
         is IOException -> true
         else -> false
+    }
+
+    private companion object {
+        /** The server's own cap on `GET /api/jobs`; see `server/app/main.py`.
+         *  Comfortably above what a personal library ever reaches. */
+        const val LIST_LIMIT = 500
     }
 }

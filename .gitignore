@@ -19,3 +19,8 @@ android/app/build/
 /debug
 server/*.log
 server/redis-data/
+dump.rdb
+
+# Screenshots/logcat pulled off a device while diagnosing something live
+debug_images/
+debug_logs/

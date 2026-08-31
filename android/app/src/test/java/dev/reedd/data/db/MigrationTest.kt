@@ -77,7 +77,7 @@ class MigrationTest {
 
     private fun openMigrated(): ReeddDatabase =
         Room.databaseBuilder(context, ReeddDatabase::class.java, DB_NAME)
-            .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
             .allowMainThreadQueries()
             .build()
 
@@ -130,6 +130,12 @@ class MigrationTest {
             assertEquals(0L, book.syncOffsetMs)
             assertEquals(0, book.alignedChunks)
 
+            // New sort/filter columns (MIGRATION_3_4) take their defaults too --
+            // a book converted before the lookup existed has nothing truthful to
+            // backfill either with, same reasoning as `engine` in MIGRATION_2_3.
+            assertNull(book.category)
+            assertEquals(emptyList<String>(), book.genres)
+
             // The mapping survives, unaligned.
             val chunks = db.sync().chunks("b1")
             assertEquals(2, chunks.size)
@@ -140,6 +146,54 @@ class MigrationTest {
             assertFalse(chunks[0].isAligned)
 
             assertEquals("c1.xhtml", db.sync().chapters("b1").single().source)
+        } finally {
+            db.close()
+        }
+    }
+
+    @Test
+    fun `MIGRATION_4_5 keeps one row when two books already share a jobId`() = runTest {
+        // Reproduces a real device's state: ServerLibraryAdopter.adopt()
+        // raced with itself (two overlapping reconcile() calls) and left two
+        // local rows pointing at the same server job before jobId was
+        // unique. The migration has to resolve this itself, not just refuse
+        // to create the index and crash every future launch.
+        createVersion1().use { old ->
+            old.execSQL(
+                """
+                INSERT INTO books (id, epubPath, originalFilename, title, sizeBytes, addedAt,
+                                   jobId, jobProgress, jobChaptersDone, jobMissing, uploadedBytes,
+                                   downloadState, downloadedBytes, downloadTotalBytes)
+                VALUES ('older-duplicate', '/e1', 'Book.epub', 'The Tell-Tale Heart', 1, 100,
+                        'job-1', 100, 1, 0, 1, 'NONE', 0, 0),
+                       ('newer-duplicate', '/e2', 'Book.epub', 'The Tell-Tale Heart', 1, 200,
+                        'job-1', 100, 1, 0, 1, 'NONE', 0, 0),
+                       ('unrelated', '/e3', 'Book.epub', 'Some Other Book', 1, 300,
+                        NULL, 0, 0, 0, 0, 'NONE', 0, 0)
+                """.trimIndent()
+            )
+        }
+
+        val db = openMigrated()
+        try {
+            val survivors = db.books().all()
+            // Exactly one of the two duplicates is kept -- the migration
+            // picks by insertion order (MAX(rowid)), which for this data is
+            // 'newer-duplicate', but the important property is that there is
+            // only ever one, not which specific id survives.
+            assertEquals(2, survivors.size)
+            assertEquals(1, survivors.count { it.jobId == "job-1" })
+            assertTrue(survivors.any { it.id == "unrelated" })
+
+            // And the constraint that caused the duplicate in the first
+            // place is now actually enforced going forward.
+            var rejected = false
+            try {
+                db.books().insert(book("fresh-duplicate", jobId = "job-1"))
+            } catch (e: android.database.sqlite.SQLiteConstraintException) {
+                rejected = true
+            }
+            assertTrue("a second insert with the same jobId must now fail", rejected)
         } finally {
             db.close()
         }

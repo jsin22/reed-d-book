@@ -13,6 +13,8 @@ import dev.reedd.data.remote.ServerNotConfigured
 import dev.reedd.data.settings.ServerSettings
 import dev.reedd.data.settings.SettingsStore
 import dev.reedd.di.AppContainer
+import dev.reedd.domain.AuthStatusMonitor
+import dev.reedd.domain.ConversionWatcher
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -51,6 +53,8 @@ class SettingsViewModel(
     private val api: ApiProvider,
     private val repository: BookRepository,
     private val files: BookFiles,
+    private val watcher: ConversionWatcher,
+    private val authMonitor: AuthStatusMonitor,
 ) : ViewModel() {
 
     val settings: StateFlow<ServerSettings> =
@@ -77,6 +81,19 @@ class SettingsViewModel(
         viewModelScope.launch {
             val result = runCatching { api.service().me() }.getOrNull()
             _me.value = result
+            if (result != null) {
+                // Already have the answer this call just gave us -- publish it
+                // directly rather than making the library's banner wait for
+                // its own next reconcile or a manual Refresh tap.
+                authMonitor.setOk(result.isAdmin)
+            } else {
+                // Unknown here whether that was "no token", "wrong token", or
+                // "unreachable" -- AuthStatusMonitor.check() already knows how
+                // to tell those apart, so let it re-derive rather than
+                // guessing (and risking the banner going NeedsToken when the
+                // real problem is transient network trouble).
+                authMonitor.check()
+            }
             // A non-admin must have zero impact on the backend beyond their own
             // upload -- see SettingsScreen, which hides this toggle from them
             // entirely -- but the stored preference is per-device and outlives
@@ -110,6 +127,15 @@ class SettingsViewModel(
      * this is a direct response to something the user just typed and saved,
      * so a bad token has to say so right here, not just fail silently and
      * wait for the library screen's own banner to eventually notice.
+     *
+     * A valid token also kicks off a reconcile immediately, in the
+     * background -- most commonly reached the first time someone ever pastes
+     * in their invite token, when the library is still completely empty.
+     * Without this, the very first thing they'd see after Save is that same
+     * empty screen; [ConversionWatcher.reconcile] adopts anything already on
+     * the server and picks up their own books, so by the time they navigate
+     * back to the library it is already populated or visibly refreshing
+     * rather than looking like nothing happened.
      */
     fun saveToken(token: String) {
         viewModelScope.launch {
@@ -121,19 +147,33 @@ class SettingsViewModel(
                 if (!me.isAdmin && settingsStore.current().deleteJobAfterDownload) {
                     settingsStore.setDeleteJobAfterDownload(false)
                 }
+                // Already have the answer this very call just gave us --
+                // publish it directly so the library's "No valid API token"
+                // banner clears the moment Save succeeds, rather than
+                // waiting for that screen's own next reconcile or a manual
+                // Refresh tap to notice on its own.
+                authMonitor.setOk(me.isAdmin)
+                // Fire-and-forget: Saved shows immediately either way, and a
+                // reconcile failure here is exactly what the library screen's
+                // own next reconcile (or its Refresh button) is already there
+                // to retry -- nothing new needs to be said about it here.
+                launch { runCatching { watcher.reconcile() } }
                 TokenSaveResult.Ok
             } catch (e: ApiException) {
                 _me.value = null
-                TokenSaveResult.Failed(
-                    if (e.isUnauthorized) "That token was not accepted. Check it for typos and try again."
+                val reason = if (e.isUnauthorized) "That token was not accepted. Check it for typos and try again."
                     else e.detail ?: "The server returned ${e.code}."
-                )
+                if (e.isUnauthorized) authMonitor.setNeedsToken() else authMonitor.setUnreachable(reason)
+                TokenSaveResult.Failed(reason)
             } catch (e: ServerNotConfigured) {
                 _me.value = null
+                authMonitor.setNeedsToken()
                 TokenSaveResult.Failed("No server address set.")
             } catch (e: IOException) {
                 _me.value = null
-                TokenSaveResult.Failed(e.message ?: "Could not reach the server.")
+                val reason = e.message ?: "Could not reach the server."
+                authMonitor.setUnreachable(reason)
+                TokenSaveResult.Failed(reason)
             }
         }
     }
@@ -207,6 +247,8 @@ class SettingsViewModel(
                 container.api,
                 container.repository,
                 container.files,
+                container.watcher,
+                container.authStatusMonitor,
             ) as T
         }
     }

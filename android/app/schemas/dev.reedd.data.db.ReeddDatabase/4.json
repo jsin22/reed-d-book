@@ -1,0 +1,456 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 4,
+    "identityHash": "8ce6137f127daf512d718a71f3586e00",
+    "entities": [
+      {
+        "tableName": "books",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `epubPath` TEXT NOT NULL, `originalFilename` TEXT NOT NULL, `title` TEXT NOT NULL, `author` TEXT, `coverPath` TEXT, `sizeBytes` INTEGER NOT NULL, `addedAt` INTEGER NOT NULL, `jobId` TEXT, `jobStatus` TEXT, `jobProgress` INTEGER NOT NULL DEFAULT 0, `jobEta` TEXT, `jobChaptersDone` INTEGER NOT NULL DEFAULT 0, `jobError` TEXT, `jobStartedAt` TEXT, `jobFinishedAt` TEXT, `voice` TEXT, `speed` REAL, `engine` TEXT, `jobMissing` INTEGER NOT NULL DEFAULT 0, `uploadedBytes` INTEGER NOT NULL DEFAULT 0, `uploadError` TEXT, `audiobookRemoteName` TEXT, `syncRemoteName` TEXT, `audiobookPath` TEXT, `audiobookBytes` INTEGER, `syncPath` TEXT, `downloadState` TEXT NOT NULL DEFAULT 'NONE', `downloadedBytes` INTEGER NOT NULL DEFAULT 0, `downloadTotalBytes` INTEGER NOT NULL DEFAULT 0, `downloadError` TEXT, `readingLocator` TEXT, `audioDurationMs` INTEGER, `lastOpenedAt` INTEGER, `playbackPositionMs` INTEGER NOT NULL DEFAULT 0, `syncOffsetMs` INTEGER NOT NULL DEFAULT 0, `alignedChunks` INTEGER NOT NULL DEFAULT 0, `totalChunks` INTEGER NOT NULL DEFAULT 0, `category` TEXT, `genres` TEXT NOT NULL DEFAULT '[]', PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "epubPath",
+            "columnName": "epubPath",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "originalFilename",
+            "columnName": "originalFilename",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "title",
+            "columnName": "title",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "author",
+            "columnName": "author",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "coverPath",
+            "columnName": "coverPath",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "sizeBytes",
+            "columnName": "sizeBytes",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "addedAt",
+            "columnName": "addedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "jobId",
+            "columnName": "jobId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "jobStatus",
+            "columnName": "jobStatus",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "jobProgress",
+            "columnName": "jobProgress",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "jobEta",
+            "columnName": "jobEta",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "jobChaptersDone",
+            "columnName": "jobChaptersDone",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "jobError",
+            "columnName": "jobError",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "jobStartedAt",
+            "columnName": "jobStartedAt",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "jobFinishedAt",
+            "columnName": "jobFinishedAt",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "voice",
+            "columnName": "voice",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "speed",
+            "columnName": "speed",
+            "affinity": "REAL"
+          },
+          {
+            "fieldPath": "engine",
+            "columnName": "engine",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "jobMissing",
+            "columnName": "jobMissing",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "uploadedBytes",
+            "columnName": "uploadedBytes",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "uploadError",
+            "columnName": "uploadError",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "audiobookRemoteName",
+            "columnName": "audiobookRemoteName",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "syncRemoteName",
+            "columnName": "syncRemoteName",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "audiobookPath",
+            "columnName": "audiobookPath",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "audiobookBytes",
+            "columnName": "audiobookBytes",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "syncPath",
+            "columnName": "syncPath",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "downloadState",
+            "columnName": "downloadState",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "'NONE'"
+          },
+          {
+            "fieldPath": "downloadedBytes",
+            "columnName": "downloadedBytes",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "downloadTotalBytes",
+            "columnName": "downloadTotalBytes",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "downloadError",
+            "columnName": "downloadError",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "readingLocator",
+            "columnName": "readingLocator",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "audioDurationMs",
+            "columnName": "audioDurationMs",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "lastOpenedAt",
+            "columnName": "lastOpenedAt",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "playbackPositionMs",
+            "columnName": "playbackPositionMs",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "syncOffsetMs",
+            "columnName": "syncOffsetMs",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "alignedChunks",
+            "columnName": "alignedChunks",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "totalChunks",
+            "columnName": "totalChunks",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "category",
+            "columnName": "category",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "genres",
+            "columnName": "genres",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "'[]'"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_books_jobId",
+            "unique": false,
+            "columnNames": [
+              "jobId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_books_jobId` ON `${TABLE_NAME}` (`jobId`)"
+          },
+          {
+            "name": "index_books_jobStatus",
+            "unique": false,
+            "columnNames": [
+              "jobStatus"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_books_jobStatus` ON `${TABLE_NAME}` (`jobStatus`)"
+          }
+        ]
+      },
+      {
+        "tableName": "sync_chunks",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`rowId` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `bookId` TEXT NOT NULL, `ordinal` INTEGER NOT NULL, `text` TEXT NOT NULL, `startMs` INTEGER NOT NULL, `endMs` INTEGER NOT NULL, `chapter` INTEGER NOT NULL, `resourceHref` TEXT, `textHighlight` TEXT, `textBefore` TEXT, `textAfter` TEXT, `progression` REAL, FOREIGN KEY(`bookId`) REFERENCES `books`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "rowId",
+            "columnName": "rowId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "bookId",
+            "columnName": "bookId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "ordinal",
+            "columnName": "ordinal",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "text",
+            "columnName": "text",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "startMs",
+            "columnName": "startMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "endMs",
+            "columnName": "endMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "chapter",
+            "columnName": "chapter",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "resourceHref",
+            "columnName": "resourceHref",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "textHighlight",
+            "columnName": "textHighlight",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "textBefore",
+            "columnName": "textBefore",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "textAfter",
+            "columnName": "textAfter",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "progression",
+            "columnName": "progression",
+            "affinity": "REAL"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "rowId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_sync_chunks_bookId_startMs",
+            "unique": false,
+            "columnNames": [
+              "bookId",
+              "startMs"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_sync_chunks_bookId_startMs` ON `${TABLE_NAME}` (`bookId`, `startMs`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "books",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "bookId"
+            ],
+            "referencedColumns": [
+              "id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "sync_chapters",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`rowId` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `bookId` TEXT NOT NULL, `chapterIndex` INTEGER NOT NULL, `title` TEXT, `source` TEXT, `startMs` INTEGER NOT NULL, `endMs` INTEGER NOT NULL, FOREIGN KEY(`bookId`) REFERENCES `books`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "rowId",
+            "columnName": "rowId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "bookId",
+            "columnName": "bookId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "chapterIndex",
+            "columnName": "chapterIndex",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "title",
+            "columnName": "title",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "source",
+            "columnName": "source",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "startMs",
+            "columnName": "startMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "endMs",
+            "columnName": "endMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "rowId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_sync_chapters_bookId_chapterIndex",
+            "unique": false,
+            "columnNames": [
+              "bookId",
+              "chapterIndex"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_sync_chapters_bookId_chapterIndex` ON `${TABLE_NAME}` (`bookId`, `chapterIndex`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "books",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "bookId"
+            ],
+            "referencedColumns": [
+              "id"
+            ]
+          }
+        ]
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '8ce6137f127daf512d718a71f3586e00')"
+    ]
+  }
+}

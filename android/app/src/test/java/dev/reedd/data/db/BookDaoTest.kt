@@ -1,5 +1,6 @@
 package dev.reedd.data.db
 
+import android.database.sqlite.SQLiteConstraintException
 import dev.reedd.data.remote.JobStatus
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
@@ -37,12 +38,41 @@ class BookDaoTest {
     }
 
     @Test
+    fun `two books cannot share the same jobId`() = runTest {
+        // Regression: ServerLibraryAdopter.adopt() decides which server jobs
+        // are new from a snapshot taken before any of them are inserted --
+        // two overlapping reconcile() calls could each decide the same job
+        // was new and insert it twice, showing the same book on the library
+        // screen twice with the same job id on its detail page. The unique
+        // index (MIGRATION_4_5) is the backstop if ConversionWatcher's mutex
+        // (the actual fix for the race itself) is ever bypassed.
+        dao.insert(book("b1", jobId = "job-1"))
+        try {
+            dao.insert(book("b2", jobId = "job-1"))
+            org.junit.Assert.fail("expected a unique constraint violation on jobId")
+        } catch (e: SQLiteConstraintException) {
+            // expected
+        }
+    }
+
+    @Test
+    fun `multiple books with no job at all are fine`() = runTest {
+        // SQLite's UNIQUE index treats every NULL as distinct from every
+        // other NULL -- must not accidentally forbid more than one
+        // not-yet-uploaded local book.
+        dao.insert(book("b1", jobId = null))
+        dao.insert(book("b2", jobId = null))
+        assertEquals(2, dao.all().size)
+    }
+
+    @Test
     fun `attaching a job clears the previous attempt`() = runTest {
         dao.insert(book("b1"))
         dao.updateJobState(
             id = "b1", status = JobStatus.ERROR, progress = 40, eta = null, chaptersDone = 1,
             error = "ffmpeg exploded", startedAt = "t0", finishedAt = "t1", audiobookBytes = null,
             audiobookRemoteName = null, syncRemoteName = null,
+            category = null, genres = null,
         )
         dao.markJobMissing("b1")
 
@@ -69,6 +99,7 @@ class BookDaoTest {
             chaptersDone = 2, error = null, startedAt = "2026-08-07T16:36:19+00:00",
             finishedAt = null, audiobookBytes = 543210987,
             audiobookRemoteName = null, syncRemoteName = null,
+            category = null, genres = null,
         )
 
         val book = dao.get("b1")!!
@@ -91,6 +122,7 @@ class BookDaoTest {
             id = "b1", status = JobStatus.DONE, progress = 100, eta = null, chaptersDone = 3,
             error = null, startedAt = "t0", finishedAt = "t1", audiobookBytes = 4096,
             audiobookRemoteName = "Book.m4b", syncRemoteName = "Book.json",
+            category = null, genres = null,
         )
 
         val book = dao.get("b1")!!
@@ -107,6 +139,7 @@ class BookDaoTest {
             id = "b1", status = JobStatus.DONE, progress = 100, eta = null, chaptersDone = 3,
             error = null, startedAt = "t0", finishedAt = "t1", audiobookBytes = 4096,
             audiobookRemoteName = "Book.m4b", syncRemoteName = "Book.json",
+            category = null, genres = null,
         )
 
         // A poll of a running job carries no filenames. Without COALESCE this
@@ -115,6 +148,7 @@ class BookDaoTest {
             id = "b1", status = JobStatus.RUNNING, progress = 50, eta = null, chaptersDone = 1,
             error = null, startedAt = "t0", finishedAt = null, audiobookBytes = null,
             audiobookRemoteName = null, syncRemoteName = null,
+            category = null, genres = null,
         )
 
         val book = dao.get("b1")!!
@@ -242,7 +276,7 @@ class BookDaoTest {
         dao.insert(book("b1"))
         assertEquals("Book b1", dao.observe("b1").first()!!.title)
 
-        dao.updateMetadata("b1", title = "Real Title", author = "A. Writer", coverPath = "/c.jpg")
+        dao.updateMetadata("b1", title = "Real Title", author = "A. Writer", coverPath = "/c.jpg", sizeBytes = 4096)
 
         val book = dao.observe("b1").first()!!
         assertEquals("Real Title", book.title)
@@ -254,5 +288,24 @@ class BookDaoTest {
         dao.insert(book("b1"))
         dao.delete("b1")
         assertNull(dao.get("b1"))
+    }
+
+    @Test
+    fun `a poll writes a non-empty genres list, not just category`() = runTest {
+        // Regression: `genres` is passed to updateJobState as a pre-encoded
+        // JSON string, not a List<String> -- Room auto-expands any
+        // List/Collection-typed @Query parameter into `IN`-style placeholders
+        // regardless of SQL context, which silently discarded every genre
+        // while `category` (a plain String?) wrote correctly right next to it.
+        dao.insert(book("b1"))
+        dao.updateJobState(
+            id = "b1", status = JobStatus.DONE, progress = 100, eta = null, chaptersDone = 1,
+            error = null, startedAt = "t0", finishedAt = "t1", audiobookBytes = null,
+            audiobookRemoteName = null, syncRemoteName = null,
+            category = "Fiction", genres = """["Horror","Mystery"]""",
+        )
+        val book = dao.get("b1")!!
+        assertEquals("Fiction", book.category)
+        assertEquals(listOf("Horror", "Mystery"), book.genres)
     }
 }

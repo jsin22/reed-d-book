@@ -14,6 +14,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -36,6 +37,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.reedd.data.remote.JobDto
+import dev.reedd.data.remote.MetadataHealthDto
 import dev.reedd.data.remote.UserDto
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -46,6 +48,8 @@ fun AdminScreen(
 ) {
     val jobs by viewModel.jobs.collectAsStateWithLifecycle()
     val users by viewModel.users.collectAsStateWithLifecycle()
+    val metadataHealth by viewModel.metadataHealth.collectAsStateWithLifecycle()
+    val rechecking by viewModel.rechecking.collectAsStateWithLifecycle()
     val inviteResult by viewModel.inviteResult.collectAsStateWithLifecycle()
     val message by viewModel.message.collectAsStateWithLifecycle()
 
@@ -73,6 +77,27 @@ fun AdminScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
+            metadataHealth?.let { MetadataHealthBanner(it) }
+
+            // A book's category/genre only ever gets checked once locally
+            // (see BookDao.awaitingMetadata) -- if the server's lookup
+            // pipeline changes or improves after that, this device's stale
+            // copy never updates on its own. This forces every book back
+            // through that check.
+            Text("Book metadata", style = MaterialTheme.typography.titleMedium)
+            Button(onClick = viewModel::recheckMetadata, enabled = !rechecking) {
+                Text(if (rechecking) "Re-checking…" else "Re-check all book metadata")
+            }
+            Text(
+                "Re-fetches category/genre for every book on this device. Only " +
+                    "needed after the server's lookup source changes -- a normal " +
+                    "upload already gets checked automatically.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            HorizontalDivider()
+
             Text("Invite a user", style = MaterialTheme.typography.titleMedium)
             OutlinedTextField(
                 value = email,
@@ -199,6 +224,46 @@ fun AdminScreen(
                 TextButton(onClick = { pendingUserDelete = null }) { Text("Cancel") }
             },
         )
+    }
+}
+
+/**
+ * Gemini is the sole source for category/genre now -- there is no second
+ * source to quietly fall back to if it breaks (see
+ * `LLM_GENRE_ENRICHMENT.md`), so a failure needs to be visible somewhere,
+ * not just show up as "books never get tagged" with no reason why. Silent
+ * when [health] is ok; shown only once a real failure has been recorded
+ * (see `MetadataHealth` server-side -- a server that has never attempted a
+ * lookup yet reports ok, not broken).
+ */
+@Composable
+private fun MetadataHealthBanner(health: MetadataHealthDto) {
+    if (health.ok) return
+    Card(
+        Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+    ) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(
+                "Category/genre lookup is failing",
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.onErrorContainer,
+            )
+            health.lastError?.let {
+                Text(
+                    it,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                )
+            }
+            health.lastErrorAt?.let {
+                Text(
+                    "Since $it",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                )
+            }
+        }
     }
 }
 

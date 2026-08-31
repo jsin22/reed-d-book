@@ -199,8 +199,9 @@ fun SettingsScreen(
                         Text("Checking", style = MaterialTheme.typography.bodySmall)
                     }
                     is TokenSaveResult.Ok -> Text(
-                        "Token saved.",
+                        "Saved successfully.",
                         style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
                     )
                     is TokenSaveResult.Failed -> Text(
                         result.reason,

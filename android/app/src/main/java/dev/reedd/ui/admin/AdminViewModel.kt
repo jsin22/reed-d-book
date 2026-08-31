@@ -8,10 +8,12 @@ import dev.reedd.data.remote.ApiProvider
 import dev.reedd.data.remote.InviteRequestDto
 import dev.reedd.data.remote.InviteResultDto
 import dev.reedd.data.remote.JobDto
+import dev.reedd.data.remote.MetadataHealthDto
 import dev.reedd.data.remote.PublicUpdateDto
 import dev.reedd.data.remote.ServerNotConfigured
 import dev.reedd.data.remote.UserDto
 import dev.reedd.di.AppContainer
+import dev.reedd.domain.ConversionWatcher
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -30,19 +32,31 @@ sealed interface InviteResult {
 }
 
 /**
- * A thin wrapper over the four admin endpoints under `/api/admin/` -- see
- * `server/README.md`, "Sharing with others". Needs only [ApiProvider], the
- * same object every other screen already has; no repository layer, since
- * there is nothing here to cache or reconcile against local state the way
- * [dev.reedd.data.BookRepository] does for the library.
+ * A thin wrapper over the admin endpoints under `/api/admin/` -- see
+ * `server/README.md`, "Sharing with others". Mostly needs only [ApiProvider];
+ * [watcher] exists solely for [recheckMetadata].
  */
-class AdminViewModel(private val api: ApiProvider) : ViewModel() {
+class AdminViewModel(
+    private val api: ApiProvider,
+    private val watcher: ConversionWatcher,
+) : ViewModel() {
 
     private val _jobs = MutableStateFlow<List<JobDto>>(emptyList())
     val jobs: StateFlow<List<JobDto>> = _jobs.asStateFlow()
 
     private val _users = MutableStateFlow<List<UserDto>>(emptyList())
     val users: StateFlow<List<UserDto>> = _users.asStateFlow()
+
+    /**
+     * Whether the category/genre lookup is currently working. Null until the
+     * first refresh answers (or fails to reach the endpoint at all, which is
+     * itself left as null rather than shown as broken -- this screen already
+     * has [message] for "could not reach the server" generally, and
+     * conflating the two would make an unrelated network blip look like the
+     * lookup itself is unhealthy).
+     */
+    private val _metadataHealth = MutableStateFlow<MetadataHealthDto?>(null)
+    val metadataHealth: StateFlow<MetadataHealthDto?> = _metadataHealth.asStateFlow()
 
     private val _inviteResult = MutableStateFlow<InviteResult>(InviteResult.Idle)
     val inviteResult: StateFlow<InviteResult> = _inviteResult.asStateFlow()
@@ -58,6 +72,7 @@ class AdminViewModel(private val api: ApiProvider) : ViewModel() {
         viewModelScope.launch {
             runCatching { api.service().adminJobs().jobs }.onSuccess { _jobs.value = it }
             runCatching { api.service().adminUsers().users }.onSuccess { _users.value = it }
+            runCatching { api.service().metadataHealth() }.onSuccess { _metadataHealth.value = it }
         }
     }
 
@@ -143,11 +158,42 @@ class AdminViewModel(private val api: ApiProvider) : ViewModel() {
         _inviteResult.value = InviteResult.Idle
     }
 
+    /** True while [recheckMetadata] is running, so the button can show a
+     *  spinner and not be tapped twice. */
+    private val _rechecking = MutableStateFlow(false)
+    val rechecking: StateFlow<Boolean> = _rechecking.asStateFlow()
+
+    /**
+     * "Re-check all book metadata": an explicit, immediate [ConversionWatcher.
+     * reconcile] -- every book's category/genre (and everything else a
+     * reconcile refreshes) is re-read from whatever the server currently has,
+     * in one request, regardless of what this device already thought it knew.
+     * This used to need a separate "wipe it all first" step, back when a
+     * reconcile only ever re-checked a book that had *never* resolved
+     * locally; it no longer does (see reconcile's own docstring for why), so
+     * this button is now just a convenient, explicit trigger rather than a
+     * special path -- the Library screen's own Refresh does the same thing.
+     * Kept here anyway: "fix my data" and "check for updates" are different
+     * asks even when the code behind them converged.
+     */
+    fun recheckMetadata() {
+        viewModelScope.launch {
+            _rechecking.value = true
+            try {
+                watcher.reconcile()
+            } catch (e: IOException) {
+                _message.value = e.message ?: "could not reach the server"
+            } finally {
+                _rechecking.value = false
+            }
+        }
+    }
+
     companion object {
         fun factory(container: AppContainer) = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T =
-                AdminViewModel(container.api) as T
+                AdminViewModel(container.api, container.watcher) as T
         }
     }
 }

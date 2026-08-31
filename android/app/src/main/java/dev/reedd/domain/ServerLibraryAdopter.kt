@@ -1,12 +1,16 @@
 package dev.reedd.domain
 
+import android.util.Log
 import dev.reedd.data.BookRepository
-import dev.reedd.data.download.ResumableDownloader
+import dev.reedd.data.db.BookEntity
 import dev.reedd.data.local.BookFiles
-import dev.reedd.data.local.EpubImporter
 import dev.reedd.data.remote.ApiProvider
 import dev.reedd.data.remote.JobDto
 import dev.reedd.data.remote.JobStatus
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
+import java.io.PrintWriter
+import java.io.StringWriter
 import java.util.UUID
 
 /**
@@ -22,51 +26,91 @@ import java.util.UUID
  * through TTS a second time. Nothing about how a conversion happens changes to
  * make this work: audiblez, the queue and the job.json lifecycle (`server/`) are
  * exactly as they were, and this class never touches them -- it only decides
- * which already-finished jobs the device has not seen the row for yet, and
- * fetches enough (the epub) to show a card for it. The audiobook/sync files are
- * left for the user's own Download tap, same as any other finished job.
+ * which already-finished jobs the device has not seen the row for yet.
+ *
+ * Adoption itself is now a pure local insert -- title/author come straight off
+ * the job's own manifest ([JobDto.title]/[JobDto.author], sent by whichever
+ * device originally uploaded it), not from downloading and Readium-parsing the
+ * epub. That used to happen here, which meant every book on the server had to
+ * be fully fetched and parsed just to show a card for it -- confirmed live to
+ * be genuinely slow (a real download plus a real parse, one book at a time,
+ * for a whole library on every fresh reconcile) for something that only ever
+ * needed a title and an author. The epub itself -- and with it, the *precise*
+ * Readium-derived title/author/cover, since the manifest's are only ever
+ * best-effort -- is fetched by [dev.reedd.work.DownloadWorker] the moment the
+ * user actually taps Download, same as the audiobook/sync files always were.
  */
 class ServerLibraryAdopter(
     private val repository: BookRepository,
     private val api: ApiProvider,
     private val files: BookFiles,
-    private val importer: EpubImporter,
-    private val downloader: ResumableDownloader,
 ) {
     /**
+     * @param jobs every job visible to this user, already fetched by the
+     *   caller ([ConversionWatcher.reconcile]) -- adoption and the rest of a
+     *   reconcile need the exact same list, so it is fetched once, not twice.
      * @param known job ids already backed by a local row; left alone, not
-     *   re-adopted. A failed download or a listing the server could not answer
-     *   is not fatal -- there is always a later reconcile to try again.
+     *   re-adopted.
      */
-    suspend fun adopt(known: Set<String>) {
-        val jobs = runCatching { api.service().listJobs(limit = LIST_LIMIT).jobs }.getOrNull() ?: return
+    suspend fun adopt(jobs: List<JobDto>, known: Set<String>) {
         for (job in toAdopt(jobs, known)) {
-            // One book's corrupt epub or a connection dropped mid-download must
-            // not stop the rest of the server's library from coming in.
+            // One bad row must not stop the rest of the server's library from
+            // coming in. Purely local now (no network, no Readium), so a
+            // failure here would mean something is genuinely wrong with the
+            // device's own storage -- worth knowing about, not worth losing
+            // the rest of the batch over.
             runCatching { adoptOne(job) }
+                .onFailure { e -> reportFailure(job, e) }
         }
     }
 
     private suspend fun adoptOne(job: JobDto) {
         val bookId = UUID.randomUUID().toString()
-        // Only the epub -- small, and needed for the card itself (title, author,
-        // cover) plus the reader's text. The audiobook/sync files are the
-        // hundreds-of-megabytes part, and are not fetched until the user taps
-        // Download on the card, same as a conversion this device started itself.
-        downloader.download(url = api.url("api/jobs/${job.jobId}/epub"), target = files.epub(bookId))
-        val book = importer.fromServerCopy(bookId, job.filename)
-        repository.insert(book)
+        repository.insert(
+            BookEntity(
+                id = bookId,
+                // Deterministic, not yet backed by a real file -- DownloadWorker
+                // writes the epub here the first time this book is actually
+                // downloaded. Every existing reader of BookEntity.epubPath
+                // already has to tolerate a book that has not finished
+                // downloading yet (see DownloadState), so nothing new needs to
+                // check for this specially; it is just one more reason the
+                // file might not be there yet.
+                epubPath = files.epub(bookId).absolutePath,
+                originalFilename = job.filename,
+                title = job.title?.takeIf { it.isNotBlank() } ?: job.filename.removeSuffix(".epub"),
+                author = job.author?.takeIf { it.isNotBlank() },
+            )
+        )
         repository.attachJob(bookId, job)
         repository.applyJobState(bookId, job)
     }
 
+    private suspend fun reportFailure(job: JobDto, e: Throwable) {
+        Log.w(TAG, "could not adopt ${job.jobId} (${job.filename})", e)
+        val trace = StringWriter().also { e.printStackTrace(PrintWriter(it)) }
+        val report = buildString {
+            appendLine("read-d-book: ServerLibraryAdopter could not adopt a job")
+            appendLine("job_id:    ${job.jobId}")
+            appendLine("filename:  ${job.filename}")
+            appendLine("exception: ${e.javaClass.name}: ${e.message}")
+            appendLine()
+            append(trace.toString())
+        }
+        // Same server endpoint CrashLog posts uncaught crashes to; this is a
+        // caught failure, not a crash, but it needs the same visibility.
+        runCatching { api.service().reportCrash(report.toRequestBody(TEXT_PLAIN)) }
+            .onFailure { Log.i(TAG, "could not send adopt-failure report: ${it.message}") }
+    }
+
     companion object {
-        private const val LIST_LIMIT = 500 // the server's own cap; see server/app/main.py
+        private const val TAG = "ReeddAdopt"
+        private val TEXT_PLAIN = "text/plain; charset=utf-8".toMediaType()
 
         /**
          * Finished jobs the device does not already have a row for. Pulled out
          * as a pure function so the selection logic is testable without a
-         * server, a database, or Readium.
+         * server or a database.
          */
         internal fun toAdopt(jobs: List<JobDto>, known: Set<String>): List<JobDto> =
             jobs.filter { JobStatus.fromWire(it.status) == JobStatus.DONE && it.jobId !in known }

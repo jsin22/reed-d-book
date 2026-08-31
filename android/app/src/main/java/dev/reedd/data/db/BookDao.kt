@@ -115,7 +115,9 @@ interface BookDao {
             jobFinishedAt = :finishedAt,
             audiobookBytes = :audiobookBytes,
             audiobookRemoteName = COALESCE(:audiobookRemoteName, audiobookRemoteName),
-            syncRemoteName = COALESCE(:syncRemoteName, syncRemoteName)
+            syncRemoteName = COALESCE(:syncRemoteName, syncRemoteName),
+            category = COALESCE(:category, category),
+            genres = COALESCE(:genres, genres)
         WHERE id = :id
         """
     )
@@ -133,6 +135,19 @@ interface BookDao {
         // no filenames, and must not erase ones an earlier poll already learned.
         audiobookRemoteName: String?,
         syncRemoteName: String?,
+        // Same COALESCE reasoning: the background lookup on the server usually
+        // finishes after the first poll or two, and a null here just means
+        // "still nothing new to report" -- not "clear what was already found".
+        category: String?,
+        // Pre-encoded JSON, not List<String>?: Room auto-expands any
+        // List/Collection/Array-typed *query parameter* into `IN`-style `?, ?,
+        // ...` placeholders regardless of SQL context -- that only applies to
+        // entity column properties, never to a raw @Query bind parameter, so a
+        // List<String>? here silently bypassed Converters.genresToString and
+        // always wrote an empty list (caught by a real test: `dao.
+        // updateJobState(..., genres = listOf("Horror"))` read back as `[]`).
+        // The caller (BookRepository.applyJobState) does the JSON encoding.
+        genres: String?,
     )
 
     /**
@@ -205,6 +220,11 @@ interface BookDao {
     @Query("UPDATE books SET alignedChunks = :aligned, totalChunks = :total WHERE id = :id")
     suspend fun updateAlignment(id: String, aligned: Int, total: Int)
 
-    @Query("UPDATE books SET title = :title, author = :author, coverPath = :coverPath WHERE id = :id")
-    suspend fun updateMetadata(id: String, title: String, author: String?, coverPath: String?)
+    @Query(
+        """
+        UPDATE books SET title = :title, author = :author, coverPath = :coverPath, sizeBytes = :sizeBytes
+        WHERE id = :id
+        """
+    )
+    suspend fun updateMetadata(id: String, title: String, author: String?, coverPath: String?, sizeBytes: Long)
 }

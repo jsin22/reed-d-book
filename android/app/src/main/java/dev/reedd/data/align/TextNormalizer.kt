@@ -42,7 +42,22 @@ object TextNormalizer {
 
     fun normalize(input: String): NormalizedText {
         val out = StringBuilder(input.length)
-        val origin = IntArray(input.length + 4)
+        // Regression: sized `input.length + 4` originally, on the assumption
+        // that only a handful of characters ever fold to more than one output
+        // character. A real chapter (Hidden Pictures, chapter 10) had 198
+        // ellipsis characters -- each '…' -> "..." is a single input char
+        // producing three output chars -- which overran that buffer by a wide
+        // margin. The overflow write in the whitespace branch below was
+        // completely unguarded, so it threw ArrayIndexOutOfBoundsException
+        // uncaught, all the way up through DownloadWorker, which left
+        // downloadState stuck at RUNNING forever and caused the app to
+        // re-download the same book in an infinite loop (ConversionWatcher's
+        // awaitingDownload() kept finding a non-terminal state to resume).
+        // `fold()` never produces more than 3 output characters for one input
+        // character, so `input.length * 3` is a real, provable upper bound on
+        // how large `out`/`origin` can ever grow -- not a bigger guess, a
+        // ceiling that cannot be exceeded no matter what the text contains.
+        val origin = IntArray(input.length * 3)
         var lastWasSpace = true // leading whitespace is dropped
 
         for (i in input.indices) {
@@ -60,7 +75,6 @@ object TextNormalizer {
             lastWasSpace = false
             val folded = fold(c)
             for (f in folded) {
-                if (out.length >= origin.size) break
                 origin[out.length] = i
                 out.append(f)
             }

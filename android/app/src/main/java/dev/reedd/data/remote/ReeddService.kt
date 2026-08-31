@@ -36,8 +36,10 @@ interface ReeddService {
      * Upload an .epub. Returns as soon as the file is on disk server-side, with
      * `status: "queued"` and the id to poll.
      *
-     * `voice`, `speed` and `engine` are plain text parts, not JSON: the server
-     * reads them with FastAPI's `Form(...)`.
+     * `voice`, `speed`, `engine`, `title` and `author` are plain text parts, not
+     * JSON: the server reads them with FastAPI's `Form(...)`. `title`/`author`
+     * are optional and only used server-side to kick off the background
+     * category/genre lookup (see [JobDto.category]/[JobDto.genres]).
      */
     @Multipart
     @POST("api/jobs")
@@ -46,6 +48,8 @@ interface ReeddService {
         @Part("voice") voice: RequestBody?,
         @Part("speed") speed: RequestBody?,
         @Part("engine") engine: RequestBody?,
+        @Part("title") title: RequestBody?,
+        @Part("author") author: RequestBody?,
     ): JobDto
 
     @GET("api/jobs")
@@ -98,4 +102,8 @@ interface ReeddService {
     /** Revokes a user's access; the server refuses to delete the caller's own account. */
     @DELETE("api/admin/users/{userId}")
     suspend fun deleteUser(@Path("userId") userId: String): UserDeleteDto
+
+    /** Whether the category/genre lookup is currently working -- see [MetadataHealthDto]. */
+    @GET("api/admin/metadata-health")
+    suspend fun metadataHealth(): MetadataHealthDto
 }

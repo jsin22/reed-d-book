@@ -259,4 +259,25 @@ class ChunkAlignerTest {
         assertEquals(4, result.total)
         assertEquals(0.5f, result.ratio, 0.001f)
     }
+
+    @Test
+    fun `a chapter with far more ellipses than characters of slack does not crash`() {
+        // Regression, reproduced on a real device with a real book (Hidden
+        // Pictures, chapter 10 -- 198 real ellipsis characters in one
+        // resource). TextNormalizer folds '…' to "..." (3 output chars for 1
+        // input char); the buffer that used to back this was only ever 4
+        // characters larger than the input, so any resource with more than
+        // two ellipses overran it. The overflow write was completely
+        // unguarded and threw ArrayIndexOutOfBoundsException, uncaught all
+        // the way up through DownloadWorker -- which left a download stuck
+        // retrying itself forever instead of ever reaching a finished state.
+        val text = "She trailed off… ".repeat(250) + "The final sentence."
+        val page = ResourceText("EPUB/c1.xhtml", text)
+        val target = chunk(0, "The final sentence.")
+
+        val result = aligner.align(listOf(target), listOf(chapter(1, "c1.xhtml")), listOf(page)) // must not throw
+
+        assertTrue(result.chunks.single().isAligned)
+        assertEquals("The final sentence.", result.chunks.single().textHighlight)
+    }
 }

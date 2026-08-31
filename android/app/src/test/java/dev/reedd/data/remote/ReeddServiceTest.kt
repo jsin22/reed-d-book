@@ -168,6 +168,8 @@ class ReeddServiceTest {
             voice = "af_heart".toRequestBody("text/plain".toMediaType()),
             speed = "1.0".toRequestBody("text/plain".toMediaType()),
             engine = null,
+            title = "My Book".toRequestBody("text/plain".toMediaType()),
+            author = null,
         )
 
         val request = server.takeRequest()
@@ -181,6 +183,7 @@ class ReeddServiceTest {
         // Must not be JSON-quoted: the server reads these with FastAPI Form(...).
         assertTrue("voice is a bare form value", body.contains("\r\n\r\naf_heart\r\n"))
         assertTrue("speed is a bare form value", body.contains("\r\n\r\n1.0\r\n"))
+        assertTrue("title is sent for the server's background metadata lookup", body.contains("\r\n\r\nMy Book\r\n"))
         assertEquals(JobStatus.QUEUED, JobStatus.fromWire(job.status))
         epub.delete()
         Unit
@@ -245,6 +248,29 @@ class ReeddServiceTest {
 
         assertEquals("/api/admin/users", server.takeRequest().url.encodedPath)
         assertEquals("a@example.com", users.single().email)
+    }
+
+    @Test
+    fun `metadataHealth parses an ok status`() = runBlocking {
+        enqueueJson("""{"ok":true,"last_error":null,"last_error_at":null,"last_success_at":"2026-08-31T00:15:17+00:00"}""")
+
+        val health = provider().service().metadataHealth()
+
+        assertEquals("/api/admin/metadata-health", server.takeRequest().url.encodedPath)
+        assertEquals(true, health.ok)
+        assertEquals("2026-08-31T00:15:17+00:00", health.lastSuccessAt)
+    }
+
+    @Test
+    fun `metadataHealth parses a failure`() = runBlocking {
+        enqueueJson(
+            """{"ok":false,"last_error":"Gemini unreachable: connection refused","last_error_at":"2026-08-31T00:20:00+00:00","last_success_at":null}"""
+        )
+
+        val health = provider().service().metadataHealth()
+
+        assertEquals(false, health.ok)
+        assertEquals("Gemini unreachable: connection refused", health.lastError)
     }
 
     @Test

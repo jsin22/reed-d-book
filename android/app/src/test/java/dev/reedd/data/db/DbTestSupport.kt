@@ -21,6 +21,8 @@ fun book(
     downloadState: DownloadState = DownloadState.NONE,
     audiobookPath: String? = null,
     syncPath: String? = null,
+    category: String? = null,
+    genres: List<String> = emptyList(),
 ): BookEntity = BookEntity(
     id = id,
     epubPath = "/data/books/$id/book.epub",
@@ -33,6 +35,8 @@ fun book(
     downloadState = downloadState,
     audiobookPath = audiobookPath,
     syncPath = syncPath,
+    category = category,
+    genres = genres,
 )
 
 fun chunk(bookId: String, ordinal: Int, startMs: Long, endMs: Long, text: String = "s$ordinal", chapter: Int = 1) =

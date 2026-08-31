@@ -24,6 +24,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.filled.MenuBook
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
@@ -64,6 +65,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import dev.reedd.data.db.BookEntity
 import dev.reedd.data.db.DownloadState
+import dev.reedd.domain.AuthStatus
 import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -74,16 +76,24 @@ fun LibraryScreen(
     onOpenDetail: (String) -> Unit,
     onOpenSettings: () -> Unit,
 ) {
-    val books by viewModel.books.collectAsStateWithLifecycle()
+    val books by viewModel.visibleBooks.collectAsStateWithLifecycle()
+    val libraryView by viewModel.libraryView.collectAsStateWithLifecycle()
+    val availableCategories by viewModel.availableCategories.collectAsStateWithLifecycle()
+    val availableGenres by viewModel.availableGenres.collectAsStateWithLifecycle()
     val message by viewModel.message.collectAsStateWithLifecycle()
     val importing by viewModel.importing.collectAsStateWithLifecycle()
     val playerState by viewModel.playerState.collectAsStateWithLifecycle()
     val authStatus by viewModel.authStatus.collectAsStateWithLifecycle()
     val refreshing by viewModel.refreshing.collectAsStateWithLifecycle()
     val isAdmin by viewModel.isAdmin.collectAsStateWithLifecycle()
-    val nowPlaying = books.find { it.id == playerState.bookId }
+    // player.state tracks the book actually loaded, which may not be in the
+    // current sort/filter view -- read from the full library so the mini-player
+    // never disappears just because a filter is narrowed.
+    val allBooks by viewModel.books.collectAsStateWithLifecycle()
+    val nowPlaying = allBooks.find { it.id == playerState.bookId }
     val snackbar = remember { SnackbarHostState() }
     var showImport by remember { mutableStateOf(false) }
+    var showSortFilter by remember { mutableStateOf(false) }
     var pickedUri by remember { mutableStateOf<android.net.Uri?>(null) }
 
     // OpenDocument rather than GetContent: it gives a stable, readable URI that
@@ -107,6 +117,9 @@ fun LibraryScreen(
             TopAppBar(
                 title = { Text("Library") },
                 actions = {
+                    IconButton(onClick = { showSortFilter = true }) {
+                        Icon(Icons.Filled.FilterList, contentDescription = "Sort & filter")
+                    }
                     IconButton(onClick = viewModel::refresh, enabled = !refreshing) {
                         if (refreshing) CircularProgressIndicator(Modifier.size(20.dp))
                         else Icon(Icons.Filled.Refresh, contentDescription = "Refresh")
@@ -151,8 +164,13 @@ fun LibraryScreen(
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
             AuthStatusBanner(authStatus, onOpenSettings)
-            if (books.isEmpty()) {
+            if (allBooks.isEmpty()) {
                 EmptyLibrary(Modifier.fillMaxSize())
+            } else if (books.isEmpty()) {
+                // Distinct from EmptyLibrary: there are books, just none that
+                // match the current filter -- clearing it, not adding a book,
+                // is the fix, so this offers that instead of the import pitch.
+                NoFilterMatches(Modifier.fillMaxSize(), onClearFilters = viewModel::clearFilters)
             } else {
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
@@ -193,6 +211,19 @@ fun LibraryScreen(
     val crashReport by viewModel.crashReport.collectAsStateWithLifecycle()
     crashReport?.let { report ->
         CrashReportDialog(report = report, onDismiss = viewModel::dismissCrashReport)
+    }
+
+    if (showSortFilter) {
+        LibrarySortFilterSheet(
+            view = libraryView,
+            categories = availableCategories,
+            genres = availableGenres,
+            onDismiss = { showSortFilter = false },
+            onSortChange = viewModel::setSort,
+            onCategoryChange = viewModel::setFilterCategory,
+            onGenresChange = viewModel::setFilterGenres,
+            onClearFilters = viewModel::clearFilters,
+        )
     }
 
     if (showImport) {
@@ -250,6 +281,30 @@ private fun AuthStatusBanner(status: AuthStatus, onOpenSettings: () -> Unit) {
             if (status is AuthStatus.NeedsToken) {
                 androidx.compose.material3.TextButton(onClick = onOpenSettings) { Text("Settings") }
             }
+        }
+    }
+}
+
+@Composable
+private fun NoFilterMatches(modifier: Modifier, onClearFilters: () -> Unit) {
+    Column(
+        modifier.padding(32.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Icon(
+            Icons.Filled.FilterList,
+            contentDescription = null,
+            modifier = Modifier.size(56.dp),
+            tint = MaterialTheme.colorScheme.primary,
+        )
+        Text(
+            "No books match this filter",
+            style = MaterialTheme.typography.titleMedium,
+            modifier = Modifier.padding(top = 16.dp),
+        )
+        androidx.compose.material3.TextButton(onClick = onClearFilters, modifier = Modifier.padding(top = 8.dp)) {
+            Text("Clear filter")
         }
     }
 }

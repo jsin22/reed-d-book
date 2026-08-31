@@ -17,6 +17,7 @@ import dev.reedd.data.db.inMemoryDb
 import dev.reedd.data.remote.ApiProvider
 import dev.reedd.data.remote.JobStatus
 import dev.reedd.notify.Notifications
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
@@ -82,6 +83,22 @@ class ConversionWatcherTest {
             .getWorkInfosForUniqueWork("download-$bookId")
             .get()
             .isNotEmpty()
+
+    /** A minimal `GET /api/jobs` list body with one DONE job, for reconcile()'s
+     *  own batch fetch -- distinct from the single-job fixtures pollOnce's
+     *  tests use, since reconcile now reads the list endpoint exclusively. */
+    private fun jobsListJson(
+        jobId: String = "job-1",
+        status: String = "done",
+        category: String? = null,
+        genres: List<String> = emptyList(),
+    ): String {
+        val cat = category?.let { "\"$it\"" } ?: "null"
+        val gen = genres.joinToString(",") { "\"$it\"" }
+        return """{"jobs":[{"job_id":"$jobId","status":"$status","filename":"book.epub",
+            "voice":"af_heart","speed":1.0,"created_at":"2026-01-01T00:00:00+00:00",
+            "category":$cat,"genres":[$gen]}]}"""
+    }
 
     @Test
     fun `a poll writes the server's progress into the row`() = runTest {
@@ -207,8 +224,10 @@ class ConversionWatcherTest {
                 downloadState = DownloadState.DONE,
                 audiobookPath = "/definitely/not/here.m4b",
                 syncPath = "/definitely/not/here.json",
+                category = "Fiction",
             )
         )
+        enqueue(jobsListJson(category = "Fiction"))
 
         watcher.reconcile()
 
@@ -230,8 +249,10 @@ class ConversionWatcherTest {
                 "b1", jobId = "job-1", jobStatus = JobStatus.DONE,
                 downloadState = DownloadState.DONE,
                 audiobookPath = m4b.absolutePath, syncPath = json.absolutePath,
+                category = "Fiction",
             )
         )
+        enqueue(jobsListJson(category = "Fiction"))
 
         watcher.reconcile()
 
@@ -243,23 +264,109 @@ class ConversionWatcherTest {
     }
 
     @Test
-    fun `reconcile tells the adopter which jobs are already local`() = runTest {
-        // "known" has to be every jobId already backed by a row, or the adopter
-        // (ServerLibraryAdopterTest, kept separate since it depends on Readium)
-        // would re-adopt a book this device already has.
-        db.books().insert(book("has-job", jobId = "job-1", jobStatus = JobStatus.DONE))
-        db.books().insert(book("no-job", jobId = null))
-        var seen: Set<String>? = null
+    fun `reconcile does not throw when the job list cannot be fetched`() = runTest {
+        // An unreachable server used to be ServerLibraryAdopter.adopt's own
+        // concern; it no longer fetches anything itself, so this is
+        // reconcile's job now -- degrade to "nothing updated this time,"
+        // same as before, there is always a later reconcile to retry.
+        db.books().insert(book("b1", jobId = "job-1", jobStatus = JobStatus.DONE, category = "Fiction"))
+        enqueue("""{"detail":"boom"}""", code = 500)
+
+        watcher.reconcile() // must not throw
+
+        assertEquals("Fiction", db.books().get("b1")!!.category) // left untouched
+    }
+
+    @Test
+    fun `reconcile picks up category and genre for a job that finished before this device asked`() = runTest {
+        // Simulates a job that was DONE before this feature existed (or before
+        // the server's category/genre backfill ran) -- pollAll's own loop
+        // would never ask about it again, since awaitingConversion excludes
+        // terminal jobs. reconcile's batch fetch is what re-checks it.
+        db.books().insert(book("b1", jobId = "job-1", jobStatus = JobStatus.DONE))
+        enqueue(jobsListJson(category = "Fiction", genres = listOf("Horror")))
+
+        watcher.reconcile()
+
+        val book = db.books().get("b1")!!
+        assertEquals("Fiction", book.category)
+        assertEquals(listOf("Horror"), book.genres)
+    }
+
+    @Test
+    fun `reconcile refreshes category and genre even for a book already resolved`() = runTest {
+        // The property that made the old "only re-check books never resolved"
+        // carve-out (and the admin screen's separate clearAllMetadata step)
+        // unnecessary: every reconcile now refreshes every book from whatever
+        // the server currently has, not just ones that were never checked --
+        // so a book resolved with an older/incomplete answer catches up too.
+        db.books().insert(
+            book("b1", jobId = "job-1", jobStatus = JobStatus.DONE, category = "Fiction", genres = listOf("Mystery"))
+        )
+        enqueue(jobsListJson(category = "Fiction", genres = listOf("Mystery", "Short Stories")))
+
+        watcher.reconcile()
+
+        assertEquals(listOf("Mystery", "Short Stories"), db.books().get("b1")!!.genres)
+    }
+
+    @Test
+    fun `two concurrent reconciles never adopt at the same time`() = runTest {
+        // Regression, reproduced on a real device: two overlapping
+        // reconcile() calls (the Library screen's own launch-time one racing
+        // the Admin screen's "Re-check all book metadata") each read "which
+        // jobs are already local" before either had inserted anything, so
+        // both decided the same finished job was new and both adopted it --
+        // the same book shown twice with the same job id. The mutex in
+        // ConversionWatcher.reconcile is what should now serialize this.
+        enqueue("""{"jobs":[]}""")
+        enqueue("""{"jobs":[]}""")
+        var inFlight = 0
+        var sawOverlap = false
         val watcherWithAdoption = ConversionWatcher(
             context, repository, ApiProvider(baseUrl = { server.url("/").toString() }, token = { null }),
             Notifications(context),
-            adoptServerLibrary = { known -> seen = known },
+            adoptServerLibrary = { _, _ ->
+                inFlight++
+                if (inFlight > 1) sawOverlap = true
+                // Yields control back to the scheduler -- exactly the window
+                // a real race needs, and exactly what the mutex must close.
+                kotlinx.coroutines.delay(10)
+                inFlight--
+            },
         )
-        // job-1 is DONE, so pollAll below makes no further request for it.
+
+        val first = launch { watcherWithAdoption.reconcile() }
+        val second = launch { watcherWithAdoption.reconcile() }
+        first.join()
+        second.join()
+
+        assertFalse("two reconciles ran their adopt step at the same time", sawOverlap)
+    }
+
+    @Test
+    fun `reconcile tells the adopter which jobs are already local, and hands it the same list it fetched`() = runTest {
+        // "known" has to be every jobId already backed by a row, or the adopter
+        // (ServerLibraryAdopterTest, kept separate since it depends on Readium)
+        // would re-adopt a book this device already has.
+        db.books().insert(book("has-job", jobId = "job-1", jobStatus = JobStatus.DONE, category = "Fiction"))
+        db.books().insert(book("no-job", jobId = null))
+        enqueue(jobsListJson(category = "Fiction"))
+        var seenKnown: Set<String>? = null
+        var seenJobs: List<dev.reedd.data.remote.JobDto>? = null
+        val watcherWithAdoption = ConversionWatcher(
+            context, repository, ApiProvider(baseUrl = { server.url("/").toString() }, token = { null }),
+            Notifications(context),
+            adoptServerLibrary = { jobs, known -> seenJobs = jobs; seenKnown = known },
+        )
 
         watcherWithAdoption.reconcile()
 
-        assertEquals(setOf("job-1"), seen)
+        assertEquals(setOf("job-1"), seenKnown)
+        assertEquals(listOf("job-1"), seenJobs?.map { it.jobId })
+        // Exactly one request: the same list serves both adoption and the
+        // per-book state refresh, not two separate fetches.
+        assertEquals(1, server.requestCount)
     }
 
     @Test

@@ -2,6 +2,7 @@ package dev.reedd.data
 
 import dev.reedd.data.db.BookDao
 import dev.reedd.data.db.BookEntity
+import dev.reedd.data.db.Converters
 import dev.reedd.data.db.DownloadState
 import dev.reedd.data.db.SyncDao
 import dev.reedd.data.remote.ApiException
@@ -23,6 +24,11 @@ class BookRepository(
     private val syncDao: SyncDao,
     private val api: ApiProvider,
 ) {
+    // Stateless -- used directly here to JSON-encode genres before a raw
+    // @Query parameter, outside the entity-column path Room normally applies
+    // it on. See applyJobState.
+    private val converters = Converters()
+
     fun books(): Flow<List<BookEntity>> = bookDao.observeAll()
 
     fun book(id: String): Flow<BookEntity?> = bookDao.observe(id)
@@ -59,6 +65,17 @@ class BookRepository(
      *
      * `audiobookBytes` is taken from the manifest here rather than at download
      * time so the UI can show the expected size while the download is queued.
+     *
+     * `category`/`genres` come from a lookup that runs in the background on the
+     * server and often has not finished by the first poll or two -- an empty
+     * [JobDto.genres] is passed through as `null` here, not `emptyList()`, so
+     * [BookDao.updateJobState]'s COALESCE treats "nothing new yet" the same way
+     * it already treats a still-converting job's missing filenames, rather than
+     * overwriting a genuine earlier result with nothing. Encoded to JSON here,
+     * not passed as a `List<String>`: Room auto-expands a `List`-typed @Query
+     * parameter into `IN`-style placeholders regardless of context, which
+     * silently discarded every genre (see [BookDao.updateJobState]'s own
+     * comment on `genres`).
      */
     suspend fun applyJobState(bookId: String, job: JobDto) {
         bookDao.updateJobState(
@@ -73,6 +90,8 @@ class BookRepository(
             audiobookBytes = job.audiobook?.bytes,
             audiobookRemoteName = job.audiobook?.file,
             syncRemoteName = job.sync?.file,
+            category = job.category,
+            genres = job.genres.takeIf { it.isNotEmpty() }?.let { converters.genresToString(it) },
         )
     }
 
@@ -111,8 +130,8 @@ class BookRepository(
     suspend fun syncChunks(bookId: String): List<dev.reedd.data.db.SyncChunkEntity> =
         syncDao.chunks(bookId)
 
-    suspend fun updateMetadata(bookId: String, title: String, author: String?, coverPath: String?) =
-        bookDao.updateMetadata(bookId, title, author, coverPath)
+    suspend fun updateMetadata(bookId: String, title: String, author: String?, coverPath: String?, sizeBytes: Long) =
+        bookDao.updateMetadata(bookId, title, author, coverPath, sizeBytes)
 
     suspend fun updateReadingPosition(bookId: String, locator: String?) =
         bookDao.updateReadingPosition(bookId, locator, System.currentTimeMillis())
