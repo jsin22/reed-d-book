@@ -18,6 +18,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.List
+import androidx.compose.material.icons.filled.EditNote
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material3.CircularProgressIndicator
@@ -66,6 +67,8 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import dev.reedd.data.settings.ReaderSettings
+import dev.reedd.domain.NoteLocators
+import dev.reedd.domain.spineIndexOf
 import dev.reedd.ui.theme.paperColorScheme
 import org.readium.r2.navigator.epub.EpubNavigatorFragment
 import org.readium.r2.navigator.epub.css.Length
@@ -74,6 +77,7 @@ import org.readium.r2.navigator.input.DragEvent
 import org.readium.r2.navigator.input.InputListener
 import org.readium.r2.navigator.input.TapEvent
 import org.readium.r2.shared.publication.Locator
+import org.readium.r2.shared.publication.Publication
 
 /** Log tag for the word-tap path, which can only be diagnosed on hardware. */
 private const val TAG_TAP = "ReeddTap"
@@ -107,6 +111,7 @@ private const val SCROLL_FOLLOW_CHECK_INTERVAL_MS = 400L
 fun ReaderScreen(
     viewModel: ReaderViewModel,
     readAlongViewModel: ReadAlongViewModel,
+    notesViewModel: NotesViewModel,
     onBack: () -> Unit,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -115,6 +120,7 @@ fun ReaderScreen(
     val readAlong by readAlongViewModel.state.collectAsStateWithLifecycle()
     var showAppearance by rememberSaveable { mutableStateOf(false) }
     var showContents by rememberSaveable { mutableStateOf(false) }
+    var showNotes by rememberSaveable { mutableStateOf(false) }
     // Immersive: toolbars hidden so the text has the whole screen. Entered from the
     // toolbar button, left by a tap that lands on nothing readable.
     var immersive by rememberSaveable { mutableStateOf(false) }
@@ -122,6 +128,7 @@ fun ReaderScreen(
     val scope = rememberCoroutineScope()
     val pageInfo by viewModel.pageInfo.collectAsStateWithLifecycle()
     val tappedWord by readAlongViewModel.tappedWord.collectAsStateWithLifecycle()
+    val pendingNoteTarget by readAlongViewModel.pendingNoteTarget.collectAsStateWithLifecycle()
     val definition by readAlongViewModel.definition.collectAsStateWithLifecycle()
 
     // Hide the system status and navigation bars too, not just the app's own toolbars
@@ -179,6 +186,9 @@ fun ReaderScreen(
                             }
                             IconButton(onClick = { showContents = true }) {
                                 Icon(Icons.AutoMirrored.Filled.List, contentDescription = "Contents")
+                            }
+                            IconButton(onClick = { showNotes = true }) {
+                                Icon(Icons.Filled.EditNote, contentDescription = "Notes")
                             }
                             IconButton(onClick = { showAppearance = true }) {
                                 Icon(Icons.Filled.TextFields, contentDescription = "Appearance")
@@ -300,12 +310,18 @@ fun ReaderScreen(
             }
         }
 
-        // The menu for a tapped word, positioned beside the word itself.
-        tappedWord?.let { target ->
+        // The menu for a tapped word, positioned beside the word itself. A
+        // long-press selection's equivalent menu is the native selection
+        // toolbar instead (see SelectionMenuAction's own docstring for why
+        // -- selection, its drag handles, and the toolbar turned out to be
+        // one bundled system in this WebView, not independently
+        // controllable, after four different attempts at unifying the two).
+        (tappedWord as? WordMenuTarget.Tap)?.let { target ->
             WordMenu(
                 target = target,
                 onReadFromHere = readAlongViewModel::readFromTappedWord,
                 onDefine = readAlongViewModel::defineTappedWord,
+                onNotes = readAlongViewModel::openNoteEditor,
                 onDismiss = readAlongViewModel::dismissWordMenu,
             )
         }
@@ -314,7 +330,73 @@ fun ReaderScreen(
             DefinitionSheet(state = current, onDismiss = readAlongViewModel::dismissDefinition)
         }
 
+        // Building a Locator needs the open Publication, which only exists once
+        // the reader is Ready -- ReadAlongViewModel deliberately has no
+        // reference to it (see its own docstring: "about the audio", not the
+        // book), so that step happens here rather than there.
+        pendingNoteTarget?.let { target ->
+            val publication = (state as? ReaderState.Ready)?.publication
+            val pending = remember(target, publication) { publication?.let { buildPendingNote(it, target) } }
+            if (pending == null) {
+                // The resource this target pointed at could not be resolved
+                // against the publication -- nothing to save, so just close.
+                LaunchedEffect(target) { readAlongViewModel.dismissNoteEditor() }
+            } else {
+                NoteEditorDialog(
+                    quotedText = pending.quotedText,
+                    onSave = { noteText ->
+                        val spineIndex = spineIndexOf(publication?.readingOrder.orEmpty(), pending.resourceHref) ?: 0
+                        scope.launch { notesViewModel.saveNote(pending, noteText, spineIndex) }
+                        readAlongViewModel.dismissNoteEditor()
+                    },
+                    onCancel = readAlongViewModel::dismissNoteEditor,
+                )
+            }
+        }
+
+        if (showNotes) {
+            NotesSheet(viewModel = notesViewModel, onDismiss = { showNotes = false })
+        }
+
     } // ReaderPalette
+}
+
+/**
+ * A [WordMenuTarget] turned into a [PendingNote], ready to become a
+ * [dev.reedd.data.db.NoteEntity] once the reader saves it.
+ *
+ * A selection already carries its own Readium-resolved [Locator]; a tap
+ * needs one built from what [TapTextResolver] found (see
+ * [dev.reedd.domain.NoteLocators.tapLocator]) -- null if the resource it
+ * pointed at can no longer be resolved against the publication.
+ */
+private fun buildPendingNote(publication: Publication, target: WordMenuTarget): PendingNote? = when (target) {
+    is WordMenuTarget.Tap -> {
+        val href = target.resourceHref
+        val locator = href?.let {
+            NoteLocators.tapLocator(
+                publication = publication,
+                resourceHref = it,
+                blockText = target.blockText,
+                offset = target.offset,
+                word = target.word,
+                progression = target.progression,
+            )
+        }
+        if (href == null || locator == null) null else PendingNote(
+            quotedText = target.word,
+            resourceHref = href,
+            locatorJson = locator.toJSON().toString(),
+            progression = target.progression,
+        )
+    }
+
+    is WordMenuTarget.Selection -> PendingNote(
+        quotedText = target.quotedText,
+        resourceHref = target.locator.href.toString(),
+        locatorJson = target.locator.toJSON().toString(),
+        progression = target.locator.locations.progression,
+    )
 }
 
 /**
@@ -458,26 +540,35 @@ private fun EpubNavigator(
                 // Explicitly false: this app's layout already owns every inset
                 // Readium might otherwise try to account for a second time.
                 shouldApplyInsetsPadding = false,
-                selectionActionModeCallback = ReadFromHereAction(
-                    onSelected = {
+                // Drives the native selection toolbar's own contents from the
+                // same WordMenuTarget.Selection state the tap popup renders
+                // from -- see SelectionMenuAction's own docstring for why this
+                // keeps the native toolbar itself, rather than WordMenu.
+                selectionActionModeCallback = SelectionMenuAction(
+                    scope = scope,
+                    getSelection = {
+                        activity.supportFragmentManager.fragments
+                            .filterIsInstance<EpubNavigatorFragment>()
+                            .firstOrNull()
+                            ?.currentSelection()
+                    },
+                    onSelectionMade = readAlongViewModel::onSelectionMade,
+                    currentTarget = { readAlongViewModel.tappedWord.value as? WordMenuTarget.Selection },
+                    onReadFromHere = {
+                        readAlongViewModel.readFromTappedWord()
+                        // Only place selection is deliberately cleared -- a
+                        // leftover highlight would otherwise fight the
+                        // read-along highlight, same reasoning the original
+                        // "Read from here"-only version had.
                         scope.launch {
-                            val fragment = activity.supportFragmentManager.fragments
+                            activity.supportFragmentManager.fragments
                                 .filterIsInstance<EpubNavigatorFragment>()
                                 .firstOrNull()
-                            val selection = fragment?.currentSelection()
-                            val text = selection?.locator?.text?.highlight
-                            if (text.isNullOrBlank()) {
-                                onMessage("Nothing selected")
-                            } else {
-                                val href = selection.locator.href.toString()
-                                if (readAlongViewModel.playFromSelection(href, text)) {
-                                    fragment.clearSelection()
-                                } else {
-                                    onMessage("That passage is not matched to the audio")
-                                }
-                            }
+                                ?.clearSelection()
                         }
                     },
+                    onDefine = readAlongViewModel::defineTappedWord,
+                    onNotes = readAlongViewModel::openNoteEditor,
                 ),
             ),
         )
@@ -650,9 +741,18 @@ private fun EpubNavigator(
     // Highlight the sentence being spoken. One decoration, replaced by id, so the
     // previous highlight clears itself.
     // The word highlight belongs to the menu: when the menu goes, so does it.
+    // Also clears any native text selection -- harmless when the menu closed
+    // because of a tap (nothing was selected to begin with), and a backstop for
+    // when it closed because of a long-press selection: SelectionMenuAction's
+    // own item clicks already call mode.finish(), which normally takes the
+    // selection with it, but this covers dismissWordMenu() being reached some
+    // other way (e.g. a stray tap elsewhere) without relying on that ordering.
     LaunchedEffect(navigator, tappedWord) {
         val fragment = navigator ?: return@LaunchedEffect
-        if (tappedWord == null) TapTextResolver.clearHighlight(fragment)
+        if (tappedWord == null) {
+            TapTextResolver.clearHighlight(fragment)
+            fragment.clearSelection()
+        }
     }
 
     LaunchedEffect(navigator, readAlong.currentIndex, highlightTint) {

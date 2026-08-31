@@ -14,6 +14,7 @@ import dev.reedd.ui.detail.BookDetailScreen
 import dev.reedd.ui.detail.BookDetailViewModel
 import dev.reedd.ui.library.LibraryScreen
 import dev.reedd.ui.library.LibraryViewModel
+import dev.reedd.ui.reader.NotesViewModel
 import dev.reedd.ui.reader.ReadAlongViewModel
 import dev.reedd.ui.reader.ReaderScreen
 import dev.reedd.ui.reader.ReaderViewModel
@@ -88,9 +89,12 @@ fun ReeddNavHost(navController: NavHostController = rememberNavController()) {
             // audio. They have different lifetimes and different reasons to change.
             val readAlongViewModel: ReadAlongViewModel =
                 viewModel(factory = ReadAlongViewModel.factory(container, bookId))
+            val notesViewModel: NotesViewModel =
+                viewModel(factory = NotesViewModel.factory(container, bookId))
             ReaderScreen(
                 viewModel = viewModel,
                 readAlongViewModel = readAlongViewModel,
+                notesViewModel = notesViewModel,
                 onBack = { navController.popBackStack() },
             )
         }

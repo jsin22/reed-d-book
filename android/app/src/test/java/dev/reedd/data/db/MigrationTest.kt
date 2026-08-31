@@ -3,6 +3,7 @@ package dev.reedd.data.db
 import android.content.Context
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.json.JSONObject
 import org.junit.After
@@ -77,7 +78,7 @@ class MigrationTest {
 
     private fun openMigrated(): ReeddDatabase =
         Room.databaseBuilder(context, ReeddDatabase::class.java, DB_NAME)
-            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
             .allowMainThreadQueries()
             .build()
 
@@ -253,6 +254,46 @@ class MigrationTest {
             val book = db.books().get("b1")!!
             assertEquals(0, book.totalChunks)
             assertFalse(book.needsAlignment)
+        } finally {
+            db.close()
+        }
+    }
+
+    @Test
+    fun `MIGRATION_5_6 adds an empty notes table a pre-existing library can write to`() = runTest {
+        createVersion1().use { old ->
+            old.execSQL(
+                """
+                INSERT INTO books (id, epubPath, originalFilename, title, sizeBytes, addedAt,
+                                   jobProgress, jobChaptersDone, jobMissing, uploadedBytes,
+                                   downloadState, downloadedBytes, downloadTotalBytes)
+                VALUES ('b1', '/e', 'Book.epub', 'Book', 1, 1, 0, 0, 0, 0, 'NONE', 0, 0)
+                """.trimIndent()
+            )
+        }
+
+        val db = openMigrated()
+        try {
+            // Nothing to backfill -- an existing library has no notes to invent.
+            assertTrue(db.notes().observe("b1").first().isEmpty())
+
+            val noteId = db.notes().insert(
+                NoteEntity(
+                    bookId = "b1",
+                    noteText = "worth remembering",
+                    quotedText = "a passage",
+                    locatorJson = """{"href":"c1.xhtml"}""",
+                    resourceHref = "c1.xhtml",
+                    spineIndex = 0,
+                    progression = 0.2,
+                    createdAt = 1_000,
+                )
+            )
+            assertEquals("worth remembering", db.notes().observe("b1").first().single { it.id == noteId }.noteText)
+
+            // And it cascades with the book, same as sync_chunks/sync_chapters.
+            db.books().delete("b1")
+            assertTrue(db.notes().observe("b1").first().isEmpty())
         } finally {
             db.close()
         }

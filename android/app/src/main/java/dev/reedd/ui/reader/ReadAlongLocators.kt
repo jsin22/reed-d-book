@@ -1,10 +1,10 @@
 package dev.reedd.ui.reader
 
 import dev.reedd.data.db.SyncChunkEntity
+import dev.reedd.domain.resolveLink
 import org.readium.r2.navigator.Decoration
 import org.readium.r2.shared.publication.Locator
 import org.readium.r2.shared.publication.Publication
-import org.readium.r2.shared.util.Url
 import org.readium.r2.shared.util.mediatype.MediaType
 
 /**
@@ -54,14 +54,4 @@ object ReadAlongLocators {
             locator = locator,
             style = Decoration.Style.Highlight(tint = tint, isActive = false),
         )
-
-    private fun resolveLink(publication: Publication, href: String): Url? {
-        val name = href.substringAfterLast('/')
-        val match = publication.readingOrder.firstOrNull { link ->
-            link.url().toString().substringAfterLast('/') == name
-        } ?: publication.resources.firstOrNull { link ->
-            link.url().toString().substringAfterLast('/') == name
-        }
-        return match?.url()
-    }
 }

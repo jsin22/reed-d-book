@@ -112,3 +112,34 @@ val MIGRATION_4_5 = object : Migration(4, 5) {
         db.execSQL("CREATE UNIQUE INDEX index_books_jobId ON books(jobId)")
     }
 }
+
+/**
+ * 5 -> 6: notes.
+ *
+ * A new child table, same shape as [MIGRATION_1_2]'s `sync_chunks`/`sync_chapters`
+ * addition -- nothing existing changes, so there is nothing to backfill.
+ */
+val MIGRATION_5_6 = object : Migration(5, 6) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS notes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                bookId TEXT NOT NULL,
+                noteText TEXT NOT NULL,
+                quotedText TEXT NOT NULL,
+                locatorJson TEXT NOT NULL,
+                resourceHref TEXT NOT NULL,
+                spineIndex INTEGER NOT NULL,
+                progression REAL,
+                createdAt INTEGER NOT NULL,
+                FOREIGN KEY(bookId) REFERENCES books(id) ON DELETE CASCADE
+            )
+            """.trimIndent()
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS index_notes_bookId_spineIndex_progression " +
+                "ON notes(bookId, spineIndex, progression)"
+        )
+    }
+}

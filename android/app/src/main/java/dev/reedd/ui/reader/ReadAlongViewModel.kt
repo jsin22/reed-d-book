@@ -18,22 +18,67 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import org.readium.r2.navigator.Selection
+import org.readium.r2.shared.publication.Locator
 import java.io.File
 
 /**
- * A word the reader tapped: what the context menu is about.
+ * What the word-tap context menu is about: a single tapped word, or a
+ * long-press selection -- unified so both drive the same [WordMenu] rather
+ * than a tap's Compose popup and a selection's separate native toolbar
+ * offering different actions (see [SelectionMenuAction] for how a selection
+ * ends up here at all).
  *
- * @param sentenceIndex the sentence containing the word, or null when this passage
- *   is not mapped to the audio — the menu then offers the definition only.
- * @param anchor where the word is on screen, in **view pixels**, so the menu can
- *   appear beside it.
+ * @property sentenceIndex the sentence this word/selection belongs to, or
+ *   null when unmapped to the audio -- "Read from here" is hidden in that case.
+ * @property anchorX/anchorY where the menu should appear, in **view pixels**.
  */
-data class TappedWordTarget(
-    val word: String,
-    val sentenceIndex: Int?,
-    val anchorX: Int,
-    val anchorY: Int,
-)
+sealed interface WordMenuTarget {
+    val anchorX: Int
+    val anchorY: Int
+    val sentenceIndex: Int?
+    /** The word, or the selected passage -- what a note quotes, and what
+     *  Definition looks up. */
+    val quotedText: String
+    /** False only for a multi-word selection: looking up a whole passage in
+     *  a dictionary is not a thing, so the row is omitted entirely rather
+     *  than shown disabled -- same convention as "Read from here" already
+     *  uses for [sentenceIndex]. */
+    val canDefine: Boolean
+
+    val canReadFromHere: Boolean get() = sentenceIndex != null
+
+    data class Tap(
+        val word: String,
+        /** Kept (not discarded after resolving [sentenceIndex], the way this
+         *  used to work) so a Notes tap can build a real [org.readium.r2.
+         *  shared.publication.Locator] from it -- see [dev.reedd.domain.
+         *  NoteLocators.tapLocator]. */
+        val resourceHref: String?,
+        val blockText: String,
+        val offset: Int,
+        val progression: Double?,
+        override val sentenceIndex: Int?,
+        override val anchorX: Int,
+        override val anchorY: Int,
+    ) : WordMenuTarget {
+        override val quotedText: String get() = word
+        override val canDefine: Boolean get() = true
+    }
+
+    data class Selection(
+        /** Resolved by Readium itself ([Selection.locator]) -- a note from a
+         *  selection needs no separate locator-building step, unlike [Tap]. */
+        val locator: Locator,
+        override val sentenceIndex: Int?,
+        val isMultiWord: Boolean,
+        override val anchorX: Int,
+        override val anchorY: Int,
+    ) : WordMenuTarget {
+        override val quotedText: String get() = locator.text.highlight.orEmpty().trim()
+        override val canDefine: Boolean get() = !isMultiWord
+    }
+}
 
 /** A definition being shown, or being looked up. */
 data class DefinitionState(
@@ -96,11 +141,21 @@ class ReadAlongViewModel(
      * Separate from [state] because it is not a property of playback: it is a
      * transient selection that any subsequent tap replaces.
      */
-    private val _tappedWord = MutableStateFlow<TappedWordTarget?>(null)
-    val tappedWord: StateFlow<TappedWordTarget?> = _tappedWord.asStateFlow()
+    private val _tappedWord = MutableStateFlow<WordMenuTarget?>(null)
+    val tappedWord: StateFlow<WordMenuTarget?> = _tappedWord.asStateFlow()
 
     private val _definition = MutableStateFlow<DefinitionState?>(null)
     val definition: StateFlow<DefinitionState?> = _definition.asStateFlow()
+
+    /**
+     * The tap/selection a note is being written for, once the reader has
+     * picked "Notes" off the menu -- separate from [tappedWord] so choosing
+     * Notes can close the menu (clearing [tappedWord], which is what makes
+     * the popup and its highlight/selection cleanup disappear) without also
+     * losing what the note is about.
+     */
+    private val _pendingNoteTarget = MutableStateFlow<WordMenuTarget?>(null)
+    val pendingNoteTarget: StateFlow<WordMenuTarget?> = _pendingNoteTarget.asStateFlow()
 
     private var index: ChunkIndex = ChunkIndex.EMPTY
     private var lastSavedPositionMs = 0L
@@ -266,20 +321,6 @@ class ReadAlongViewModel(
     }
 
     /**
-     * Start playing from a sentence the reader selected on the page.
-     *
-     * The selection arrives as text, not a position, so it is matched against the
-     * mapping. Returns false when nothing matched — a selection in a chapter whose
-     * sentences could not be aligned, or in front matter that was never spoken —
-     * so the caller can say so rather than silently doing nothing.
-     */
-    fun playFromSelection(resourceHref: String?, selectedText: String): Boolean {
-        val target = index.indexOfSelection(resourceHref, selectedText) ?: return false
-        playFrom(target)
-        return true
-    }
-
-    /**
      * A word was tapped: open its menu.
      *
      * Deliberately does nothing else. Playback does not move, the page does not
@@ -299,8 +340,12 @@ class ReadAlongViewModel(
         anchorX: Int,
         anchorY: Int,
     ) {
-        _tappedWord.value = TappedWordTarget(
+        _tappedWord.value = WordMenuTarget.Tap(
             word = word,
+            resourceHref = resourceHref,
+            blockText = blockText,
+            offset = offset,
+            progression = readingProgression,
             // readingProgression: where the reader is looking on screen, not
             // audio playback position -- see ChunkIndex.indexOfTap for why that
             // distinction matters.
@@ -310,7 +355,34 @@ class ReadAlongViewModel(
         )
     }
 
-    /** Play from the beginning of the sentence the tapped word sits in. */
+    /**
+     * A long-press selection was made: open the same menu a tap would.
+     *
+     * Called after Android's native selection toolbar has been suppressed
+     * (see [SelectionMenuAction]) -- this is what replaces it. A selection
+     * that resolves to exactly one word behaves just like a tap on that
+     * word: [WordMenuTarget.Selection.canDefine] is only false when the
+     * selected text spans more than one word.
+     */
+    fun onSelectionMade(selection: Selection) {
+        val text = selection.locator.text.highlight?.trim().orEmpty()
+        if (text.isEmpty()) return
+        val href = selection.locator.href.toString()
+        // rect is nullable -- Readium could not resolve on-screen bounds for
+        // this selection. Falls back to the top-left corner rather than not
+        // showing the menu at all; a rare case, and a mispositioned menu is
+        // still usable.
+        val rect = selection.rect
+        _tappedWord.value = WordMenuTarget.Selection(
+            locator = selection.locator,
+            sentenceIndex = index.indexOfSelection(href, text),
+            isMultiWord = text.any { it.isWhitespace() },
+            anchorX = rect?.left?.toInt() ?: 0,
+            anchorY = rect?.bottom?.toInt() ?: 0,
+        )
+    }
+
+    /** Play from the beginning of the sentence the tapped word/selection sits in. */
     fun readFromTappedWord() {
         val target = _tappedWord.value?.sentenceIndex ?: return
         _tappedWord.value = null
@@ -318,7 +390,8 @@ class ReadAlongViewModel(
     }
 
     /**
-     * Look the tapped word up in the bundled dictionary.
+     * Look the tapped word (or single-word selection) up in the bundled
+     * dictionary.
      *
      * Playback stops first: reading a definition and listening at the same time is
      * not something anyone is doing on purpose.
@@ -327,11 +400,11 @@ class ReadAlongViewModel(
         val target = _tappedWord.value ?: return
         _tappedWord.value = null
         player.pause()
-        _definition.value = DefinitionState(word = target.word, loading = true)
+        _definition.value = DefinitionState(word = target.quotedText, loading = true)
         viewModelScope.launch {
-            val found = runCatching { dictionary.lookup(target.word) }.getOrNull()
+            val found = runCatching { dictionary.lookup(target.quotedText) }.getOrNull()
             _definition.value = DefinitionState(
-                word = target.word,
+                word = target.quotedText,
                 loading = false,
                 definition = found,
                 notFound = found == null,
@@ -341,6 +414,17 @@ class ReadAlongViewModel(
 
     fun dismissWordMenu() {
         _tappedWord.value = null
+    }
+
+    /** The menu's Notes row: close the menu, keep what it was about. */
+    fun openNoteEditor() {
+        val target = _tappedWord.value ?: return
+        _tappedWord.value = null
+        _pendingNoteTarget.value = target
+    }
+
+    fun dismissNoteEditor() {
+        _pendingNoteTarget.value = null
     }
 
     fun dismissDefinition() {

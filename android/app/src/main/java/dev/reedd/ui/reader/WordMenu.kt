@@ -1,5 +1,6 @@
 package dev.reedd.ui.reader
 
+import android.content.ClipData
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -8,6 +9,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.MenuBook
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.EditNote
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -18,32 +21,43 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.ClipEntry
+import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
+import kotlinx.coroutines.launch
 
 /**
- * The two-item menu that appears beside a tapped word.
+ * The menu that appears beside a tapped word or a long-press selection.
  *
- * A [Popup] anchored to the word rather than a bar at the edge of the screen: the
- * menu is about *that word*, and putting it anywhere else would make the reader look
- * away from what they just touched.
+ * A [Popup] anchored to the word/selection rather than a bar at the edge of the
+ * screen: the menu is about *that text*, and putting it anywhere else would make
+ * the reader look away from what they just touched. The same menu serves both a
+ * tap and a selection ([WordMenuTarget]'s two variants) -- a single-word
+ * selection renders identically to a tap on that word.
  *
- * **Read from here** is hidden when the word sits in a passage with no audio mapped
- * to it — offering an action that cannot work is worse than not offering it.
+ * **Read from here** is hidden when the target sits in a passage with no audio
+ * mapped to it, and **Definition** is hidden for a multi-word selection —
+ * offering an action that cannot work is worse than not offering it.
  */
 @Composable
 fun WordMenu(
-    target: TappedWordTarget,
+    target: WordMenuTarget,
     onReadFromHere: () -> Unit,
     onDefine: () -> Unit,
+    onNotes: () -> Unit,
     onDismiss: () -> Unit,
 ) {
+    val clipboard = LocalClipboard.current
+    val scope = rememberCoroutineScope()
+
     Popup(
         offset = IntOffset(target.anchorX, target.anchorY),
         onDismissRequest = onDismiss,
@@ -55,7 +69,7 @@ fun WordMenu(
             shadowElevation = 8.dp,
         ) {
             Column(Modifier.width(IntrinsicMenuWidth)) {
-                if (target.sentenceIndex != null) {
+                if (target.canReadFromHere) {
                     MenuRow(
                         icon = { Icon(Icons.Filled.PlayArrow, contentDescription = null) },
                         label = "Read from here",
@@ -63,10 +77,29 @@ fun WordMenu(
                     )
                     HorizontalDivider()
                 }
+                if (target.canDefine) {
+                    MenuRow(
+                        icon = { Icon(Icons.AutoMirrored.Filled.MenuBook, contentDescription = null) },
+                        label = "Definition",
+                        onClick = onDefine,
+                    )
+                    HorizontalDivider()
+                }
                 MenuRow(
-                    icon = { Icon(Icons.AutoMirrored.Filled.MenuBook, contentDescription = null) },
-                    label = "Definition",
-                    onClick = onDefine,
+                    icon = { Icon(Icons.Filled.EditNote, contentDescription = null) },
+                    label = "Notes",
+                    onClick = onNotes,
+                )
+                HorizontalDivider()
+                MenuRow(
+                    icon = { Icon(Icons.Filled.ContentCopy, contentDescription = null) },
+                    label = "Copy",
+                    onClick = {
+                        scope.launch {
+                            clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("read-d-book", target.quotedText)))
+                        }
+                        onDismiss()
+                    },
                 )
             }
         }

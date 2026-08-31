@@ -2,6 +2,7 @@ package dev.reedd.di
 
 import android.content.Context
 import dev.reedd.data.BookRepository
+import dev.reedd.data.db.NoteDao
 import dev.reedd.data.db.ReeddDatabase
 import dev.reedd.data.db.SyncDao
 import dev.reedd.data.dictionary.Dictionary
@@ -46,6 +47,8 @@ class AppContainer(context: Context) {
     val database: ReeddDatabase by lazy { ReeddDatabase.create(appContext) }
 
     val syncStore: SyncDao by lazy { database.sync() }
+
+    val noteStore: NoteDao by lazy { database.notes() }
 
     val files: BookFiles by lazy { BookFiles(appContext) }
 
