@@ -102,7 +102,7 @@ class JobStore:
 
     # -- lifecycle -----------------------------------------------------------
 
-    def create(self, filename, voice, speed, engine, owner=None) -> dict:
+    def create(self, filename, voice, speed, engine, owner=None, title=None, author=None) -> dict:
         """Register a job and return its manifest. The epub is written separately.
 
         `owner` is a user_id (see app.users.UserStore) or None for a job
@@ -110,6 +110,12 @@ class JobStore:
         before per-user accounts existed, or one made directly against this
         store (tests, scripts). An ownerless job is invisible to regular
         users and visible only to an admin; see app.main._visible.
+
+        `title`/`author` are optional, sent by the app from metadata it
+        already extracted at import time (see SORT_GROUP_LIBRARY.md) --
+        used for the category/genre lookup, not stored anywhere else. A job
+        created without them (an older client, or a direct call from a
+        test/script) simply never gets a category/genre.
         """
         job_id = str(uuid.uuid4())
         (self.jobs_dir / job_id / OUTPUT_DIRNAME).mkdir(parents=True, exist_ok=True)
@@ -132,6 +138,10 @@ class JobStore:
             'sync': None,
             'owner': owner,
             'public': False,
+            'title': title,
+            'author': author,
+            'category': None,
+            'genres': [],
         }
         self.write(job_id, manifest)
         return manifest

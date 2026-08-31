@@ -10,6 +10,7 @@ from unittest import mock
 
 from fastapi.testclient import TestClient
 
+from app.book_metadata import LookupUnavailable
 from app.main import app
 from app.store import JobStore
 from app.users import UserStore
@@ -106,6 +107,69 @@ class UploadTest(ApiTestCase):
         self.assertEqual(response.status_code, 503)
         # A job nothing will ever pick up is worse than no job at all.
         self.assertEqual(self.store.list(), [])
+
+
+class BookMetadataOnUploadTest(ApiTestCase):
+    """The category/genre lookup BackgroundTasks kicks off from create_job --
+    see app.main._resolve_book_metadata. app.main.lookup_book_metadata is
+    always mocked here; it does real network calls otherwise.
+    """
+
+    def test_title_and_author_are_stored_and_trigger_a_lookup(self):
+        with mock.patch('app.main.lookup_book_metadata',
+                        return_value={'category': 'Fiction', 'genres': ['Horror'],
+                                      'source': 'open_library', 'raw': {}}) as lookup:
+            job_id = self.upload(title='The Shining', author='Stephen King').json()['job_id']
+
+        lookup.assert_called_once_with('The Shining', 'Stephen King')
+        body = self.client.get(f'/api/jobs/{job_id}').json()
+        self.assertEqual(body['title'], 'The Shining')
+        self.assertEqual(body['author'], 'Stephen King')
+        self.assertEqual(body['category'], 'Fiction')
+        self.assertEqual(body['genres'], ['Horror'])
+
+    def test_no_title_skips_the_lookup_entirely(self):
+        with mock.patch('app.main.lookup_book_metadata') as lookup:
+            job_id = self.upload().json()['job_id']
+
+        lookup.assert_not_called()
+        body = self.client.get(f'/api/jobs/{job_id}').json()
+        self.assertIsNone(body['category'])
+        self.assertEqual(body['genres'], [])
+
+    def test_a_lookup_that_finds_nothing_leaves_the_job_usable(self):
+        with mock.patch('app.main.lookup_book_metadata', return_value=None):
+            response = self.upload(title='Totally Unfindable Book')
+
+        self.assertEqual(response.status_code, 202)
+        body = self.client.get(f"/api/jobs/{response.json()['job_id']}").json()
+        self.assertIsNone(body['category'])
+        self.assertEqual(body['genres'], [])
+
+    def test_a_second_upload_of_the_same_book_does_not_look_it_up_again(self):
+        with mock.patch('app.main.lookup_book_metadata',
+                        return_value={'category': 'Fiction', 'genres': [], 'source': 'open_library', 'raw': {}}) as lookup:
+            self.upload(title='The Shining', author='Stephen King')
+            self.upload(name='Book Two.epub', title='The Shining', author='Stephen King')
+
+        lookup.assert_called_once()
+
+    def test_a_transient_failure_is_not_cached_and_gets_retried_on_the_next_upload(self):
+        # Regression: an empirically-observed 429 from Google Books' keyless
+        # access must not permanently mark a book as "no genre found" --
+        # the next upload of the same title should try the lookup again.
+        with mock.patch('app.main.lookup_book_metadata', side_effect=LookupUnavailable('boom')) as lookup:
+            job_id = self.upload(title='The Shining', author='Stephen King').json()['job_id']
+
+        body = self.client.get(f'/api/jobs/{job_id}').json()
+        self.assertIsNone(body['category'])
+        self.assertEqual(body['genres'], [])
+
+        with mock.patch('app.main.lookup_book_metadata',
+                        return_value={'category': 'Fiction', 'genres': ['Horror'], 'source': 'open_library', 'raw': {}}) as lookup:
+            self.upload(name='Book Two.epub', title='The Shining', author='Stephen King')
+
+        lookup.assert_called_once()  # not skipped as "already resolved"
 
 
 class UploadLimitTest(ApiTestCase):
@@ -448,6 +512,27 @@ class AdminTest(ApiTestCase):
         self.assertEqual(self.client.get('/api/admin/users').status_code, 403)
         self.assertEqual(
             self.client.post('/api/admin/users', json={'email': 'x@example.com'}).status_code, 403)
+        self.assertEqual(self.client.get('/api/admin/metadata-health').status_code, 403)
+
+    def test_metadata_health_defaults_to_ok_before_any_lookup_has_ever_run(self):
+        _, admin_token = self.make_user('admin@example.com', is_admin=True)
+        self.client.headers['Authorization'] = f'Bearer {admin_token}'
+        body = self.client.get('/api/admin/metadata-health').json()
+        self.assertTrue(body['ok'])
+        self.assertIsNone(body['last_error'])
+
+    def test_metadata_health_reflects_a_recorded_failure(self):
+        # Simulates what app.main._resolve_book_metadata does when
+        # book_metadata.lookup() raises LookupUnavailable -- see
+        # test_book_metadata.py for that path's own unit tests.
+        from app.metadata_health import MetadataHealth
+        MetadataHealth(self.settings.data_dir).record_failure('Gemini unreachable: connection refused')
+
+        _, admin_token = self.make_user('admin@example.com', is_admin=True)
+        self.client.headers['Authorization'] = f'Bearer {admin_token}'
+        body = self.client.get('/api/admin/metadata-health').json()
+        self.assertFalse(body['ok'])
+        self.assertIn('connection refused', body['last_error'])
 
     def test_admin_can_list_every_job_with_owner_email(self):
         job_id = self.upload().json()['job_id']

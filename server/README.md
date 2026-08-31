@@ -19,8 +19,8 @@ Android app ──POST /api/jobs──▶ FastAPI ──▶ Redis ──▶ Cele
 
 | | |
 |---|---|
-| `POST /api/jobs` | multipart: `file` (the .epub), optional `engine`, `voice`, `speed`. `202` with the job. |
-| `GET /api/jobs/{id}` | poll: `status`, `progress` (0-100), `eta`, `chapters_done`, `error`. |
+| `POST /api/jobs` | multipart: `file` (the .epub), optional `engine`, `voice`, `speed`, `title`, `author`. `202` with the job. |
+| `GET /api/jobs/{id}` | poll: `status`, `progress` (0-100), `eta`, `chapters_done`, `error`, `category`, `genres`. |
 | `GET /api/jobs/{id}/audiobook` | the `.m4b`. Supports `Range`, so an interrupted download resumes. |
 | `GET /api/jobs/{id}/sync` | the timing `.json`. |
 | `GET /api/jobs/{id}/epub` | the original upload. Also `Range`-resumable. |
@@ -42,6 +42,7 @@ Admin-only (see "Sharing with others" below):
 | `GET /api/admin/users` | every invited user. |
 | `POST /api/admin/users` | `{"email": str}` — invites a user and emails them a token. |
 | `DELETE /api/admin/users/{user_id}` | revokes a user's access; refuses to delete your own account. |
+| `GET /api/admin/metadata-health` | `{ok, last_error, last_error_at, last_success_at}` for the category/genre lookup — see below. |
 | `GET /download/app` | unauthenticated: serves the APK, for an invitee who has no token yet. |
 
 `status` is one of `queued`, `running`, `done`, `error`. Interactive docs are at
@@ -180,6 +181,8 @@ Everything has a working default; override with environment variables.
 | `REEDD_SMTP_FROM` | `REEDD_SMTP_USER` | |
 | `REEDD_PUBLIC_SERVER_URL` | *(empty)* | the externally-reachable URL, for the `/download/app` link in invite emails |
 | `REEDD_APK_PATH` | *(empty: `/download/app` returns 404)* | path to the APK it serves |
+| `REEDD_GEMINI_API_KEY` | *(empty: every lookup fails, see "Watching for trouble")* | from [Google AI Studio](https://aistudio.google.com/apikey) |
+| `REEDD_GEMINI_MODEL` | `gemini-3.1-flash-lite` | category/genre lookup, see below |
 
 Access itself is invite-only, not an env var — see "Sharing with others"
 above for `create-admin` and the admin-only invite endpoints.
@@ -294,6 +297,46 @@ itself changes to make this work — audiblez, the queue, and the job.json
 lifecycle are exactly as they were; this is purely a question of what the app
 does with a job once it exists.
 
+**Category/genre lookup, for sorting and filtering the library.** The app
+sends `title`/`author` on upload (metadata it already extracted at import
+time); the server asks Gemini (`gemini-3.1-flash-lite` by default) for
+Fiction/Non-fiction plus a confidence-scored list of genre tags from a
+fixed vocabulary (`app/llm_metadata.py`) — only tags scored 7+ (of 10) are
+kept. **Requires `REEDD_GEMINI_API_KEY`** — unlike everything else this
+server talks to, this is a real credential, not a keyless public API; an
+unconfigured key makes every lookup fail (see "Watching for trouble"
+below) rather than silently doing nothing. Nothing is queried if the app
+didn't send a title. The lookup is a network-bound call, not CPU-bound
+TTS work, so it runs via FastAPI's `BackgroundTasks` right after the
+upload response is sent — it does not touch Celery's worker or its single
+`--concurrency` slot, and often finishes well before the conversion
+itself does. Every result (including "nothing found") is cached forever
+in `data/book_metadata.json`, keyed by a normalized title+author pair, so
+the same book is never looked up twice even across different users'
+uploads. See `app/book_metadata.py`, `app/llm_metadata.py`, and
+`LLM_GENRE_ENRICHMENT.md` for the full design and the live experimentation
+(across several models and approaches) behind it — including why Open
+Library and Google Books, an earlier version of this feature, were
+removed rather than kept as a fallback.
+
+**Watching for trouble.** Gemini is the *only* source now — there is no
+second one to quietly fall back to if it breaks. `GET /api/admin/
+metadata-health` (surfaced as a warning banner on the app's Admin screen)
+reports whether the most recent real lookup attempt succeeded; a bad or
+revoked API key, an exhausted quota, or a deprecated model name (Google
+has fully removed model versions with only a `404` pointing at their
+replacement, more than once during this feature's own development) all
+show up there rather than as a silent "books never get tagged."
+
+A job converted before this feature existed has no title/author at all, so
+it never gets a category/genre on its own. `python -m app.backfill_metadata`
+(`--dry-run` to preview first) is a one-off fix for that backlog: it reads
+title/author straight out of each such job's own stored epub (`app/
+epub_meta.py`) and runs the same lookup. Safe to re-run — a job that
+already has a category/genres is skipped unless `--recheck` is passed,
+which re-resolves everything (bypassing the cache too) — useful after a
+prompt/vocabulary change like the Open-Library-to-Gemini switch itself.
+
 ## Known gaps
 
 - **A worker killed mid-job leaves the manifest at `running` forever.** Celery's
@@ -323,7 +366,7 @@ does with a job once it exists.
 cd server && ../audiblez/.venv/bin/python -m unittest discover
 ```
 
-124 tests, no Redis, no network, no TTS stack: the queue is stubbed and the
+179 tests, no Redis, no network, no TTS stack: the queue is stubbed and the
 worker runs against a fake audiblez. To also convert `sample-short.epub` for
 real (needs torch/kokoro/spacy/ffmpeg, ~15s):
 

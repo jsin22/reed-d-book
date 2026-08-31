@@ -14,7 +14,8 @@ ENV_KEYS = ('REEDD_DATA_DIR', 'REEDD_MAX_UPLOAD_BYTES',
             'REEDD_KEEP_INTERMEDIATE', 'REEDD_DEFAULT_VOICE',
             'REEDD_SMTP_HOST', 'REEDD_SMTP_PORT', 'REEDD_SMTP_USER',
             'REEDD_SMTP_APP_PASSWORD', 'REEDD_SMTP_FROM',
-            'REEDD_PUBLIC_SERVER_URL', 'REEDD_APK_PATH')
+            'REEDD_PUBLIC_SERVER_URL', 'REEDD_APK_PATH',
+            'REEDD_GEMINI_API_KEY', 'REEDD_GEMINI_MODEL')
 
 
 def epub_bytes(name='chapter1.xhtml', body=b'<html><body><p>Hello.</p></body></html>'):
@@ -24,6 +25,35 @@ def epub_bytes(name='chapter1.xhtml', body=b'<html><body><p>Hello.</p></body></h
         z.writestr('mimetype', 'application/epub+zip')
         z.writestr(name, body)
     return buf.getvalue()
+
+
+def epub_with_metadata(title=None, author=None):
+    """A real, ebooklib-readable epub with DC title/creator metadata set (or
+    left unset) -- for app.epub_meta, which reads OPF metadata that
+    `epub_bytes`'s bare zip does not have. Built by round-tripping through
+    ebooklib's own writer rather than hand-written OPF XML, so this cannot
+    drift from what ebooklib actually produces/expects.
+    """
+    from ebooklib import epub
+
+    book = epub.EpubBook()
+    if title:
+        book.set_title(title)
+    if author:
+        book.add_author(author)
+    book.set_language('en')
+    chapter = epub.EpubHtml(title='Chapter 1', file_name='chap1.xhtml', lang='en')
+    chapter.content = '<html><body><p>Hello.</p></body></html>'
+    book.add_item(chapter)
+    book.add_item(epub.EpubNcx())
+    book.add_item(epub.EpubNav())
+    book.spine = ['nav', chapter]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, 'book.epub')
+        epub.write_epub(path, book)
+        with open(path, 'rb') as f:
+            return f.read()
 
 
 class TempDataDirTestCase(unittest.TestCase):

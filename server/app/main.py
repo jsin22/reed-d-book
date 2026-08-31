@@ -4,7 +4,11 @@
 The contract the Android app codes against:
 
     POST   /api/jobs                    upload an .epub  -> 202 {job_id, status}
-    GET    /api/jobs/{job_id}           poll             -> {status, progress, eta, ...}
+                                         (optional title/author form fields feed
+                                         a background category/genre lookup --
+                                         see SORT_GROUP_LIBRARY.md)
+    GET    /api/jobs/{job_id}           poll             -> {status, progress, eta,
+                                         category, genres, ...}
     GET    /api/jobs/{job_id}/audiobook the .m4b         (Range-resumable)
     GET    /api/jobs/{job_id}/sync      the timing .json
     GET    /api/jobs/{job_id}/epub      the original upload (Range-resumable)
@@ -40,15 +44,18 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel
 
 from .audiblez_meta import (DEFAULT_VOICE_BY_ENGINE, ENGINES, MAX_SPEED, MIN_SPEED,
                             known_voices)
+from .book_metadata import LookupUnavailable, lookup as lookup_book_metadata
+from .book_metadata_store import BookMetadataStore
 from .celery_app import enqueue, revoke
 from .config import get_settings
 from .mailer import invite_configured, send_invite
+from .metadata_health import MetadataHealth
 from .store import (DONE, TERMINAL_STATUSES, JobNotFound, JobStore, UploadTooLarge,
                     looks_like_epub)
 from .users import UserNotFound, UserStore
@@ -60,6 +67,7 @@ app = FastAPI(
 )
 
 invite_log = logging.getLogger('reedd.mail')
+book_metadata_log = logging.getLogger('reedd.book_metadata')
 
 
 def store() -> JobStore:
@@ -68,6 +76,14 @@ def store() -> JobStore:
 
 def users() -> UserStore:
     return UserStore(get_settings().data_dir)
+
+
+def book_metadata() -> BookMetadataStore:
+    return BookMetadataStore(get_settings().data_dir)
+
+
+def metadata_health() -> MetadataHealth:
+    return MetadataHealth(get_settings().data_dir)
 
 
 def require_user(authorization: str = Header(default='')) -> dict:
@@ -230,17 +246,53 @@ def voice_sample(voice: str, engine: str | None = None, user: dict = Depends(req
     return FileResponse(path, media_type='audio/wav', filename=path.name)
 
 
+def _resolve_book_metadata(job_id: str, title: str | None, author: str | None) -> None:
+    """Category/genre lookup, run via BackgroundTasks after create_job's 202
+    is already sent -- a network-bound lookup has no more business blocking
+    an upload response than TTS synthesis has running in this process at
+    all. See SORT_GROUP_LIBRARY.md.
+    """
+    if not title:
+        return
+    cache = book_metadata()
+    cached = cache.get(title, author)
+    if cached is None:
+        try:
+            result = lookup_book_metadata(title, author)
+        except LookupUnavailable as e:
+            # Every source failed at the request level -- not the same as a
+            # genuine "nothing found", so this must not be cached: caching
+            # it would mean this book can never be looked up again. Leave
+            # it unresolved; a future upload of the same book tries fresh.
+            book_metadata_log.info('lookup unavailable: %s', e)
+            return
+        cache.put(title, author, result)
+        cached = cache.get(title, author)
+    try:
+        store().update(job_id, category=cached['category'], genres=cached['genres'])
+    except JobNotFound:
+        pass  # deleted or cancelled before the lookup finished
+
+
 @app.post('/api/jobs', status_code=202)
-def create_job(file: UploadFile = File(...),
+def create_job(background_tasks: BackgroundTasks,
+               file: UploadFile = File(...),
                voice: str = Form(default=None),
                speed: float = Form(default=None),
                engine: str = Form(default=None),
+               title: str = Form(default=None),
+               author: str = Form(default=None),
                user: dict = Depends(require_user)):
     """Accept an .epub and queue it. Returns immediately with the job's id.
 
     Deliberately synchronous (`def`, not `async def`) so Starlette runs it in a
     worker thread: the upload is written with blocking I/O in 1 MB chunks, and
     a 200 MB book must not stall the event loop.
+
+    `title`/`author` are optional, sent by the app from metadata it already
+    extracted at import time -- used only to kick off a best-effort
+    category/genre lookup in the background (see SORT_GROUP_LIBRARY.md),
+    not stored or validated beyond that.
     """
     settings = get_settings()
     engine = engine or settings.default_engine
@@ -260,8 +312,10 @@ def create_job(file: UploadFile = File(...),
         raise HTTPException(status_code=400, detail='expected a .epub file')
 
     jobs = store()
-    manifest = jobs.create(file.filename, voice, speed, engine, owner=user['user_id'])
+    manifest = jobs.create(file.filename, voice, speed, engine, owner=user['user_id'],
+                           title=title, author=author)
     job_id = manifest['job_id']
+    background_tasks.add_task(_resolve_book_metadata, job_id, title, author)
     try:
         jobs.save_upload(job_id, file.file, settings.max_upload_bytes)
     except UploadTooLarge:
@@ -467,6 +521,17 @@ def admin_list_users():
     return {'users': [{'user_id': u['user_id'], 'email': u['email'],
                         'is_admin': u['is_admin'], 'created_at': u['created_at']}
                        for u in users().list()]}  # token_hash never leaves the server
+
+
+@app.get('/api/admin/metadata-health', dependencies=[Depends(require_admin)])
+def admin_metadata_health():
+    """Whether the category/genre lookup (Gemini, see LLM_GENRE_ENRICHMENT.md)
+    is currently working -- unlike the sources it replaced, there is no
+    second one to quietly fall back to if this breaks, so the admin screen
+    surfaces it directly rather than letting "books never get tagged"
+    happen with no visible reason why.
+    """
+    return metadata_health().status()
 
 
 @app.post('/api/admin/users', status_code=201)

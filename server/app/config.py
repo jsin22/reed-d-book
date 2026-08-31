@@ -46,6 +46,8 @@ class Settings:
     smtp_from: str
     public_server_url: str
     apk_path: str
+    gemini_api_key: str
+    gemini_model: str
 
     @property
     def jobs_dir(self) -> Path:
@@ -109,6 +111,13 @@ def load_settings() -> Settings:
         # Path to the APK served at GET /download/app. Empty disables that
         # route (404) rather than serving nothing silently.
         apk_path=_env('APK_PATH', ''),
+        # Gemini is the sole source for category/genre lookups (see
+        # app/llm_metadata.py, LLM_GENRE_ENRICHMENT.md) -- unlike every
+        # other source this project has used, this one needs a real
+        # credential; an empty key makes every lookup raise
+        # LookupUnavailable rather than silently doing nothing.
+        gemini_api_key=_env('GEMINI_API_KEY', ''),
+        gemini_model=_env('GEMINI_MODEL', 'gemini-3.1-flash-lite'),
     )
 
 
