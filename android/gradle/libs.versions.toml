@@ -47,6 +47,16 @@ jsoup = "1.22.2"
 readium = "3.3.0"
 media3 = "1.11.0"
 
+# Decompresses the bundled dictionary at first use -- zstd -19 shrinks it to
+# roughly a third the size of the APK's own deflate compression, which is
+# worth the native-library cost only because it's read once per install (see
+# Dictionary.kt's own extractIfNeeded doc for the actual measured numbers).
+# Confirmed live on a real device that 1.5.6-8's own Android-vs-desktop-Linux
+# runtime detection misfires (it saw the underlying Linux kernel + aarch64 CPU
+# and assumed generic desktop Linux, not Android's own, differently-linked
+# aarch64 build) -- newest available, in case a later release fixed it.
+zstd = "1.5.7-16"
+
 junit = "4.13.2"
 robolectric = "4.16.1"
 androidxTestCore = "1.7.0"
@@ -98,6 +108,10 @@ kotlinx-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-t
 coil-compose = { module = "io.coil-kt.coil3:coil-compose", version.ref = "coil" }
 
 jsoup = { module = "org.jsoup:jsoup", version.ref = "jsoup" }
+# No zstd-jni alias here: both dependencies on it (app/build.gradle.kts) use
+# raw coordinate notation instead, since each needs a different explicit
+# artifact classifier (@aar vs @jar) that a plain catalog alias can't carry --
+# see the comments at each of those two dependency declarations for why.
 
 # Audiobook playback. media3-session is what provides the lockscreen and
 # notification controls, and the headset/Bluetooth buttons, for free.

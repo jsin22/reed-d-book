@@ -159,11 +159,21 @@ fun DefinitionSheet(state: DefinitionState, onDismiss: () -> Unit) {
                 .verticalScroll(rememberScrollState())
                 .padding(start = 24.dp, end = 24.dp, bottom = 32.dp),
         ) {
-            Text(
-                state.definition?.word ?: state.word,
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.SemiBold,
-            )
+            Row(verticalAlignment = Alignment.Bottom) {
+                Text(
+                    state.definition?.word ?: state.word,
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                state.definition?.pronunciation?.let {
+                    Text(
+                        it,
+                        modifier = Modifier.padding(start = 8.dp, bottom = 2.dp),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
             // Say so when the word was looked up under a different form, or the
             // headword looks like a mistake rather than a lemma.
             state.definition?.takeIf { it.word != it.queried }?.let {
@@ -198,12 +208,21 @@ fun DefinitionSheet(state: DefinitionState, onDismiss: () -> Unit) {
                             "${i + 1}. ${sense.definition}",
                             style = MaterialTheme.typography.bodyMedium,
                         )
+                        if (sense.synonyms.isNotEmpty()) {
+                            Text(
+                                "Synonyms: " + sense.synonyms.joinToString(", "),
+                                modifier = Modifier.padding(top = 2.dp),
+                                style = MaterialTheme.typography.bodySmall,
+                                fontStyle = FontStyle.Italic,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
                     }
                 }
             }
 
             Text(
-                "WordNet 3.0, Princeton University",
+                "Wiktionary contributors, CC BY-SA 4.0",
                 modifier = Modifier.padding(top = 24.dp),
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,

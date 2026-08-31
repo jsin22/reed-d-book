@@ -76,23 +76,38 @@ Kept rather than deleted: several of these record a decision worth remembering.
   shifting the page on every tap. Follow state is the crosshair's tint now; alignment
   quality lives on the book's detail screen.
 
-**The dictionary is WordNet 3.0, bundled in the APK** (10.5 MB of data, ~5 MB
-compressed) so it works with no network at all. Its licence permits redistribution
-provided the copyright notice ships with it, which it does, in
+**The dictionary is a filtered extract of Wiktionary, bundled in the APK**
+(~42 MB of data) so it works with no network at all. Its licence (CC BY-SA 4.0)
+permits redistribution provided attribution ships with it, which it does, in
 `assets/dictionary-LICENSE.txt` and credited in the definition sheet.
-`tools/build_dictionary.py` rebuilds the database from the WordNet release, so the
-asset is reproducible rather than a mystery blob.
+`tools/build_dictionary_wiktionary.py` rebuilds the database from the kaikki.org
+Wiktionary extraction, so the asset is reproducible rather than a mystery blob.
 
-Two details worth keeping:
+Was WordNet 3.0 (10.5 MB) until 2026-08-31: WordNet is a lexical-semantic database
+of content words, not a general dictionary, so it had no entry at all for "the" and
+other function words, and — the actual reported bug — "he" resolved to a rare noun
+sense for the chemical symbol of helium, with no pronoun sense (WordNet has no part
+of speech for pronouns) to outrank it. Wiktionary covers both properly, and adds a
+handful of synonyms per sense, shown in the definition sheet, that the switch
+picked up for free from the same source data.
 
-- **Storage is normalised** — words point at shared synsets. A definition belongs to a
-  synset shared by several words, so storing it per word roughly trebled the file.
-  Multi-word entries were dropped too: tapping one word can never match "united
-  states of america".
+Three details worth keeping:
+
+- **A word's `glosses` array is a breadcrumb through nested sub-senses, not
+  separate definitions.** Joining the whole list for "the" or a common verb like
+  "run" produced near-duplicate text per sense (every sibling repeating the same
+  broad parent clause before its own specific ending) — only the last, most
+  specific element is kept.
+- **A word is capped to 8 shown senses in total, not per part of speech.**
+  Wiktionary distinguishes pronoun/determiner/article/interjection/... far more
+  finely than WordNet's noun/verb/adjective/adverb ever did, so a word like "a" or
+  "he" spans many more parts of speech — capped per (word, part of speech) alone,
+  it would return dozens of rows.
 - **The literal word wins over its stem.** "computing" and "better" are entries in
   their own right, so a reader tapping them gets *those* definitions, not "compute"
-  and "good". Inflections fall back to WordNet's exception lists ("went" → "go",
-  "mice" → "mouse") and then to suffix rules.
+  and "good". Inflections fall back to the bundled forms table ("went" → "go",
+  "mice" → "mouse", built from Wiktionary's own tagged inflections) and then to
+  suffix rules.
 
 <details>
 <summary>Original request</summary>

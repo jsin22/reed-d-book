@@ -6,9 +6,11 @@ package dev.reedd.data.dictionary
  * A reader taps "nodded", "children" or "running"; the dictionary holds "nod",
  * "child" and "run". Two mechanisms, in order:
  *
- *  * **irregular forms**, from WordNet's own exception lists, which is the only way
- *    to get "went" to "go" — no rule will do it;
- *  * **suffix rules**, WordNet's Morphy detachment rules, for the regular cases.
+ *  * **irregular forms**, from the bundled dictionary's own `forms` table (built
+ *    from Wiktionary's tagged inflections), which is the only way to get "went"
+ *    to "go" — no rule will do it;
+ *  * **suffix rules**, Morphy-style detachment rules (the same shape WordNet's own
+ *    morphological processor used), for the regular cases.
  *
  * Candidates are returned in order of likelihood rather than resolved outright: the
  * caller tries each against the database and takes the first that exists, which
@@ -18,7 +20,7 @@ package dev.reedd.data.dictionary
 object Lemmatizer {
 
     /**
-     * WordNet's detachment rules: suffix to strip, and what to put back.
+     * Morphological detachment rules: suffix to strip, and what to put back.
      * Order matters — longer, more specific suffixes first.
      */
     private val RULES = listOf(

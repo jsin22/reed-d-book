@@ -69,6 +69,30 @@ val generateBuildInfo = tasks.register<GenerateBuildInfoTask>("generateBuildInfo
     outputs.upToDateWhen { false }
 }
 
+/**
+ * Decompresses the bundled zstd dictionary asset once, at build time, using
+ * the system `zstd` binary -- entirely outside any JVM, and specifically
+ * outside Robolectric's, which is the whole point: see [Dictionary]'s own
+ * `preDecompressed` docstring for why zstd-jni itself can't run inside a
+ * Robolectric-hosted unit test. Its output path is handed to the test JVM as
+ * a system property (wired below, on the unit test tasks themselves) rather
+ * than added as a source/resources directory, since `Dictionary` reads it as
+ * a plain [java.io.File] path, not a classpath resource.
+ */
+val testDictionaryFile = layout.buildDirectory.file("generated/testDictionary/dictionary.db")
+// Resolved and created eagerly, at configuration time -- a `doFirst {}`
+// closure here would capture this script's own `testDictionaryFile`/`layout`
+// references, which the configuration cache's serializer rejects outright
+// ("cannot serialize Gradle script object references"). A plain, idempotent
+// mkdir at configuration time sidesteps that; it's cheap enough not to matter.
+val testDictionaryOutputFile = testDictionaryFile.get().asFile.also { it.parentFile.mkdirs() }
+val extractTestDictionary = tasks.register<Exec>("extractTestDictionary") {
+    val zstAsset = layout.projectDirectory.file("src/main/assets/dictionary.db.zst")
+    inputs.file(zstAsset)
+    outputs.file(testDictionaryOutputFile)
+    commandLine("zstd", "-d", "-f", "-q", zstAsset.asFile.path, "-o", testDictionaryOutputFile.path)
+}
+
 android {
     namespace = "dev.reedd"
     compileSdk = libs.versions.compileSdk.get().toInt()
@@ -80,6 +104,16 @@ android {
         versionCode = 1
         versionName = "0.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        // zstd-jni ships native libraries for arm64-v8a, armeabi-v7a, x86 and
+        // x86_64; every real phone this app is sideloaded onto is arm64, and
+        // bundling all four in one APK (there is no Play-style per-ABI split
+        // set up here) would quadruple that dependency's actual on-device
+        // cost for nothing. Revisit if this is ever installed on something
+        // other than a real arm64 phone (an x86_64 emulator, notably).
+        ndk {
+            abiFilters += "arm64-v8a"
+        }
     }
 
     buildTypes {
@@ -98,6 +132,14 @@ android {
     buildFeatures {
         compose = true
         buildConfig = true
+    }
+
+    // The bundled dictionary ships pre-compressed with zstd (see Dictionary.kt);
+    // AAPT's own deflate pass over already-high-entropy zstd output does nothing
+    // but spend build time re-trying compression that can't shrink it further --
+    // this tells the packager to store that one asset as-is instead.
+    androidResources {
+        noCompress += "zst"
     }
 
     // Readium targets Java 17, and both readium-shared and readium-streamer
@@ -141,6 +183,16 @@ kotlin {
         // sprinkling @OptIn over every call site; their own test app does the same.
         freeCompilerArgs.add("-opt-in=org.readium.r2.shared.ExperimentalReadiumApi")
     }
+}
+
+// Every unit test task gets the pre-decompressed dictionary's path (see
+// extractTestDictionary above) as a system property DictionaryTest reads
+// directly -- applies to all of them (`testDebugUnitTest`, etc.) rather than
+// naming one by hand, and via `tasks.withType` so it also covers whichever
+// variant's unit test task actually runs.
+tasks.withType<Test>().configureEach {
+    dependsOn(extractTestDictionary)
+    systemProperty("reedd.testDictionaryPath", testDictionaryFile.get().asFile.path)
 }
 
 // Room's generated schema, checked in so migrations are reviewable in diffs.
@@ -195,6 +247,19 @@ dependencies {
     implementation(libs.coil.compose)
     // Reads epub resource text for the read-along aligner.
     implementation(libs.jsoup)
+    // Decompresses the bundled dictionary asset -- see Dictionary.kt.
+    // `@aar` is required, not cosmetic: zstd-jni's POM declares plain
+    // `<packaging>jar</packaging>` with no Gradle Module Metadata, so nothing
+    // tells Gradle/AGP to prefer its separately-published .aar over the
+    // default .jar -- confirmed live: without this, the app shipped the
+    // plain multi-platform jar (bundling desktop darwin/win natives as inert
+    // loose files, since AGP doesn't recognize their paths as installable
+    // native libraries) with *no* native library packaged for Android at
+    // all, and every real-device decompression failed with
+    // `UnsatisfiedLinkError`. The .aar's `jni/arm64-v8a/*.so` is what AGP
+    // actually knows how to install into the APK's own native library
+    // directory, matching this module's own `ndk.abiFilters`.
+    implementation("com.github.luben:zstd-jni:${libs.versions.zstd.get()}@aar")
 
     implementation(libs.media3.exoplayer)
     implementation(libs.media3.session)
@@ -212,4 +277,17 @@ dependencies {
     testImplementation(libs.okhttp.mockwebserver)
     testImplementation(libs.androidx.room.testing)
     testImplementation(libs.androidx.work.testing)
+
+    // DictionaryTest runs zstd-jni for real against the actual bundled asset
+    // (see Dictionary.kt), on the host JVM under Robolectric -- not an
+    // Android device. The `implementation(...@aar)` above resolves the AAR,
+    // whose native library is arm64-v8a Android-only (matches this module's
+    // own `ndk.abiFilters`) and can't be loaded by a plain desktop JVM at all;
+    // without this, every DictionaryTest failed with
+    // `UnsupportedOperationException` at `ZstdInputStream`'s own constructor,
+    // not even getting as far as a native-linking error. `@jar` pins
+    // resolution to zstd-jni's plain (non-AAR) published artifact, which
+    // bundles desktop natives (linux-x86_64 among them) alongside the same
+    // Android ones -- present here only for the test classpath, not the app.
+    testImplementation("com.github.luben:zstd-jni:${libs.versions.zstd.get()}@jar")
 }

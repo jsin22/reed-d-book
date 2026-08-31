@@ -1,31 +1,25 @@
-WordNet Release 3.0
+This dictionary's definitions and synonyms are derived from Wiktionary
+(https://en.wiktionary.org), via the machine-readable extraction published
+at https://kaikki.org/dictionary/English/ (Tatu Ylonen, "Wiktextract:
+Wiktionary as Machine-Readable Structured Data", Proceedings of the 13th
+Conference on Language Resources and Evaluation (LREC), pp. 1317-1325,
+Marseille, 20-25 June 2022).
 
-This software and database is being provided to you, the LICENSEE, by  
-Princeton University under the following license.  By obtaining, using  
-and/or copying this software and database, you agree that you have  
-read, understood, and will comply with these terms and conditions.:  
-  
-Permission to use, copy, modify and distribute this software and  
-database and its documentation for any purpose and without fee or  
-royalty is hereby granted, provided that you agree to comply with  
-the following copyright notice and statements, including the disclaimer,  
-and that the same appear on ALL copies of the software, database and  
-documentation, including modifications that you make for internal  
-use or for distribution.  
-  
-WordNet 3.0 Copyright 2006 by Princeton University.  All rights reserved.  
-  
-THIS SOFTWARE AND DATABASE IS PROVIDED "AS IS" AND PRINCETON  
-UNIVERSITY MAKES NO REPRESENTATIONS OR WARRANTIES, EXPRESS OR  
-IMPLIED.  BY WAY OF EXAMPLE, BUT NOT LIMITATION, PRINCETON  
-UNIVERSITY MAKES NO REPRESENTATIONS OR WARRANTIES OF MERCHANT-  
-ABILITY OR FITNESS FOR ANY PARTICULAR PURPOSE OR THAT THE USE  
-OF THE LICENSED SOFTWARE, DATABASE OR DOCUMENTATION WILL NOT  
-INFRINGE ANY THIRD PARTY PATENTS, COPYRIGHTS, TRADEMARKS OR  
-OTHER RIGHTS.  
-  
-The name of Princeton University or Princeton may not be used in  
-advertising or publicity pertaining to distribution of the software  
-and/or database.  Title to copyright in this software, database and  
-any associated documentation shall at all times remain with  
-Princeton University and LICENSEE agrees to preserve same.  
+Wiktionary's text content is available under the Creative Commons
+Attribution-ShareAlike 4.0 International License (CC BY-SA 4.0):
+
+    https://creativecommons.org/licenses/by-sa/4.0/
+
+and, for content predating that license's adoption, the GNU Free
+Documentation License (GFDL). Both require attribution and share-alike
+redistribution of any modified or extracted copies, which this notice and
+the CC BY-SA 4.0 license text (linked above) together satisfy.
+
+Wiktionary itself is a project of the Wikimedia Foundation and is written
+collaboratively by volunteers; no endorsement of this app by the Wikimedia
+Foundation, Wiktionary's contributors, or kaikki.org is implied.
+
+This is a filtered, reformatted extract of that data (a bounded number of
+senses and synonyms per word, re-encoded into a compact local database for
+offline lookup on a phone) -- not a complete or verbatim copy of
+Wiktionary.
