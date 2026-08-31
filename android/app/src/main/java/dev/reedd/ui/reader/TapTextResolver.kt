@@ -36,8 +36,11 @@ data class TappedWord(
  */
 object TapTextResolver {
 
-    /** Applied by [resolve]; cleared by [clearHighlight]. */
-    private const val HIGHLIGHT_NAME = "reedd-word"
+    /** Applied by [resolve]; cleared by [clearHighlight]. Not private:
+     *  [SelectionTextResolver] repaints this same highlight as a drag
+     *  extends a selection, rather than using a second one, so [clearHighlight]
+     *  already works unchanged for that case too. */
+    internal const val HIGHLIGHT_NAME = "reedd-word"
 
     /**
      * How far, in CSS pixels, a tap may sit outside the word `caretRangeFromPoint`
@@ -54,6 +57,90 @@ object TapTextResolver {
     suspend fun resolve(fragment: EpubNavigatorFragment, x: Float, y: Float): TappedWord? {
         val raw = runCatching { fragment.evaluateJavascript(script(x, y)) }.getOrNull() ?: return null
         return parse(raw)
+    }
+
+    /**
+     * Paints [HIGHLIGHT_NAME] over a passage found by its stored text --
+     * for jumping to a note from [NotesSheet] and showing what was actually
+     * highlighted, not just which page it's on. No handles, no menu: this
+     * is display-only, cleared the same way a tap's highlight already is
+     * (a plain tap elsewhere, or the next word tapped).
+     *
+     * Finds the passage by searching the resource's own text for `before +
+     * text + after` verbatim first (the same context a tap/drag-extended
+     * note locator already stores, disambiguating a word or phrase that
+     * repeats in the same chapter), falling back to matching [text] alone
+     * if that exact concatenation isn't found -- block-boundary whitespace
+     * can differ subtly from how [before]/[after] were originally sliced
+     * out of a single block's `textContent`, so demanding an exact context
+     * match is worth relaxing rather than silently failing to highlight
+     * anything.
+     */
+    suspend fun highlightPassage(fragment: EpubNavigatorFragment, text: String, before: String, after: String): Boolean {
+        val raw = runCatching { fragment.evaluateJavascript(highlightScript(text, before, after)) }.getOrNull()
+            ?: return false
+        return raw.trim().trim('"') == "true"
+    }
+
+    private fun highlightScript(text: String, before: String, after: String): String {
+        // JSONObject.quote produces a properly escaped, quoted JS string
+        // literal -- required here since, unlike every other script in this
+        // file/SelectionTextResolver, these values are arbitrary stored note
+        // text (can contain quotes, backslashes, newlines), not numbers.
+        val textLit = JSONObject.quote(text)
+        val beforeLit = JSONObject.quote(before)
+        val afterLit = JSONObject.quote(after)
+        return """
+            (function() {
+              try {
+                var text = $textLit, before = $beforeLit, after = $afterLit;
+                var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+                var nodes = [];
+                var full = '';
+                var node;
+                while (node = walker.nextNode()) {
+                  nodes.push({ node: node, start: full.length });
+                  full += node.data;
+                }
+                var idx = full.indexOf(before + text + after);
+                var matchStart, matchEnd;
+                if (idx >= 0) {
+                  matchStart = idx + before.length;
+                  matchEnd = matchStart + text.length;
+                } else {
+                  idx = full.indexOf(text);
+                  if (idx < 0) { return false; }
+                  matchStart = idx;
+                  matchEnd = idx + text.length;
+                }
+                var locate = function(charIndex) {
+                  for (var i = nodes.length - 1; i >= 0; i--) {
+                    if (nodes[i].start <= charIndex) {
+                      return { node: nodes[i].node, offset: charIndex - nodes[i].start };
+                    }
+                  }
+                  return null;
+                };
+                var start = locate(matchStart), end = locate(matchEnd);
+                if (!start || !end) { return false; }
+                var range = document.createRange();
+                range.setStart(start.node, start.offset);
+                range.setEnd(end.node, end.offset);
+                if (!(window.CSS && CSS.highlights)) { return false; }
+                if (!document.getElementById('reedd-highlight-style')) {
+                  var style = document.createElement('style');
+                  style.id = 'reedd-highlight-style';
+                  style.textContent =
+                    '::highlight($HIGHLIGHT_NAME) { background-color: rgba(255, 196, 0, 0.45); }';
+                  document.head.appendChild(style);
+                }
+                CSS.highlights.set('$HIGHLIGHT_NAME', new Highlight(range));
+                return true;
+              } catch (e) {
+                return false;
+              }
+            })();
+        """.trimIndent()
     }
 
     /** Removes the word highlight, e.g. when the menu is dismissed. */

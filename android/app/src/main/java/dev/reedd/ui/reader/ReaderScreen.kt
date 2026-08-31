@@ -49,7 +49,10 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.style.TextOverflow
@@ -62,7 +65,11 @@ import androidx.fragment.app.FragmentActivity
 import androidx.fragment.compose.AndroidFragment
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -214,7 +221,23 @@ fun ReaderScreen(
                 // mode gets its final height on the first layout pass instead of a
                 // second, later one. Only for a book that actually has audio; a
                 // plain epub reads as before.
-                if (book?.isPlayable == true && !immersive) {
+                // A tapped word/selection takes this whole slot over from the
+                // transport controls -- see WordMenuBar's own docstring for why
+                // this, not a popup floating near the text, is where the menu
+                // lives now. Not gated on !immersive the way ReadAlongBar is
+                // below: a tap still resolves a word regardless of immersive
+                // state (see onTap further down), so its menu has to stay
+                // reachable too.
+                val menuTarget = tappedWord
+                if (menuTarget != null) {
+                    WordMenuBar(
+                        target = menuTarget,
+                        onReadFromHere = readAlongViewModel::readFromTappedWord,
+                        onDefine = readAlongViewModel::defineTappedWord,
+                        onNotes = readAlongViewModel::openNoteEditor,
+                        onDismiss = readAlongViewModel::dismissWordMenu,
+                    )
+                } else if (book?.isPlayable == true && !immersive) {
                     ReadAlongBar(
                         state = readAlong,
                         onTogglePlay = readAlongViewModel::togglePlayPause,
@@ -310,22 +333,6 @@ fun ReaderScreen(
             }
         }
 
-        // The menu for a tapped word, positioned beside the word itself. A
-        // long-press selection's equivalent menu is the native selection
-        // toolbar instead (see SelectionMenuAction's own docstring for why
-        // -- selection, its drag handles, and the toolbar turned out to be
-        // one bundled system in this WebView, not independently
-        // controllable, after four different attempts at unifying the two).
-        (tappedWord as? WordMenuTarget.Tap)?.let { target ->
-            WordMenu(
-                target = target,
-                onReadFromHere = readAlongViewModel::readFromTappedWord,
-                onDefine = readAlongViewModel::defineTappedWord,
-                onNotes = readAlongViewModel::openNoteEditor,
-                onDismiss = readAlongViewModel::dismissWordMenu,
-            )
-        }
-
         definition?.let { current ->
             DefinitionSheet(state = current, onDismiss = readAlongViewModel::dismissDefinition)
         }
@@ -355,7 +362,11 @@ fun ReaderScreen(
         }
 
         if (showNotes) {
-            NotesSheet(viewModel = notesViewModel, onDismiss = { showNotes = false })
+            NotesSheet(
+                viewModel = notesViewModel,
+                readAlongViewModel = readAlongViewModel,
+                onDismiss = { showNotes = false },
+            )
         }
 
     } // ReaderPalette
@@ -365,10 +376,11 @@ fun ReaderScreen(
  * A [WordMenuTarget] turned into a [PendingNote], ready to become a
  * [dev.reedd.data.db.NoteEntity] once the reader saves it.
  *
- * A selection already carries its own Readium-resolved [Locator]; a tap
- * needs one built from what [TapTextResolver] found (see
- * [dev.reedd.domain.NoteLocators.tapLocator]) -- null if the resource it
- * pointed at can no longer be resolved against the publication.
+ * Both variants need a [Locator] built from plain resolved data -- a tap
+ * from what [TapTextResolver] found (see [NoteLocators.tapLocator]), an
+ * extended selection from what [SelectionTextResolver] found (see
+ * [NoteLocators.extendedLocator]) -- null if the resource either pointed at
+ * can no longer be resolved against the publication.
  */
 private fun buildPendingNote(publication: Publication, target: WordMenuTarget): PendingNote? = when (target) {
     is WordMenuTarget.Tap -> {
@@ -391,12 +403,24 @@ private fun buildPendingNote(publication: Publication, target: WordMenuTarget): 
         )
     }
 
-    is WordMenuTarget.Selection -> PendingNote(
-        quotedText = target.quotedText,
-        resourceHref = target.locator.href.toString(),
-        locatorJson = target.locator.toJSON().toString(),
-        progression = target.locator.locations.progression,
-    )
+    is WordMenuTarget.ExtendedSelection -> {
+        val locator = NoteLocators.extendedLocator(
+            publication = publication,
+            resourceHref = target.resourceHref,
+            text = target.text,
+            before = target.before,
+            after = target.after,
+            progression = target.progression,
+        )
+        locator?.let {
+            PendingNote(
+                quotedText = target.text,
+                resourceHref = target.resourceHref,
+                locatorJson = it.toJSON().toString(),
+                progression = target.progression,
+            )
+        }
+    }
 }
 
 /**
@@ -411,6 +435,10 @@ private fun buildPendingNote(publication: Publication, target: WordMenuTarget): 
 private fun ReaderPalette(paper: Boolean, content: @Composable () -> Unit) {
     if (paper) MaterialTheme(colorScheme = paperColorScheme(), content = content) else content()
 }
+
+/** One [SelectionTextResolver.extend] call's worth of input -- both
+ *  endpoints, in CSS px. See the `extendRequests` flow in [EpubNavigator]. */
+private data class ExtendRequest(val startX: Float, val startY: Float, val endX: Float, val endY: Float)
 
 @Composable
 private fun EpubNavigator(
@@ -436,10 +464,16 @@ private fun EpubNavigator(
     // enough to send "Read from here" to the wrong page (BUGS.md BUG-17).
     var lastPageLocator by remember { mutableStateOf<Locator?>(null) }
 
+    // See the AndroidFragment's own onGloballyPositioned below: added into
+    // every SelectionHandle anchor to convert its WebView-viewport-relative
+    // CSS rect into the window-relative position a PopupPositionProvider needs.
+    var webViewWindowOffset by remember { mutableStateOf(Offset.Zero) }
+
     var navigator by remember { mutableStateOf<EpubNavigatorFragment?>(null) }
     val readAlong by readAlongViewModel.state.collectAsStateWithLifecycle()
     val navigateTo by readAlongViewModel.navigateTo.collectAsStateWithLifecycle()
     val tappedWord by readAlongViewModel.tappedWord.collectAsStateWithLifecycle()
+    val selectionHandles by readAlongViewModel.selectionHandles.collectAsStateWithLifecycle()
 
     // Installed before AndroidFragment creates the fragment: the factory is what
     // injects the open publication and the starting position. Keyed on the
@@ -540,36 +574,14 @@ private fun EpubNavigator(
                 // Explicitly false: this app's layout already owns every inset
                 // Readium might otherwise try to account for a second time.
                 shouldApplyInsetsPadding = false,
-                // Drives the native selection toolbar's own contents from the
-                // same WordMenuTarget.Selection state the tap popup renders
-                // from -- see SelectionMenuAction's own docstring for why this
-                // keeps the native toolbar itself, rather than WordMenu.
-                selectionActionModeCallback = SelectionMenuAction(
-                    scope = scope,
-                    getSelection = {
-                        activity.supportFragmentManager.fragments
-                            .filterIsInstance<EpubNavigatorFragment>()
-                            .firstOrNull()
-                            ?.currentSelection()
-                    },
-                    onSelectionMade = readAlongViewModel::onSelectionMade,
-                    currentTarget = { readAlongViewModel.tappedWord.value as? WordMenuTarget.Selection },
-                    onReadFromHere = {
-                        readAlongViewModel.readFromTappedWord()
-                        // Only place selection is deliberately cleared -- a
-                        // leftover highlight would otherwise fight the
-                        // read-along highlight, same reasoning the original
-                        // "Read from here"-only version had.
-                        scope.launch {
-                            activity.supportFragmentManager.fragments
-                                .filterIsInstance<EpubNavigatorFragment>()
-                                .firstOrNull()
-                                ?.clearSelection()
-                        }
-                    },
-                    onDefine = readAlongViewModel::defineTappedWord,
-                    onNotes = readAlongViewModel::openNoteEditor,
-                ),
+                // No selectionActionModeCallback: native text selection is
+                // disabled entirely (see the disableNativeSelection call
+                // below) and replaced with SelectionHandle's own drag
+                // handles, extended via SelectionTextResolver -- selection
+                // now never reaches Android's ActionMode at all. See
+                // WordMenuTarget's own docstring for why: four separate
+                // attempts at customizing the native ActionMode instead each
+                // broke a different part of native selection itself.
             ),
         )
         true
@@ -598,6 +610,21 @@ private fun EpubNavigator(
             // way to the physical bottom edge. This is the only place left that
             // can actually keep book text out of that strip.
             .padding(bottom = PAGE_INDICATOR_RESERVED_HEIGHT)
+            // Where this fragment's own content actually starts, in window px --
+            // e.g. below the TopAppBar. TapTextResolver/SelectionTextResolver's
+            // rects are relative to the WebView's own viewport (its content
+            // starts at CSS (0,0)), not the window, so SelectionHandle's Popup
+            // -- positioned via PopupPositionProvider, which is explicitly
+            // window-relative by its own contract -- needs this added in, or a
+            // handle renders exactly one TopAppBar's height too high: "floating
+            // somewhere else than where the word is," confirmed on a real
+            // device. (A bare Popup(offset=...), the menu's old design before
+            // it moved into the bottom bar, never needed this: its *default*
+            // alignment resolves against this same composable's own local
+            // position, which already sits below the toolbar because Scaffold
+            // insets its content slot -- that correction happened for free and
+            // is exactly what a custom PopupPositionProvider opts out of.)
+            .onGloballyPositioned { webViewWindowOffset = it.positionInWindow() }
             .onSizeChanged { size ->
                 if (lastNavigatorHeight != 0 && lastNavigatorHeight != size.height) {
                     navigator?.let { fragment -> scope.launch { fragment.submitPreferences(preferences) } }
@@ -686,17 +713,27 @@ private fun EpubNavigator(
                         // turns to send a tap's resourceHref/progression to the
                         // wrong page.
                         val locator = lastPageLocator ?: fragment.currentLocator.value
+                        val resourceHref = locator.href.toString()
                         readAlongViewModel.onWordTapped(
                             word = tapped.word,
-                            resourceHref = locator.href.toString(),
+                            resourceHref = resourceHref,
                             blockText = tapped.blockText,
                             offset = tapped.offset,
                             // Where the reader is looking on screen, not audio
                             // playback position -- see ChunkIndex.indexOfTap.
                             readingProgression = locator.locations.progression,
-                            // Just below the word, so the menu does not cover it.
-                            anchorX = (tapped.left * density).toInt(),
-                            anchorY = (tapped.bottom * density).toInt(),
+                        )
+                        // Seeds the drag handles at the tapped word's own
+                        // corners -- see WordMenuTarget's docstring for why
+                        // this, not a long-press, is how a selection starts.
+                        readAlongViewModel.armHandles(
+                            word = tapped.word,
+                            left = tapped.left,
+                            top = tapped.top,
+                            right = tapped.right,
+                            bottom = tapped.bottom,
+                            resourceHref = resourceHref,
+                            progression = locator.locations.progression,
                         )
                         return@launch
                     }
@@ -712,6 +749,12 @@ private fun EpubNavigator(
             }
 
             override fun onDrag(event: DragEvent): Boolean {
+                // A drag that's actually on a SelectionHandle must not be
+                // treated as a page-turn/scroll gesture here -- see
+                // ReadAlongViewModel.draggingHandle's own docstring for the
+                // real bug this guards against (dismissWordMenu wiping the
+                // handle's own state out from under it, mid-drag).
+                if (readAlongViewModel.isHandleDragActive) return true
                 readAlongViewModel.onUserDragged()
                 readAlongViewModel.dismissWordMenu()
                 return false // let Readium scroll or page as normal
@@ -719,6 +762,104 @@ private fun EpubNavigator(
         }
         fragment.addInputListener(input)
         Log.i(TAG_TAP, "input listener attached to the navigator")
+    }
+
+    // Drives SelectionTextResolver.extend() as a handle is dragged. A
+    // write-only request flow, not read from readAlongViewModel.
+    // selectionHandles directly: reading the same state a JS result writes
+    // into would risk a self-triggering invalidate loop if
+    // caretRangeFromPoint were ever not perfectly idempotent on
+    // already-snapped coordinates -- not an assumption worth relying on.
+    // collectLatest is the throttle: a fast drag's intermediate requests are
+    // simply dropped once a newer one lands, on top of the natural rate
+    // limit evaluateJavascript's own IPC round trip already imposes.
+    val extendRequests = remember { MutableStateFlow<ExtendRequest?>(null) }
+    LaunchedEffect(navigator) {
+        val fragment = navigator ?: return@LaunchedEffect
+        extendRequests.filterNotNull().collectLatest { request ->
+            SelectionTextResolver.extend(fragment, request.startX, request.startY, request.endX, request.endY)
+                ?.let(readAlongViewModel::onExtendResolved)
+        }
+    }
+
+    // The two drag handles that extend a tapped word into a multi-word
+    // selection -- see WordMenuTarget's own docstring for why this, not a
+    // long-press, is how a selection starts. Each handle's "fixed" (other)
+    // endpoint is captured once, at that handle's own drag start, into
+    // fixedForStartDrag/fixedForEndDrag below -- not read live from
+    // selectionHandles on every tick, for the same non-idempotence reason
+    // extendRequests is write-only rather than reusing that state directly.
+    var fixedForStartDrag by remember { mutableStateOf(0f to 0f) }
+    var fixedForEndDrag by remember { mutableStateOf(0f to 0f) }
+    selectionHandles?.let { handles ->
+        val fragment = navigator ?: return@let
+        val density = fragment.publicationView.resources.displayMetrics.density
+
+        // displayStartX/displayEndX etc render the handle at the JS-resolved
+        // position, not the raw query position -- see SelectionHandles' own
+        // docstring for why the two are separate fields now: a handle drawn
+        // at the raw position would visually jitter around whatever pixel
+        // the finger is physically over, rather than snapping to the actual
+        // character boundary the selection will use. Otherwise the same
+        // shape as before: half the handle's width left of displayStartX/
+        // displayEndX to center it horizontally, displayStartBottom/
+        // displayEndBottom (not the *Y ones) for a downward hang, and
+        // webViewWindowOffset added into both axes since SelectionHandlesOverlay
+        // is window-relative but these are relative to the WebView's own
+        // viewport -- see the AndroidFragment's own onGloballyPositioned,
+        // above, for why.
+        val offsetXPx = webViewWindowOffset.x.toInt()
+        val offsetYPx = webViewWindowOffset.y.toInt()
+        val handleSizePx = (HANDLE_SIZE_DP * density).toInt()
+
+        SelectionHandlesOverlay(
+            originXPx = offsetXPx,
+            originYPx = offsetYPx,
+            widthPx = fragment.publicationView.width,
+            heightPx = fragment.publicationView.height,
+            startXPx = offsetXPx + (handles.displayStartX * density).toInt() - handleSizePx / 2,
+            startYPx = offsetYPx + (handles.displayStartBottom * density).toInt(),
+            endXPx = offsetXPx + (handles.displayEndX * density).toInt() - handleSizePx / 2,
+            endYPx = offsetYPx + (handles.displayEndBottom * density).toInt(),
+            onStartDragStart = {
+                readAlongViewModel.onHandleDragStart()
+                // The fixed endpoint's *display* position, not raw -- a
+                // JS-verified point on an actual character, stable to query
+                // repeatedly, rather than a raw pixel that happens to be
+                // wherever the other handle's finger last physically was.
+                fixedForStartDrag = handles.displayEndX to (handles.displayEndY + handles.displayEndBottom) / 2f
+            },
+            onStartDrag = { dxPx, dyPx ->
+                // Delta, not an absolute position -- and the fresh value is
+                // read straight back from the ViewModel afterward, not
+                // computed from this composable's own (potentially
+                // recomposition-stale) `handles` -- see onHandleMoved's own
+                // docstring for the real bug that came from doing it the
+                // other way.
+                readAlongViewModel.onHandleMoved(isStart = true, dxCss = dxPx / density, dyCss = dyPx / density)
+                readAlongViewModel.selectionHandles.value?.let { fresh ->
+                    val (fixedX, fixedY) = fixedForStartDrag
+                    extendRequests.value = ExtendRequest(startX = fresh.startX, startY = fresh.startY, endX = fixedX, endY = fixedY)
+                }
+            },
+            onStartDragEnd = readAlongViewModel::onHandleDragEnd,
+            onEndDragStart = {
+                readAlongViewModel.onHandleDragStart()
+                fixedForEndDrag = handles.displayStartX to (handles.displayStartY + handles.displayStartBottom) / 2f
+            },
+            onEndDrag = { dxPx, dyPx ->
+                readAlongViewModel.onHandleMoved(isStart = false, dxCss = dxPx / density, dyCss = dyPx / density)
+                readAlongViewModel.selectionHandles.value?.let { fresh ->
+                    val (fixedX, fixedY) = fixedForEndDrag
+                    extendRequests.value = ExtendRequest(startX = fixedX, startY = fixedY, endX = fresh.endX, endY = fresh.endY)
+                }
+            },
+            onEndDragEnd = readAlongViewModel::onHandleDragEnd,
+            onDismiss = {
+                readAlongViewModel.dismissWordMenu()
+                scope.launch { TapTextResolver.clearHighlight(fragment) }
+            },
+        )
     }
 
     // Readium loads a new HTML document per resource (chapter), so the DOM
@@ -735,24 +876,41 @@ private fun EpubNavigator(
         fragment.currentLocator
             .map { it.href }
             .distinctUntilChanged()
-            .collect { TypographyFixer.apply(fragment, settings.fontSize) }
+            .collect {
+                TypographyFixer.apply(fragment, settings.fontSize)
+                // Same "redo this after every new chapter document loads"
+                // reasoning as TypographyFixer above: selection now only
+                // ever starts from a tap (see WordMenuTarget's docstring),
+                // but Chromium's own long-press gesture recognizer runs
+                // independently of anything this app's InputListener sees,
+                // so a stray long-press before the reader ever taps a word
+                // could otherwise still reach native selection UI.
+                SelectionTextResolver.disableNativeSelection(fragment)
+            }
+    }
+
+    // A note's "go to this spot" (NotesSheet) request: paint its passage's
+    // highlight once its resource is actually the one loaded. fragment.go()
+    // may or may not need to load a new HTML document first -- collectLatest
+    // on currentLocator's href means this simply resolves immediately if the
+    // resource requested is already the current one (a StateFlow replays its
+    // latest value), and waits for the load otherwise either way, without
+    // this effect needing to know which case it's in.
+    LaunchedEffect(navigator) {
+        val fragment = navigator ?: return@LaunchedEffect
+        readAlongViewModel.pendingHighlight.filterNotNull().collectLatest { pending ->
+            fragment.currentLocator.map { it.href.toString() }.first { it == pending.resourceHref }
+            TapTextResolver.highlightPassage(fragment, pending.text, pending.before, pending.after)
+            readAlongViewModel.clearPendingHighlight()
+        }
     }
 
     // Highlight the sentence being spoken. One decoration, replaced by id, so the
     // previous highlight clears itself.
     // The word highlight belongs to the menu: when the menu goes, so does it.
-    // Also clears any native text selection -- harmless when the menu closed
-    // because of a tap (nothing was selected to begin with), and a backstop for
-    // when it closed because of a long-press selection: SelectionMenuAction's
-    // own item clicks already call mode.finish(), which normally takes the
-    // selection with it, but this covers dismissWordMenu() being reached some
-    // other way (e.g. a stray tap elsewhere) without relying on that ordering.
     LaunchedEffect(navigator, tappedWord) {
         val fragment = navigator ?: return@LaunchedEffect
-        if (tappedWord == null) {
-            TapTextResolver.clearHighlight(fragment)
-            fragment.clearSelection()
-        }
+        if (tappedWord == null) TapTextResolver.clearHighlight(fragment)
     }
 
     LaunchedEffect(navigator, readAlong.currentIndex, highlightTint) {

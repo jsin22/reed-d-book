@@ -18,24 +18,32 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import org.readium.r2.navigator.Selection
-import org.readium.r2.shared.publication.Locator
 import java.io.File
 
 /**
  * What the word-tap context menu is about: a single tapped word, or a
- * long-press selection -- unified so both drive the same [WordMenu] rather
- * than a tap's Compose popup and a selection's separate native toolbar
- * offering different actions (see [SelectionMenuAction] for how a selection
- * ends up here at all).
+ * selection extended by dragging a handle out from one -- unified so both
+ * drive the same [WordMenuBar]. There is no long-press-to-select gesture: a
+ * selection always starts as a [Tap] (see `ReadAlongViewModel.armHandles`),
+ * because Readium's `InputListener` has no long-press timing signal to
+ * build one from -- `onDrag` fires identically for the start of an ordinary
+ * page-turn swipe and a deliberate hold, so extending is instead always an
+ * explicit drag on a small handle (see [SelectionTextResolver]).
+ *
+ * No on-screen position is carried here (an earlier version did, so
+ * [WordMenuBar] could float itself beside the word) -- [WordMenuBar] now
+ * takes over the reader's own bottom bar, in place of the transport
+ * controls, for as long as this is non-null, rather than floating anywhere
+ * near the text at all. That sidesteps an entire class of real bugs several
+ * rounds of floating-popup positioning ran into: the reader's bottom bar is
+ * a fixed, already-reserved layout slot, so the menu can never end up on
+ * top of the word, the highlight, or a [SelectionHandle] regardless of
+ * where on the page the text is.
  *
  * @property sentenceIndex the sentence this word/selection belongs to, or
  *   null when unmapped to the audio -- "Read from here" is hidden in that case.
- * @property anchorX/anchorY where the menu should appear, in **view pixels**.
  */
 sealed interface WordMenuTarget {
-    val anchorX: Int
-    val anchorY: Int
     val sentenceIndex: Int?
     /** The word, or the selected passage -- what a note quotes, and what
      *  Definition looks up. */
@@ -59,26 +67,89 @@ sealed interface WordMenuTarget {
         val offset: Int,
         val progression: Double?,
         override val sentenceIndex: Int?,
-        override val anchorX: Int,
-        override val anchorY: Int,
     ) : WordMenuTarget {
         override val quotedText: String get() = word
         override val canDefine: Boolean get() = true
     }
 
-    data class Selection(
-        /** Resolved by Readium itself ([Selection.locator]) -- a note from a
-         *  selection needs no separate locator-building step, unlike [Tap]. */
-        val locator: Locator,
+    /** Built once a handle-drag ends, from [SelectionHandles] -- see
+     *  [dev.reedd.domain.NoteLocators.extendedLocator] for how a note's
+     *  Locator is built from [text]/[before]/[after] rather than from a
+     *  Readium-resolved one, since there is no such thing here any more. */
+    data class ExtendedSelection(
+        val text: String,
+        val before: String,
+        val after: String,
+        val resourceHref: String,
+        val progression: Double?,
         override val sentenceIndex: Int?,
-        val isMultiWord: Boolean,
-        override val anchorX: Int,
-        override val anchorY: Int,
     ) : WordMenuTarget {
-        override val quotedText: String get() = locator.text.highlight.orEmpty().trim()
-        override val canDefine: Boolean get() = !isMultiWord
+        override val quotedText: String get() = text
+        override val canDefine: Boolean get() = !text.any { it.isWhitespace() }
     }
 }
+
+/**
+ * The live state of a selection's two drag handles, in CSS px -- see
+ * [ReadAlongViewModel.selectionHandles]. Plain data: no Readium types, so
+ * this stays buildable/testable without a fragment.
+ */
+/**
+ * [startX]/[startY]/[endX]/[endY] (and their `Bottom` counterparts) are the
+ * **raw query position** -- where the finger has actually dragged to,
+ * accumulated purely from touch deltas by [ReadAlongViewModel.
+ * onHandleMoved] and never touched by a JS result. [displayStartX]/
+ * [displayStartY]/[displayEndX]/[displayEndY] (and their `Bottom`s) are the
+ * separate, JS-*resolved* caret position from the last successful
+ * [SelectionTextResolver.extend] call, used only for rendering the handle
+ * precisely snapped to a character boundary.
+ *
+ * These used to be the same fields -- [ReadAlongViewModel.onExtendResolved]
+ * overwrote the raw position with the resolved one, and the next
+ * [ReadAlongViewModel.onHandleMoved] tick's delta then accumulated on top of
+ * *that*. A real, confirmed-live bug: near a line wrap, `caretRangeFromPoint`
+ * can resolve two very different lines for two query points only a pixel
+ * apart, so a resolved snap could land 15-20px away (one line height) from
+ * where the finger truly was -- silently relocating the accumulator's own
+ * baseline. Every following delta then compounded against that wrong
+ * baseline instead of the physical touch position, which is what made
+ * dragging feel imprecise and, worse, made a selection fail to visibly
+ * shrink when dragged back: the very next resolved snap could teleport the
+ * query point forward again before the shrink ever got sent. Keeping the
+ * two separate means the query position sent to [SelectionTextResolver.
+ * extend] -- and the baseline every future delta accumulates against --
+ * always tracks the real finger, regardless of how the JS chooses to
+ * resolve any single query.
+ */
+data class SelectionHandles(
+    val startX: Float,
+    val startY: Float,
+    val startBottom: Float,
+    val endX: Float,
+    val endY: Float,
+    val endBottom: Float,
+    val displayStartX: Float,
+    val displayStartY: Float,
+    val displayStartBottom: Float,
+    val displayEndX: Float,
+    val displayEndY: Float,
+    val displayEndBottom: Float,
+    val text: String,
+    val before: String,
+    val after: String,
+    val resourceHref: String,
+    val progression: Double?,
+)
+
+/** A note's passage, waiting to be highlighted once [resourceHref] is the
+ *  resource actually loaded in the navigator -- see [ReadAlongViewModel.
+ *  pendingHighlight]'s own docstring. */
+data class PendingHighlight(
+    val resourceHref: String,
+    val text: String,
+    val before: String,
+    val after: String,
+)
 
 /** A definition being shown, or being looked up. */
 data class DefinitionState(
@@ -156,6 +227,56 @@ class ReadAlongViewModel(
      */
     private val _pendingNoteTarget = MutableStateFlow<WordMenuTarget?>(null)
     val pendingNoteTarget: StateFlow<WordMenuTarget?> = _pendingNoteTarget.asStateFlow()
+
+    /**
+     * A passage to highlight (display-only, no handles/menu) once its
+     * resource has loaded, requested by [NotesSheet]'s "go to this spot"
+     * button. `ReaderScreen`'s `EpubNavigator` watches this and
+     * `fragment.currentLocator`'s href together: `fragment.go(locator)` can
+     * land on a resource already open (no reload, highlight straight away)
+     * or one that still needs to load its HTML document first (wait for the
+     * href to match before searching it), and this alone can't tell which.
+     * Cleared once painted, by [clearPendingHighlight].
+     */
+    private val _pendingHighlight = MutableStateFlow<PendingHighlight?>(null)
+    val pendingHighlight: StateFlow<PendingHighlight?> = _pendingHighlight.asStateFlow()
+
+    fun requestHighlight(resourceHref: String, text: String, before: String, after: String) {
+        _pendingHighlight.value = PendingHighlight(resourceHref, text, before, after)
+    }
+
+    fun clearPendingHighlight() {
+        _pendingHighlight.value = null
+    }
+
+    /**
+     * Where a selection's two drag handles are right now, in **CSS pixels**
+     * (same unit [dev.reedd.ui.reader.TapTextResolver.TappedWord]'s rect
+     * uses) -- armed from a tapped word's own rect ([armHandles]), then kept
+     * live as the reader drags either end ([onHandleMoved]/[onExtendResolved]).
+     * Non-null for exactly as long as a tap's menu could plausibly still be
+     * extended into a selection, i.e. from the moment a word is tapped until
+     * the next tap/dismiss -- not the same lifetime as [tappedWord], which a
+     * handle-drag deliberately leaves untouched until [onHandleDragEnd].
+     */
+    private val _selectionHandles = MutableStateFlow<SelectionHandles?>(null)
+    val selectionHandles: StateFlow<SelectionHandles?> = _selectionHandles.asStateFlow()
+
+    /**
+     * True from [onHandleDragStart] to [onHandleDragEnd] -- the window during
+     * which a handle is actively under a finger. Readium's own
+     * `InputListener.onDrag` (see `ReaderScreen`'s `input` object) fires for
+     * *any* drag it sees, including one that starts on a
+     * [dev.reedd.ui.reader.SelectionHandle] sitting on top of the WebView --
+     * that callback calls [dismissWordMenu] unconditionally, which was
+     * silently wiping [_selectionHandles] and [_tappedWord] out from under an
+     * in-progress handle drag the instant it began (the drag then looked like
+     * it "did nothing," because the state it was updating had already been
+     * nulled). `ReaderScreen` checks this before calling [dismissWordMenu]
+     * from that listener.
+     */
+    private var draggingHandle = false
+    val isHandleDragActive: Boolean get() = draggingHandle
 
     private var index: ChunkIndex = ChunkIndex.EMPTY
     private var lastSavedPositionMs = 0L
@@ -337,8 +458,6 @@ class ReadAlongViewModel(
         blockText: String,
         offset: Int,
         readingProgression: Double?,
-        anchorX: Int,
-        anchorY: Int,
     ) {
         _tappedWord.value = WordMenuTarget.Tap(
             word = word,
@@ -350,55 +469,122 @@ class ReadAlongViewModel(
             // audio playback position -- see ChunkIndex.indexOfTap for why that
             // distinction matters.
             sentenceIndex = index.indexOfTap(resourceHref, blockText, offset, readingProgression),
-            anchorX = anchorX,
-            anchorY = anchorY,
         )
     }
 
     /**
-     * A long-press selection was made: open the same menu a tap would.
-     *
-     * Called after Android's native selection toolbar has been suppressed
-     * (see [SelectionMenuAction]) -- this is what replaces it. A selection
-     * that resolves to exactly one word behaves just like a tap on that
-     * word: [WordMenuTarget.Selection.canDefine] is only false when the
-     * selected text spans more than one word.
+     * Seeds the drag handles from the just-tapped word's own rect (CSS px,
+     * same as [dev.reedd.ui.reader.TapTextResolver.TappedWord]'s) -- no JS
+     * needed, since a single word never wraps a line, so its own corners
+     * already are the two handle positions. Called right after
+     * [onWordTapped], from the same tap.
      */
-    fun onSelectionMade(selection: Selection) {
-        val text = selection.locator.text.highlight?.trim().orEmpty()
-        if (text.isEmpty()) return
-        val href = selection.locator.href.toString()
-        // rect is nullable -- Readium could not resolve on-screen bounds for
-        // this selection. Falls back to the top-left corner rather than not
-        // showing the menu at all; a rare case, and a mispositioned menu is
-        // still usable.
-        val rect = selection.rect
-        _tappedWord.value = WordMenuTarget.Selection(
-            locator = selection.locator,
-            sentenceIndex = index.indexOfSelection(href, text),
-            isMultiWord = text.any { it.isWhitespace() },
-            anchorX = rect?.left?.toInt() ?: 0,
-            anchorY = rect?.bottom?.toInt() ?: 0,
+    fun armHandles(word: String, left: Float, top: Float, right: Float, bottom: Float, resourceHref: String, progression: Double?) {
+        _selectionHandles.value = SelectionHandles(
+            startX = left, startY = top, startBottom = bottom,
+            endX = right, endY = top, endBottom = bottom,
+            displayStartX = left, displayStartY = top, displayStartBottom = bottom,
+            displayEndX = right, displayEndY = top, displayEndBottom = bottom,
+            text = word,
+            before = "",
+            after = "",
+            resourceHref = resourceHref,
+            progression = progression,
+        )
+    }
+
+    /**
+     * Optimistic, JS-free update of whichever handle is being dragged, for
+     * instant visual feedback while [onExtendResolved]'s JS round trip is
+     * still in flight. Both `y`/`bottom` are set to the same raw drag
+     * position here -- a placeholder until the next resolved rect arrives.
+     *
+     * Takes a **delta**, not an absolute position, and accumulates it against
+     * [_selectionHandles]' own current value -- not the caller's. A real
+     * on-device bug: the caller (`ReaderScreen`'s `SelectionHandle.onDrag`)
+     * used to compute the new absolute position itself, from a `handles`
+     * value captured in its own Compose closure. During a fast, continuous
+     * drag, touch events can arrive faster than Compose recomposes, so that
+     * closure was often one or more ticks stale -- each tick then based its
+     * "new" position on an old baseline, silently dropping every delta in
+     * between. The visible result was a handle that twitched slightly but
+     * never actually travelled the full distance dragged, so the extended
+     * range it fed into `extend()` never meaningfully grew past the original
+     * word. Reading and writing [_selectionHandles] here instead -- a plain
+     * Kotlin property, not something recomposition-timing-dependent -- means
+     * every tick accumulates against the true latest value regardless of
+     * whether Compose has caught up yet.
+     */
+    /** A handle drag began: see [draggingHandle]'s own docstring for why
+     *  [ReaderScreen] needs to know this before its own drag listener fires. */
+    fun onHandleDragStart() {
+        draggingHandle = true
+    }
+
+    fun onHandleMoved(isStart: Boolean, dxCss: Float, dyCss: Float) {
+        val handles = _selectionHandles.value ?: return
+        _selectionHandles.value = if (isStart) {
+            val x = handles.startX + dxCss
+            val y = handles.startY + dyCss
+            handles.copy(startX = x, startY = y, startBottom = y)
+        } else {
+            val x = handles.endX + dxCss
+            val y = handles.endY + dyCss
+            handles.copy(endX = x, endY = y, endBottom = y)
+        }
+    }
+
+    /**
+     * The result of a throttled [SelectionTextResolver.extend] call: the
+     * newly-extended text/context, and where to *render* each handle now.
+     *
+     * Deliberately only touches the `display*` fields, never [SelectionHandles.
+     * startX]/[SelectionHandles.startY]/[SelectionHandles.endX]/
+     * [SelectionHandles.endY] themselves -- see [SelectionHandles]' own
+     * docstring for the real bug that came from this function overwriting the
+     * raw query position with a JS-resolved one that could land a line away
+     * from where the finger actually was.
+     */
+    fun onExtendResolved(result: ExtendedSelection) {
+        val handles = _selectionHandles.value ?: return
+        _selectionHandles.value = handles.copy(
+            displayStartX = result.startX, displayStartY = result.startY, displayStartBottom = result.startBottom,
+            displayEndX = result.endX, displayEndY = result.endY, displayEndBottom = result.endBottom,
+            text = result.text, before = result.before, after = result.after,
+        )
+    }
+
+    /** A handle drag ended: turn the current [selectionHandles] snapshot into
+     *  a menu target, the same way [onWordTapped] does for a plain tap. */
+    fun onHandleDragEnd() {
+        draggingHandle = false
+        val handles = _selectionHandles.value ?: return
+        _tappedWord.value = WordMenuTarget.ExtendedSelection(
+            text = handles.text,
+            before = handles.before,
+            after = handles.after,
+            resourceHref = handles.resourceHref,
+            progression = handles.progression,
+            sentenceIndex = index.indexOfSelection(handles.resourceHref, handles.text),
         )
     }
 
     /** Play from the beginning of the sentence the tapped word/selection sits in. */
     fun readFromTappedWord() {
         val target = _tappedWord.value?.sentenceIndex ?: return
-        _tappedWord.value = null
+        dismissWordMenu()
         playFrom(target)
     }
 
     /**
-     * Look the tapped word (or single-word selection) up in the bundled
-     * dictionary.
+     * Look the tapped word (or selection) up in the bundled dictionary.
      *
      * Playback stops first: reading a definition and listening at the same time is
      * not something anyone is doing on purpose.
      */
     fun defineTappedWord() {
         val target = _tappedWord.value ?: return
-        _tappedWord.value = null
+        dismissWordMenu()
         player.pause()
         _definition.value = DefinitionState(word = target.quotedText, loading = true)
         viewModelScope.launch {
@@ -412,14 +598,17 @@ class ReadAlongViewModel(
         }
     }
 
+    /** Also clears [selectionHandles] -- once the menu is gone, its handles
+     *  (if any were armed) have nothing left to extend. */
     fun dismissWordMenu() {
         _tappedWord.value = null
+        _selectionHandles.value = null
     }
 
     /** The menu's Notes row: close the menu, keep what it was about. */
     fun openNoteEditor() {
         val target = _tappedWord.value ?: return
-        _tappedWord.value = null
+        dismissWordMenu()
         _pendingNoteTarget.value = target
     }
 

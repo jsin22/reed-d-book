@@ -101,6 +101,39 @@ object CrashReporter {
         }, "reedd-early-crash-send").start()
     }
 
+    /**
+     * Posts an arbitrary one-off diagnostic line to the same crash-report
+     * endpoint, outside the uncaught-exception path entirely -- for logging
+     * that needs to reach a developer with no `adb`/device access, not an
+     * actual crash. The server does not distinguish; it is "the endpoint of
+     * last resort for a client that has just died," but nothing about it
+     * requires the client to actually be dying, and it already does exactly
+     * what's needed here: written to disk *and* logged to the console as it
+     * arrives. Fire-and-forget, same bare-`Thread`-plus-`HttpURLConnection`
+     * shape as [sendPendingEarly] and for the same reason -- this must not
+     * depend on whatever coroutine dispatcher happens to be live at the call
+     * site, since the whole point is to still work if something nearby is
+     * already broken.
+     */
+    fun reportDiagnostic(context: Context, tag: String, message: String) {
+        val appContext = context.applicationContext
+        Thread({
+            runCatching {
+                val settings = SettingsStore(appContext, CoroutineScope(SupervisorJob()))
+                val current = runBlocking { settings.current() }
+                val base = ServerAddress.normalize(current.baseUrl) ?: return@runCatching
+                val token = current.token?.filterNot { it.isWhitespace() }?.takeIf { it.isNotBlank() }
+                val body = buildString {
+                    appendLine("read-d-book diagnostic ($tag)")
+                    appendLine("when: ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss z", Locale.US).format(Date())}")
+                    appendLine()
+                    append(message)
+                }
+                postPlain(base, token, body)
+            }.onFailure { Log.i(TAG, "diagnostic send skipped: ${it.message}") }
+        }, "reedd-diagnostic-send").start()
+    }
+
     private fun postPlain(base: String, token: String?, body: String) {
         val connection = URL(base.trimEnd('/') + "/api/diagnostics/crash")
             .openConnection() as HttpURLConnection

@@ -45,7 +45,7 @@ import org.readium.r2.shared.publication.Locator
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun NotesSheet(viewModel: NotesViewModel, onDismiss: () -> Unit) {
+fun NotesSheet(viewModel: NotesViewModel, readAlongViewModel: ReadAlongViewModel, onDismiss: () -> Unit) {
     val notes by viewModel.notes.collectAsStateWithLifecycle()
     var expandedId by rememberSaveable { mutableStateOf<Long?>(null) }
     val context = LocalContext.current
@@ -70,7 +70,25 @@ fun NotesSheet(viewModel: NotesViewModel, onDismiss: () -> Unit) {
                             val fragment = activity.supportFragmentManager.fragments
                                 .filterIsInstance<EpubNavigatorFragment>()
                                 .firstOrNull()
-                            locator?.let { fragment?.go(it, animated = true) }
+                            locator?.let {
+                                fragment?.go(it, animated = true)
+                                // Highlighted (no handles, no menu) once the
+                                // navigator has actually landed on this
+                                // resource -- ReaderScreen's EpubNavigator
+                                // watches ReadAlongViewModel.pendingHighlight
+                                // for exactly this. highlight falls back to
+                                // the stored quoted text if a locator somehow
+                                // lacks one (shouldn't happen for a note's
+                                // own locator, but before/after are only ever
+                                // cosmetic disambiguation, not required for
+                                // the highlight search itself).
+                                readAlongViewModel.requestHighlight(
+                                    resourceHref = it.href.toString(),
+                                    text = it.text.highlight ?: note.quotedText,
+                                    before = it.text.before ?: "",
+                                    after = it.text.after ?: "",
+                                )
+                            }
                             onDismiss()
                         },
                         onDelete = { viewModel.deleteNote(note.id) },
