@@ -20,6 +20,8 @@ closed and reopened, so the state it polls has to outlive both.  Celery remains
 the queue proper; it just isn't asked to remember anything.
 """
 
+import contextlib
+import fcntl
 import json
 import os
 import re
@@ -96,6 +98,9 @@ class JobStore:
 
     def log_path(self, job_id) -> Path:
         return self.job_dir(job_id) / LOG_NAME
+
+    def _lock_path(self, job_id) -> Path:
+        return self.job_dir(job_id) / '.store.lock'
 
     def epub_path(self, job_id) -> Path:
         return self.job_dir(job_id) / self.read(job_id)['filename']
@@ -174,11 +179,35 @@ class JobStore:
             os.fsync(f.fileno())
         os.replace(tmp, path)
 
+    @contextlib.contextmanager
+    def _locked(self, job_id):
+        """Serializes read-modify-write cycles across processes.
+
+        The FastAPI request handler and the Celery worker both call `update`
+        on the same job -- e.g. the handler writing back `celery_task_id`
+        right as the worker flips `status` to RUNNING -- and each was doing
+        its own unsynchronized read-then-write, so whichever process's write
+        landed second silently clobbered the other's change with the stale
+        value it had read before that change existed (confirmed live: a
+        finished job stuck showing `status: queued` forever, `progress` and
+        `chapters_done` climbing normally underneath). `threading.Lock`
+        wouldn't reach across the two OS processes; `flock` on a per-job file
+        does.
+        """
+        lock_path = self._lock_path(job_id)
+        with open(lock_path, 'w') as lock_file:
+            fcntl.flock(lock_file, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file, fcntl.LOCK_UN)
+
     def update(self, job_id, **changes) -> dict:
-        manifest = self.read(job_id)
-        manifest.update(changes)
-        self.write(job_id, manifest)
-        return manifest
+        with self._locked(job_id):
+            manifest = self.read(job_id)
+            manifest.update(changes)
+            self.write(job_id, manifest)
+            return manifest
 
     def delete(self, job_id) -> None:
         job_dir = self.job_dir(job_id)

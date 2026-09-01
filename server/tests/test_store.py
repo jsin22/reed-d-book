@@ -3,6 +3,7 @@
 
 import io
 import json
+import threading
 import unittest
 from pathlib import Path
 
@@ -79,6 +80,46 @@ class JobStoreTest(TempDataDirTestCase):
         manifest = self.store.read(job_id)
         self.assertEqual((manifest['status'], manifest['progress']), ('running', 40))
         self.assertEqual(manifest['voice'], 'af_heart')
+
+    def test_update_serializes_a_racing_reader_instead_of_losing_a_write(self):
+        # Confirmed live: the FastAPI handler's `jobs.update(job_id,
+        # celery_task_id=...)` right after enqueueing raced the Celery task's
+        # own `status=RUNNING` write -- whichever read the manifest first but
+        # wrote it back second silently clobbered the other's change with
+        # the stale value it had read, leaving a job stuck at
+        # `status: queued` forever while `progress` climbed underneath it.
+        # This reproduces that shape: one caller's read is held open (as if
+        # paused mid read-modify-write) while a second caller updates a
+        # different field and completes -- without the lock in `update`,
+        # the first caller's eventual write would overwrite that second
+        # field's change with a stale copy.
+        job_id = self.store.create('b.epub', 'af_heart', 1.0, 'kokoro')['job_id']
+        started_reading = threading.Event()
+        allow_write = threading.Event()
+        original_read = self.store.read
+
+        def slow_read(jid):
+            result = original_read(jid)
+            if jid == job_id and not started_reading.is_set():
+                started_reading.set()
+                allow_write.wait(timeout=5)
+            return result
+
+        self.store.read = slow_read
+        try:
+            racer = threading.Thread(
+                target=lambda: self.store.update(job_id, celery_task_id='task-123'))
+            racer.start()
+            self.assertTrue(started_reading.wait(timeout=5))
+            self.store.update(job_id, status='running')
+            allow_write.set()
+            racer.join(timeout=5)
+        finally:
+            self.store.read = original_read
+
+        manifest = self.store.read(job_id)
+        self.assertEqual(manifest['status'], 'running')
+        self.assertEqual(manifest['celery_task_id'], 'task-123')
 
     def test_write_leaves_no_partial_file_behind(self):
         job_id = self.store.create('b.epub', 'af_heart', 1.0, 'kokoro')['job_id']
