@@ -145,7 +145,8 @@ def main(file_path, voice, pick_manually, speed, output_folder='.',
 
     if has_ffmpeg:
         create_index_file(title, creator, chapter_wav_files, output_folder)
-        create_m4b(chapter_wav_files, filename, cover_image, output_folder)
+        create_m4b(chapter_wav_files, filename, cover_image, output_folder,
+                   duration_s=timeline.current_time)
         if post_event: post_event('CORE_FINISHED')
 
 
@@ -563,7 +564,34 @@ def concat_wavs_with_ffmpeg(chapter_files, output_folder, filename):
     return concat_file_path
 
 
-def create_m4b(chapter_files, filename, cover_image, output_folder):
+#: Past this many hours of audio, a book is long enough that file size starts
+#: to matter more than the small quality edge 64k has over 48k -- confirmed
+#: by ear on a real chapter (see BUGS.md): 48k held up fine for narration and
+#: cut a 40-hour book from ~1.2GB to under 900MB. Chosen over anything lower
+#: (32k) because 48k was the one both bitrates below 64k that still sounded
+#: clearly acceptable on that listen.
+LARGE_BOOK_HOURS = 10
+
+LARGE_BOOK_BITRATE = '48k'
+DEFAULT_BITRATE = '64k'
+
+
+def bitrate_for_duration(duration_s):
+    """The AAC bitrate `create_m4b` should encode at, given the book's total
+    synthesized audio duration in seconds (`timeline.current_time`, known
+    once synthesis finishes and before `create_m4b` is called -- no need to
+    guess from character count or wait for the finished file to measure it).
+
+    `None` (duration not known, e.g. a caller that only has chapter files)
+    falls back to the default -- being conservative about quality when the
+    length is unknown, rather than guessing a book is large.
+    """
+    if duration_s is not None and duration_s >= LARGE_BOOK_HOURS * 3600:
+        return LARGE_BOOK_BITRATE
+    return DEFAULT_BITRATE
+
+
+def create_m4b(chapter_files, filename, cover_image, output_folder, duration_s=None):
     concat_file_path = concat_wavs_with_ffmpeg(chapter_files, output_folder, filename)
     final_filename = Path(output_folder) / filename.replace('.epub', '.m4b')
     chapters_txt_path = Path(output_folder) / "chapters.txt"
@@ -591,18 +619,31 @@ def create_m4b(chapter_files, filename, cover_image, output_folder):
         *cover_image_args,  # Cover image (if provided)
 
         '-map', '0:a',  # Map audio
+        # Voices vary wildly in raw loudness -- measured live across the
+        # Pocket TTS roster: peter_yearsley sits at -30.8 LUFS, george at
+        # -20.1, mary at -19.7, roughly a 10 LU gap, easily audible as
+        # "quiet even at max phone volume" for the quiet end of that range.
+        # Nothing upstream (none of the three engines) applies any gain of
+        # its own -- see engines.py -- so this is the one point after
+        # synthesis every book/voice/engine passes through exactly once.
+        # -18 LUFS integrated is a conventional audiobook target (in the
+        # neighborhood of Audible's own -18 to -23 LUFS spec); -2 dBTP true
+        # peak leaves headroom for the AAC encode step right after this
+        # filter to not clip on its own rounding.
+        '-af', 'loudnorm=I=-18:TP=-2:LRA=11',
         # libfdk_aac is absent from most distro ffmpeg builds (not
         # GPL-compatible); the native encoder is the fallback.
         '-c:a', 'libfdk_aac' if has_ffmpeg_encoder('libfdk_aac') else 'aac',
-        # The only lossy encode now (concat above is pcm) -- 48k here on top
-        # of the since-removed intermediate pass was audibly worse than
-        # either alone. 64k mono, single-pass, was confirmed clearer than
-        # the old double-encoded 48k, and chosen over 96k/128k for the
-        # smaller file size -- ffmpeg's native aac encoder self-limits mono
-        # 24kHz audio to roughly 90-96kbps regardless of a higher request
-        # anyway (measured: 96k and 128k both landed at ~96kbps actual), so
-        # 96k+ buys clarity headroom this content mostly doesn't use.
-        '-b:a', '64k',
+        # The only lossy encode now (concat above is pcm) -- a since-removed
+        # intermediate pass used to make 48k noticeably worse than today's
+        # single-pass 48k, which is why 64k was the default for a while.
+        # 64k mono, single-pass, was chosen over 96k/128k for the smaller
+        # file size -- ffmpeg's native aac encoder self-limits mono 24kHz
+        # audio to roughly 90-96kbps regardless of a higher request anyway
+        # (measured: 96k and 128k both landed at ~96kbps actual), so 96k+
+        # buys clarity headroom this content mostly doesn't use. See
+        # `bitrate_for_duration` for when a long book drops to 48k instead.
+        '-b:a', bitrate_for_duration(duration_s),
 
         '-map_metadata', '1', # Map metadata
 
