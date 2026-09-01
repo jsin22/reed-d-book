@@ -12,7 +12,11 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.displayCutout
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
@@ -154,6 +158,29 @@ fun ReaderScreen(
         }
     }
 
+    // Confirmed live: leaving the reader while still in fullscreen (the
+    // system Back gesture/button, not the toolbar's own un-fullscreen
+    // button, is the ordinary way to do this) never ran the `else` branch
+    // above -- `immersive` never flipped back to false, it just stopped
+    // existing along with the rest of this screen's composition -- so the
+    // system bars stayed hidden at the *window* level after returning to
+    // the library. This is a single-Activity app, so that window is shared
+    // with every other screen: the library's own Scaffold still reserves
+    // its ordinary content padding for a status/nav bar that the OS no
+    // longer thinks is there, which is what showed up as its content
+    // running out past where the (actually still-hidden) system controls
+    // are. Unconditional and key-independent on purpose: this must run
+    // once, on this screen's teardown, regardless of what `immersive` last
+    // was -- an `onDispose` inside the effect above would only fire for the
+    // *specific* recomposition matching whatever `immersive` was keyed to
+    // when this screen unmounted, not "this screen is gone now."
+    DisposableEffect(Unit) {
+        onDispose {
+            val window = (view.context as? android.app.Activity)?.window ?: return@onDispose
+            WindowCompat.getInsetsController(window, view).show(WindowInsetsCompat.Type.systemBars())
+        }
+    }
+
     // Reading and listening along both go long stretches with no touch input, which
     // is exactly what the system screen timeout is watching for -- without this the
     // screen dims and locks mid-chapter. Cleared on dispose so leaving the reader
@@ -224,10 +251,9 @@ fun ReaderScreen(
                 // A tapped word/selection takes this whole slot over from the
                 // transport controls -- see WordMenuBar's own docstring for why
                 // this, not a popup floating near the text, is where the menu
-                // lives now. Not gated on !immersive the way ReadAlongBar is
-                // below: a tap still resolves a word regardless of immersive
-                // state (see onTap further down), so its menu has to stay
-                // reachable too.
+                // lives now. Not gated on !immersive: a tap still resolves a
+                // word regardless of immersive state (see onTap further
+                // down), so its menu has to stay reachable too.
                 val menuTarget = tappedWord
                 if (menuTarget != null) {
                     WordMenuBar(
@@ -237,7 +263,15 @@ fun ReaderScreen(
                         onNotes = readAlongViewModel::openNoteEditor,
                         onDismiss = readAlongViewModel::dismissWordMenu,
                     )
-                } else if (book?.isPlayable == true && !immersive) {
+                } else if (book?.isPlayable == true) {
+                    // Also shown in fullscreen now, not just the normal
+                    // reader: fullscreen has to reserve this same height
+                    // regardless (see the Spacer branch below for why --
+                    // tapping a word is otherwise the first thing that ever
+                    // gives this slot a reason to exist, an unavoidable
+                    // resize confirmed live to break word selection), so an
+                    // empty reserved strip may as well be the transport
+                    // controls instead of nothing.
                     ReadAlongBar(
                         state = readAlong,
                         onTogglePlay = readAlongViewModel::togglePlayPause,
@@ -247,12 +281,47 @@ fun ReaderScreen(
                         onSpeed = readAlongViewModel::setSpeed,
                         onToggleFollow = readAlongViewModel::toggleFollowing,
                     )
+                } else if (immersive) {
+                    // A plain, non-playable epub has no ReadAlongBar to fall
+                    // back on, but fullscreen still needs *something*
+                    // reserving this height: tapping a word is otherwise the
+                    // first thing that ever gives this slot a reason to
+                    // exist at all, an unavoidable, real fragment resize
+                    // (confirmed live: 2912px down to 2384px right as a word
+                    // is tapped) that forces a repagination and leaves the
+                    // just-armed selection handles marking the word's
+                    // *previous* position. A first attempt at fixing that
+                    // after the fact instead -- re-locating the tapped word
+                    // once the resize settled -- ran into a deeper problem:
+                    // Readium's paginated columns can move the same word
+                    // onto a different, currently off-screen page, so a
+                    // plain DOM-wide text search does not reliably find its
+                    // way back to the visible one (confirmed live, landing a
+                    // handle at an X coordinate past the page's own width).
+                    // Reserving the height *before* there is anything to
+                    // show in it means a tap never resizes anything at all.
+                    // The tradeoff is that fullscreen does not quite reach
+                    // the physical bottom edge after all -- deliberate, in
+                    // exchange for word selection actually working there.
+                    Spacer(
+                        Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = BOTTOM_BAR_CONTENT_MIN_HEIGHT)
+                            .navigationBarsPadding(),
+                    )
                 }
             },
             snackbarHost = { SnackbarHost(snackbar) },
             // With the bars hidden the page should reach the physical edges of the
-            // screen, so the Scaffold stops reserving room for system insets.
-            contentWindowInsets = if (immersive) WindowInsets(0) else ScaffoldDefaults.contentWindowInsets,
+            // screen, so the Scaffold stops reserving room for system insets --
+            // except the display cutout, which is not a system bar and stays
+            // present (and un-hideable) regardless of BEHAVIOR_SHOW_TRANSIENT_
+            // BARS_BY_SWIPE above: a curved-edge/notched screen was confirmed
+            // clipping the first word of the top line here when this was a flat
+            // WindowInsets(0), because nothing was left protecting that area at
+            // all once the status bar (which used to incidentally cover it) was
+            // hidden too.
+            contentWindowInsets = if (immersive) WindowInsets.displayCutout else ScaffoldDefaults.contentWindowInsets,
         ) { padding ->
             Box(Modifier.fillMaxSize().padding(padding)) {
                 when (val current = state) {

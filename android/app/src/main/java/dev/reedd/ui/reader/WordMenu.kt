@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
@@ -78,8 +79,13 @@ fun WordMenuBar(
 
     // Same Surface/tonalElevation/navigationBarsPadding shape as ReadAlongBar,
     // the bar this replaces -- keeping the same footprint is the whole point.
+    // BOTTOM_BAR_CONTENT_MIN_HEIGHT (its own doc has the confirmed bug this
+    // guards against): a Row of icon-and-label buttons is not naturally the
+    // same height as ReadAlongBar's Slider/plain-IconButton rows, so both
+    // now claim at least this much explicitly rather than relying on their
+    // own content to happen to match.
     Surface(modifier = modifier.fillMaxWidth().navigationBarsPadding(), tonalElevation = 3.dp) {
-        Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+        Column(Modifier.heightIn(min = BOTTOM_BAR_CONTENT_MIN_HEIGHT).padding(horizontal = 12.dp, vertical = 8.dp)) {
             Row(
                 Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,

@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -34,6 +35,30 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import dev.reedd.playback.PlayerConnection
+
+/**
+ * Both [ReadAlongBar] and [WordMenuBar] occupy the same `bottomBar` slot in
+ * `ReaderScreen.kt`'s `Scaffold` and are meant to be interchangeable without
+ * the reading area ever resizing -- see [ReadAlongBar]'s own "deliberately a
+ * fixed height" note. That guarantee held for *within* each composable, but
+ * not *between* them: their natural content heights differed by a few
+ * pixels (a `Slider` plus a `Row` of plain `IconButton`s versus a `Row` of
+ * icon-and-label `Column`s is not the same height by construction, just
+ * coincidentally close), which was enough to trip the fragment's own resize
+ * detection every time a tap showed or hid the word menu -- confirmed live,
+ * via `CrashReporter.reportDiagnostic` logging: `navigator height changed:
+ * 2032 -> 2038` on the exact frame a word was tapped. That resize forced a
+ * full repagination (`ReaderScreen.kt`'s `onSizeChanged` re-submits
+ * preferences on any height change, by design, for a different bug --
+ * BUG-13), which visibly reflowed the page -- the reported "first couple of
+ * lines disappear" -- while `SelectionHandlesOverlay`'s own coordinates,
+ * captured once at tap time, never got the chance to re-resolve against the
+ * new layout -- the reported "handles land a few lines below the word".
+ * Both bars now claim at least this much height explicitly, rather than
+ * whatever their own content happens to need, so the fragment never sees a
+ * height change from this at all.
+ */
+val BOTTOM_BAR_CONTENT_MIN_HEIGHT = 132.dp
 
 /**
  * The transport controls in the reader.
@@ -80,7 +105,7 @@ fun ReadAlongBar(
             .navigationBarsPadding(),
         tonalElevation = 3.dp,
     ) {
-        Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+        Column(Modifier.heightIn(min = BOTTOM_BAR_CONTENT_MIN_HEIGHT).padding(horizontal = 12.dp, vertical = 8.dp)) {
             Slider(
                 value = position.coerceIn(0, duration).toFloat(),
                 onValueChange = {
