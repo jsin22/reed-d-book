@@ -424,6 +424,41 @@ def gen_text(text, voice='af_heart', output_file='text.wav', speed=1, play=False
         subprocess.run(['ffplay', '-autoexit', '-nodisp', output_file])
 
 
+#: A paragraph ending in dialogue ("...you.") is already sentence-terminated,
+#: but its *literal* last character is the closing quote mark, not the
+#: period -- `text.endswith('.')` alone misses that entirely and would
+#: append a second, orphaned period after the quote on every such paragraph.
+#: That stray "." survives quote_split.py's own span-splitting as a
+#: one-character narration span, which text_split.split_sentences() then
+#: hands back as its own "sentence" (its only filter drops whitespace-only
+#: fragments, not punctuation-only ones) -- one extra TTS chunk per
+#: occurrence, synthesized and timed like any other, and in a
+#: dialogue-heavy chapter this is not rare: confirmed against a real
+#: chapter of "A Scandal in Bohemia" at 188 of that chapter's 962 chunks.
+#: `[.!?]` optionally followed by one closing-quote character, anchored to
+#: the end of the string, treats the paragraph as already terminated in
+#: exactly that case. Also includes an em dash and a colon, each optionally
+#: quote-closed, for the same reason but a different two cases confirmed in
+#: that same chapter: interrupted dialogue ("But your client—” “Never mind
+#: him.”" -- the em dash *is* the sentence's own ending, on purpose) and a
+#: narration paragraph introducing a quoted letter ("...ran in this way:"),
+#: neither of which wants a period tacked on either. (Residual gap, not
+#: chased further: a quoted paragraph with no terminal punctuation *inside*
+#: the quote at all -- "Well”" rather than "Well.”" -- still gets a
+#: spurious period, since there is no `.!?—:` for the regex to find; rare
+#: enough in practice not to be worth the added complexity of also
+#: inspecting content inside the trailing quote.)
+_SENTENCE_TERMINATED_RE = re.compile(r'[.!?—:][”’"\']?$')
+
+
+def needs_terminal_period(text):
+    """Whether `text` (one paragraph's worth) needs a period appended to
+    read as a complete sentence to the downstream splitter -- see
+    `_SENTENCE_TERMINATED_RE`'s own comment for why this isn't simply
+    `not text.endswith('.')`."""
+    return not _SENTENCE_TERMINATED_RE.search(text)
+
+
 def find_document_chapters_and_extract_texts(book):
     """Returns every chapter that is an ITEM_DOCUMENT and enriches each chapter with extracted_text."""
     document_chapters = []
@@ -435,7 +470,7 @@ def find_document_chapters_and_extract_texts(book):
         chapter.extracted_text = ''
         html_content_tags = ['title', 'p', 'h1', 'h2', 'h3', 'h4', 'li']
         for text in [c.text.strip() for c in soup.find_all(html_content_tags) if c.text]:
-            if not text.endswith('.'):
+            if needs_terminal_period(text):
                 text += '.'
             chapter.extracted_text += text + '\n'
         document_chapters.append(chapter)
