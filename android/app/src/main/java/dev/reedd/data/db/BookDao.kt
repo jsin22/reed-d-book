@@ -158,6 +158,12 @@ interface BookDao {
     @Query("UPDATE books SET jobMissing = 1 WHERE id = :id")
     suspend fun markJobMissing(id: String)
 
+    /** [BookEntity.autoDownload] consumed -- the download it asked for has been
+     *  enqueued, so a later DONE (a stray re-poll, a retried
+     *  [dev.reedd.domain.ConversionWatcher] call) does not enqueue it again. */
+    @Query("UPDATE books SET autoDownload = 0 WHERE id = :id")
+    suspend fun clearAutoDownload(id: String)
+
     /** Forget the server side entirely, e.g. after a `DELETE` or before a retry. */
     @Query(
         """

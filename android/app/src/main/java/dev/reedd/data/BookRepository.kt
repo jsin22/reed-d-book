@@ -98,6 +98,8 @@ class BookRepository(
     /** The server 404'd this job; stop polling it. */
     suspend fun markJobMissing(bookId: String) = bookDao.markJobMissing(bookId)
 
+    suspend fun clearAutoDownload(bookId: String) = bookDao.clearAutoDownload(bookId)
+
     suspend fun clearJob(bookId: String) = bookDao.clearJob(bookId)
 
     suspend fun updateDownload(

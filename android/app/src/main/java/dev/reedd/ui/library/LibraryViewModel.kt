@@ -273,7 +273,11 @@ class LibraryViewModel(
             _importing.value = true
             try {
                 val book = importer.import(uri)
-                repository.insert(book.copy(voice = voice, speed = speed, engine = engine))
+                // autoDownload: the user is sitting on this one right now (they
+                // just picked it and hit convert), unlike a book adopted from
+                // server sync or one a previous app run already submitted --
+                // see BookEntity.autoDownload's own doc.
+                repository.insert(book.copy(voice = voice, speed = speed, engine = engine, autoDownload = true))
                 UploadWorker.enqueue(context, book.id)
                 PollWorker.enqueuePeriodic(context)
                 // The job exists now; do not wait out the idle period before the

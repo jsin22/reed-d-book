@@ -73,13 +73,21 @@ class ConversionWatcher(
         val status = JobStatus.fromWire(dto.status)
 
         when (status) {
-            // Deliberately no download here: fetching the .m4b is a user action
-            // now (the card's Download button), not something a finished job
-            // starts on its own. The row just sits at BookStage.AVAILABLE until
-            // then -- see awaitingDownload() in BookDao for the one case where a
-            // download *does* resume itself: one already started that got
-            // interrupted or failed.
-            JobStatus.DONE -> Unit
+            // Fetching the .m4b is a user action (the card's Download button),
+            // not something every finished job starts on its own -- a book
+            // adopted from server sync, say, may have finished converting long
+            // before this device ever heard of it, and downloading a whole
+            // library's worth of newly-adopted books unasked would be a bad
+            // surprise. The one exception is book.autoDownload: set only when
+            // this device is the one that submitted the job (see
+            // LibraryViewModel.importAndUpload), which is exactly "the user is
+            // sitting here waiting for this specific one" -- see
+            // awaitingDownload() in BookDao for the other case where a download
+            // resumes itself: one already started that got interrupted or failed.
+            JobStatus.DONE -> if (book.autoDownload) {
+                DownloadWorker.enqueue(context, book.id)
+                repository.clearAutoDownload(book.id)
+            }
             JobStatus.ERROR -> {
                 // Only on the transition, so reopening the app does not re-notify
                 // about a failure the user already saw and dismissed.
@@ -96,6 +104,36 @@ class ConversionWatcher(
     }
 
     /**
+     * The server no longer has this job -- its data directory was wiped
+     * (deliberately, by an admin's delete, or by some future cleanup sweep)
+     * or someone deleted it. Shared by [pollOnce] (live, while a book is
+     * actively converting) and [reconcile] (the periodic/manual full
+     * resync), so a job vanishing is handled identically regardless of
+     * which one notices first.
+     *
+     * A book already fully downloaded keeps working either way -- its
+     * audio and mapping are local files a server-side delete never touches
+     * -- so this only marks it, quietly, the same as before: see
+     * [BookEntity.jobMissing]'s own doc for why that alone is not a reason
+     * to tell the user anything. One that never finished downloading has
+     * nothing to show for itself, so its card is removed outright rather
+     * than sitting there stuck at whatever progress it last reported, or
+     * offering a re-upload for a job this device is not the owner of.
+     * `deleteServerJob = false`: the server already 404'd it, so asking it
+     * to delete the same job again would just be a second failing request.
+     *
+     * @return the status now known, or null once the row is gone.
+     */
+    private suspend fun handleJobGone(book: BookEntity): JobStatus? =
+        if (book.isPlayable) {
+            repository.markJobMissing(book.id)
+            book.jobStatus
+        } else {
+            repository.deleteBook(book.id, deleteServerJob = false)
+            null
+        }
+
+    /**
      * Poll one job and write down what it said.
      *
      * @return the status now known, or null if there was nothing to poll.
@@ -108,13 +146,7 @@ class ConversionWatcher(
         val dto = try {
             api.service().job(jobId)
         } catch (e: ApiException) {
-            if (e.isNotFound) {
-                // The server no longer has this job: its data directory was
-                // wiped, or someone deleted it. Stop polling and let the UI offer
-                // a re-upload -- otherwise the book sits at "queued" forever.
-                repository.markJobMissing(bookId)
-                return book.jobStatus
-            }
+            if (e.isNotFound) return handleJobGone(book)
             throw e
         }
 
@@ -196,14 +228,24 @@ class ConversionWatcher(
             val byJobId = jobs.associateBy { it.jobId }
             for (book in books) {
                 val jobId = book.jobId ?: continue
-                if (book.jobMissing) continue
+                // Not skipped just because book.jobMissing is already true: a
+                // book marked missing while it was still playable is exactly
+                // right to leave alone, but the user can delete its local
+                // copy *after* that happens -- confirmed live, a book stuck
+                // showing "Job lost on server" forever, because a still-true
+                // jobMissing from before short-circuited this loop and
+                // handleJobGone (the thing that would have removed its now
+                // useless card) never ran again. Re-deciding every time is
+                // cheap: a still-playable book just gets marked missing
+                // again, a harmless no-op write.
                 val dto = byJobId[jobId]
                 if (dto == null) {
                     // Not in a list of everything visible to this user, up to
                     // LIST_LIMIT: gone (deleted server-side) or no longer
                     // visible, the same two cases pollOnce's 404 branch
-                    // handles. A personal library never approaches the limit.
-                    repository.markJobMissing(book.id)
+                    // handles -- see handleJobGone. A personal library never
+                    // approaches the limit.
+                    handleJobGone(book)
                 } else {
                     runCatching { applyJobUpdate(book, dto) }
                 }

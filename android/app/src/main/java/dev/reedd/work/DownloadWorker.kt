@@ -146,8 +146,13 @@ class DownloadWorker(
                 // server-side. Neither is fixed by retrying.
                 e.isNotReady || e.isGone -> fail(e.detail ?: e.message)
                 e.isNotFound -> {
+                    // Left for the next refresh to actually remove the card
+                    // (ConversionWatcher.handleJobGone) rather than deleted
+                    // right here -- this is a download attempt, not a sync,
+                    // and the failure message alone already tells the user
+                    // what they need to know.
                     container.repository.markJobMissing(bookId)
-                    fail("the server no longer has this job")
+                    fail("book no longer available")
                 }
                 e.code in 400..499 -> fail(e.detail ?: e.message)
                 else -> retryOrFail(e)

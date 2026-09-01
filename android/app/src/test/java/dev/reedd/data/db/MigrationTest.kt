@@ -78,7 +78,9 @@ class MigrationTest {
 
     private fun openMigrated(): ReeddDatabase =
         Room.databaseBuilder(context, ReeddDatabase::class.java, DB_NAME)
-            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
+            .addMigrations(
+                MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7,
+            )
             .allowMainThreadQueries()
             .build()
 
@@ -294,6 +296,31 @@ class MigrationTest {
             // And it cascades with the book, same as sync_chunks/sync_chapters.
             db.books().delete("b1")
             assertTrue(db.notes().observe("b1").first().isEmpty())
+        } finally {
+            db.close()
+        }
+    }
+
+    @Test
+    fun `MIGRATION_6_7 defaults an existing book to no auto-download`() = runTest {
+        // A book converted before this feature existed was never explicitly
+        // asked to auto-download -- defaulting it true would fetch a whole
+        // library's worth of already-finished audiobooks the first time a
+        // migrated app polls, which nobody asked for.
+        createVersion1().use { old ->
+            old.execSQL(
+                """
+                INSERT INTO books (id, epubPath, originalFilename, title, sizeBytes, addedAt,
+                                   jobProgress, jobChaptersDone, jobMissing, uploadedBytes,
+                                   downloadState, downloadedBytes, downloadTotalBytes)
+                VALUES ('b1', '/e', 'Book.epub', 'Book', 1, 1, 0, 0, 0, 0, 'NONE', 0, 0)
+                """.trimIndent()
+            )
+        }
+
+        val db = openMigrated()
+        try {
+            assertFalse(db.books().get("b1")!!.autoDownload)
         } finally {
             db.close()
         }

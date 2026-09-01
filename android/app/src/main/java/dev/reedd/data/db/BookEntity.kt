@@ -74,6 +74,16 @@ data class BookEntity(
      * "lost, offer a re-upload".
      */
     @ColumnInfo(defaultValue = "0") val jobMissing: Boolean = false,
+    /**
+     * Fetch the audiobook the moment this job finishes, no Download tap needed.
+     *
+     * Set when the app itself submitted the job (`LibraryViewModel.importAndUpload`)
+     * and cleared once [dev.reedd.domain.ConversionWatcher] acts on it -- a book
+     * adopted from server sync, or one whose conversion was already running before
+     * this device knew about it, never gets this set, so downloading stays a user
+     * action for those (see [ConversionWatcher.applyJobUpdate]'s own docstring).
+     */
+    @ColumnInfo(defaultValue = "0") val autoDownload: Boolean = false,
 
     // -- upload --------------------------------------------------------------
     @ColumnInfo(defaultValue = "0") val uploadedBytes: Long = 0,

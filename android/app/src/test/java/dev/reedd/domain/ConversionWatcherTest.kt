@@ -115,19 +115,44 @@ class ConversionWatcherTest {
     }
 
     @Test
-    fun `a 404 marks the job missing and stops the polling`() = runTest {
-        // The whole point of this branch: the server's data dir was wiped while
-        // the app was closed. Without it the book sits at "queued" forever.
+    fun `a 404 removes the card for a book that was never downloaded`() = runTest {
+        // Nothing was ever fetched to this device for it -- an admin's delete
+        // (or the server's data dir simply being wiped) leaves nothing worth
+        // keeping around, so the card should just go away on the next refresh
+        // rather than sitting there stuck at "queued" or offering a re-upload
+        // for a job this device does not own.
         db.books().insert(book("b1", jobId = "job-1", jobStatus = JobStatus.QUEUED))
         enqueue("""{"detail":"no such job: job-1"}""", code = 404)
 
-        watcher.pollOnce("b1")
+        val status = watcher.pollOnce("b1")
 
+        assertNull(status)
+        assertNull(db.books().get("b1"))
+        assertTrue(repository.awaitingConversion().isEmpty())
+    }
+
+    @Test
+    fun `a 404 for an already-downloaded book is silent -- the card keeps working`() = runTest {
+        // The whole point: local audio and its sync mapping are files on this
+        // device that a server-side delete never touches, and the user does
+        // not need to know or care that the server's own copy is gone.
+        db.books().insert(
+            book(
+                "b1", jobId = "job-1", jobStatus = JobStatus.DONE,
+                downloadState = DownloadState.DONE,
+                audiobookPath = "/data/b1/book.m4b", syncPath = "/data/b1/book.json",
+            )
+        )
+        enqueue("""{"detail":"no such job: job-1"}""", code = 404)
+
+        val status = watcher.pollOnce("b1")
+
+        assertEquals(JobStatus.DONE, status)
         val book = db.books().get("b1")!!
         assertTrue(book.jobMissing)
+        assertTrue("a downloaded book must stay usable", book.isPlayable)
         assertFalse(book.needsPolling)
-        assertTrue(book.needsReupload)
-        assertTrue(repository.awaitingConversion().isEmpty())
+        assertFalse("an already-playable book is not a lost job to the user", book.needsReupload)
     }
 
     @Test
@@ -141,8 +166,8 @@ class ConversionWatcherTest {
     }
 
     @Test
-    fun `a finished conversion enqueues the download`() = runTest {
-        db.books().insert(book("b1", jobId = "job-1", jobStatus = JobStatus.RUNNING))
+    fun `a finished conversion enqueues the download when this device submitted it`() = runTest {
+        db.books().insert(book("b1", jobId = "job-1", jobStatus = JobStatus.RUNNING, autoDownload = true))
         enqueue(Fixtures.read("job_done.json"))
 
         val status = watcher.pollOnce("b1")
@@ -151,6 +176,22 @@ class ConversionWatcherTest {
         assertTrue("finishing must start the download", downloadEnqueued("b1"))
         // The filenames from the manifest are kept for the download to use.
         assertEquals("A_Brief_Guide_to_Digital_Formats.m4b", db.books().get("b1")!!.audiobookRemoteName)
+        // Consumed, so a later re-poll of this same DONE job does not re-enqueue it.
+        assertFalse(db.books().get("b1")!!.autoDownload)
+    }
+
+    @Test
+    fun `a finished conversion nobody asked to auto-download waits for the Download button`() = runTest {
+        // A book adopted from server sync, or converted before this feature
+        // existed, must not have its (possibly large) audiobook fetched
+        // without being asked -- see ConversionWatcher.applyJobUpdate's own
+        // docstring for why downloading stays a user action by default.
+        db.books().insert(book("b1", jobId = "job-1", jobStatus = JobStatus.RUNNING))
+        enqueue(Fixtures.read("job_done.json"))
+
+        watcher.pollOnce("b1")
+
+        assertFalse("finishing alone must not start the download", downloadEnqueued("b1"))
     }
 
     @Test
@@ -261,6 +302,40 @@ class ConversionWatcherTest {
         assertTrue(book.isPlayable)
         assertNull(book.downloadError)
         dir.deleteRecursively()
+    }
+
+    @Test
+    fun `reconcile removes the card for a book that was never downloaded and dropped off the job list`() = runTest {
+        // The live 4s poll and the manual/periodic reconcile share
+        // handleJobGone precisely so a job vanishing is noticed the same way
+        // regardless of which one gets there first -- this is reconcile's
+        // side of the same test pollOnce already has.
+        db.books().insert(book("b1", jobId = "job-1", jobStatus = JobStatus.QUEUED))
+        enqueue("""{"jobs":[]}""")
+
+        watcher.reconcile()
+
+        assertNull(db.books().get("b1"))
+    }
+
+    @Test
+    fun `reconcile removes a card left stuck at Lost after its local copy was deleted`() = runTest {
+        // Reproduces a real sequence: the book was playable when a previous
+        // reconcile marked jobMissing (quiet, correctly left alone at the
+        // time), then the user deleted the local copy some time later via
+        // "Delete downloaded content" -- which only clears download fields,
+        // it does not touch jobMissing or the row itself. Without this
+        // reconcile re-deciding every book instead of skipping anything
+        // already marked missing, this book would show "Job lost on server"
+        // forever: jobMissing and !isPlayable both true is exactly
+        // needsReupload, but there is nothing left worth re-uploading a
+        // deleted job for.
+        db.books().insert(book("b1", jobId = "job-1", jobStatus = JobStatus.DONE, jobMissing = true))
+        enqueue("""{"jobs":[]}""")
+
+        watcher.reconcile()
+
+        assertNull(db.books().get("b1"))
     }
 
     @Test
