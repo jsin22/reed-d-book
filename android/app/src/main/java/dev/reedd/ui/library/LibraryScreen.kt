@@ -37,7 +37,6 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -117,6 +116,20 @@ fun LibraryScreen(
             TopAppBar(
                 title = { Text("Library") },
                 actions = {
+                    IconButton(
+                        onClick = {
+                            // Guarded: launch() throws ActivityNotFoundException if nothing
+                            // on the device handles OpenDocument for these types, and an
+                            // uncaught throw from a click handler takes the app down.
+                            runCatching {
+                                picker.launch(arrayOf("application/epub+zip", "application/octet-stream"))
+                            }.onFailure { viewModel.reportProblem("no file picker available on this device") }
+                        },
+                        enabled = !importing,
+                    ) {
+                        if (importing) CircularProgressIndicator(Modifier.size(20.dp))
+                        else Icon(Icons.Filled.Add, contentDescription = "Add book")
+                    }
                     IconButton(onClick = { showSortFilter = true }) {
                         Icon(Icons.Filled.FilterList, contentDescription = "Sort & filter")
                     }
@@ -143,23 +156,6 @@ fun LibraryScreen(
                     onTogglePlayPause = viewModel::togglePlayPause,
                 )
             }
-        },
-        floatingActionButton = {
-            ExtendedFloatingActionButton(
-                onClick = {
-                    // Guarded: launch() throws ActivityNotFoundException if nothing
-                    // on the device handles OpenDocument for these types, and an
-                    // uncaught throw from a click handler takes the app down.
-                    runCatching {
-                        picker.launch(arrayOf("application/epub+zip", "application/octet-stream"))
-                    }.onFailure { viewModel.reportProblem("no file picker available on this device") }
-                },
-                icon = {
-                    if (importing) CircularProgressIndicator(Modifier.size(18.dp))
-                    else Icon(Icons.Filled.Add, contentDescription = null)
-                },
-                text = { Text(if (importing) "Importing" else "Add book") },
-            )
         },
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
@@ -563,6 +559,7 @@ private fun StageChip(book: BookEntity, nowPlaying: Boolean, isPlaying: Boolean)
     // Takes over the ready-to-read chip's slot rather than adding a second badge:
     // once a book is the one loaded in the player, "ready to read along" is no
     // longer the most useful thing this card can say about it.
+    val downloadEta = rememberDownloadEta(book)
     val (label, tint) = if (nowPlaying) {
         (if (isPlaying) "Playing" else "Paused") to MaterialTheme.colorScheme.primary
     } else when (book.stage()) {
@@ -574,7 +571,14 @@ private fun StageChip(book: BookEntity, nowPlaying: Boolean, isPlaying: Boolean)
             book.jobEta?.let { append(" · ${it.humanEta()}") }
         } to MaterialTheme.colorScheme.primary
         BookStage.AVAILABLE -> "Ready to download" to MaterialTheme.colorScheme.primary
-        BookStage.DOWNLOADING -> "Downloading" to MaterialTheme.colorScheme.primary
+        BookStage.DOWNLOADING -> buildString {
+            append("Downloading")
+            if (book.downloadTotalBytes > 0) {
+                val percent = (book.downloadedBytes * 100L / book.downloadTotalBytes).coerceIn(0L, 100L)
+                append(" $percent%")
+            }
+            downloadEta?.let { append(" · $it") }
+        } to MaterialTheme.colorScheme.primary
         BookStage.READY -> "Ready to read along" to MaterialTheme.colorScheme.primary
         BookStage.FAILED -> "Failed" to MaterialTheme.colorScheme.error
         BookStage.LOST -> "Job lost on server" to MaterialTheme.colorScheme.error
@@ -685,3 +689,60 @@ fun String.humanEta(): String =
         .take(2)
         .joinToString(" ")
         .ifBlank { this }
+
+/** Mutated in place, not a [androidx.compose.runtime.MutableState]: the recomposition
+ *  that should show a new ETA already happens because [BookEntity.downloadedBytes]
+ *  itself changed, so this only needs to survive across those recompositions, not
+ *  trigger one of its own. */
+private class DownloadRateBaseline(var timeMs: Long, var bytes: Long)
+
+/**
+ * A short "Xm Ys"-style estimate for how much longer a download has left.
+ *
+ * Unlike [BookEntity.jobEta] (a conversion's ETA, computed server-side by
+ * audiblez and just reformatted by [humanEta]), a raw file download has no
+ * server-side ETA to report -- [book]'s [BookEntity.downloadedBytes] only says
+ * how far it's gotten. This estimates a rate from recent progress instead,
+ * rebasing every few seconds so it tracks the current network conditions
+ * rather than averaging over the whole download (which would stay skewed by
+ * a slow start long after the download has sped up).
+ */
+@Composable
+private fun rememberDownloadEta(book: BookEntity): String? {
+    if (book.stage() != BookStage.DOWNLOADING || book.downloadTotalBytes <= 0) return null
+    val baseline = remember(book.id) { DownloadRateBaseline(System.currentTimeMillis(), book.downloadedBytes) }
+    if (book.downloadedBytes < baseline.bytes) {
+        // A new download started from scratch in this same card (e.g. deleted
+        // and re-downloaded) -- the old rate no longer means anything.
+        baseline.timeMs = System.currentTimeMillis()
+        baseline.bytes = book.downloadedBytes
+    }
+    val now = System.currentTimeMillis()
+    val elapsedS = (now - baseline.timeMs) / 1000.0
+    val deltaBytes = book.downloadedBytes - baseline.bytes
+    val eta = if (elapsedS >= 1.0 && deltaBytes > 0) {
+        val bytesPerSecond = deltaBytes / elapsedS
+        val remainingBytes = book.downloadTotalBytes - book.downloadedBytes
+        formatEtaSeconds((remainingBytes / bytesPerSecond).toLong()).takeIf { remainingBytes > 0 }
+    } else null
+    if (elapsedS >= 3.0) {
+        baseline.timeMs = now
+        baseline.bytes = book.downloadedBytes
+    }
+    return eta
+}
+
+/** Same drop-leading-zero-units shortening [humanEta] does, starting from raw
+ *  seconds instead of the server's pre-formatted string -- there is no server
+ *  string here to reformat, since this is an estimate computed on-device. */
+private fun formatEtaSeconds(totalSeconds: Long): String {
+    val d = totalSeconds / 86_400
+    val h = (totalSeconds % 86_400) / 3_600
+    val m = (totalSeconds % 3_600) / 60
+    val s = totalSeconds % 60
+    return listOf("${d}d", "${h}h", "${m}m", "${s}s")
+        .dropWhile { it.dropLast(1).toIntOrNull() == 0 }
+        .take(2)
+        .joinToString(" ")
+        .ifBlank { "0s" }
+}
