@@ -41,6 +41,7 @@ Celery worker.  This process never imports torch or kokoro.
 
 import logging
 import os
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -207,11 +208,28 @@ def _synthesize_sample(engine: str, voice: str, path: Path) -> None:
     audio = np.concatenate(segments) if len(segments) > 1 else segments[0]
 
     path.parent.mkdir(parents=True, exist_ok=True)
+    raw_tmp = path.with_name(f'.{path.name}.{os.getpid()}.raw.tmp')
     tmp = path.with_name(f'.{path.name}.{os.getpid()}.tmp')
-    # format='WAV' explicitly: soundfile otherwise infers the format from the
-    # filename's extension, and the temp file's real extension is '.tmp', not
-    # '.wav' -- it raised TypeError here on the very first real request.
-    soundfile.write(tmp, audio, engine_sample_rate(engine), format='WAV')
+    try:
+        # format='WAV' explicitly: soundfile otherwise infers the format from
+        # the filename's extension, and the temp file's real extension is
+        # '.tmp', not '.wav' -- it raised TypeError here on the very first
+        # real request.
+        soundfile.write(raw_tmp, audio, engine_sample_rate(engine), format='WAV')
+        # Same target and reasoning as the real conversion pipeline's
+        # create_m4b (audiblez/core.py): raw voices vary by up to ~10 LU in
+        # loudness, and a preview that doesn't reflect how loud a voice will
+        # actually sound in a finished book defeats the point of previewing
+        # it before committing a whole conversion to it.
+        # -f wav explicitly, the same reason format='WAV' is explicit just
+        # above: the temp file's real extension is '.tmp', which ffmpeg
+        # cannot guess an output format from any better than soundfile could.
+        subprocess.run(
+            ['ffmpeg', '-y', '-i', str(raw_tmp), '-af', 'loudnorm=I=-18:TP=-2:LRA=11', '-f', 'wav', str(tmp)],
+            check=True, capture_output=True,
+        )
+    finally:
+        raw_tmp.unlink(missing_ok=True)
     os.replace(tmp, path)
 
 
