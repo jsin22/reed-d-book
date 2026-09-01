@@ -126,7 +126,7 @@ class VoicesViewModel(
     }
 
     private fun sampleFile(voice: String): File =
-        File(context.cacheDir, "voice_samples/$ENGINE/$voice.wav")
+        File(context.cacheDir, "voice_samples/v$SAMPLE_CACHE_VERSION/$ENGINE/$voice.wav")
 
     /** Downloaded through the app's shared OkHttp client, not Retrofit --
      *  same reasoning as [dev.reedd.data.download.ResumableDownloader]: this
@@ -187,6 +187,23 @@ class VoicesViewModel(
 
     companion object {
         private const val ENGINE = "pocket_tts"
+
+        /**
+         * Bump this whenever the *server's* sample output changes in a way
+         * that makes an already-downloaded clip stale -- e.g. the loudness
+         * normalization added to `_synthesize_sample` (server/app/main.py):
+         * [sampleFile] only re-downloads when nothing is at that path yet
+         * (see this class's own doc), so a voice previewed before that fix
+         * shipped would otherwise keep silently playing its old, quiet local
+         * copy forever, even once the server itself was serving a fixed one.
+         * A new version number is a new, never-before-used path -- every
+         * client re-downloads exactly once, with no need to inspect or
+         * compare file contents -- and the old file is simply never read
+         * again rather than needing an explicit delete: it is nothing more
+         * than a few small clips in the app's own cache directory, which the
+         * OS is already free to reclaim under storage pressure.
+         */
+        private const val SAMPLE_CACHE_VERSION = 2
 
         fun factory(container: AppContainer, context: Context) = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
