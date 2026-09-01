@@ -1,6 +1,7 @@
 import org.gradle.process.ExecOperations
 import java.io.ByteArrayOutputStream
-import java.time.OffsetDateTime
+import java.time.ZoneId
+import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import javax.inject.Inject
 
@@ -44,7 +45,17 @@ abstract class GenerateBuildInfoTask : DefaultTask() {
             out.toString().trim()
         }.getOrNull()?.ifBlank { null } ?: "unknown"
 
-        val builtAt = OffsetDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"))
+        // America/New_York explicitly, not the build machine's own zone
+        // (confirmed set to UTC): the previous version had no zone in
+        // either the value or the format string, so it silently read as
+        // *some* local time to anyone looking -- confirmed confusing in
+        // practice (a 4-hour gap from a US Eastern reader assuming the
+        // stamp was already theirs). The zone id, not a fixed -05:00
+        // offset, so this reads correctly as EDT in summer and EST in
+        // winter rather than being wrong half the year; `zzz` prints
+        // whichever one actually applies.
+        val builtAt = ZonedDateTime.now(ZoneId.of("America/New_York"))
+            .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm zzz"))
 
         val file = outputDir.get().asFile.resolve("dev/reedd/BuildInfo.kt")
         file.parentFile.mkdirs()
