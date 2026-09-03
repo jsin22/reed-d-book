@@ -39,8 +39,11 @@ object VoicesRoute
 @Serializable
 data class DetailRoute(val bookId: String)
 
+/** @param autoPlay Start audio immediately once the book opens -- the
+ *  library's own play button, not every way of reaching the reader (the
+ *  detail screen's "Read" stays a plain open). */
 @Serializable
-data class ReaderRoute(val bookId: String)
+data class ReaderRoute(val bookId: String, val autoPlay: Boolean = false)
 
 /**
  * The whole navigation graph. Four destinations, one activity.
@@ -60,7 +63,7 @@ fun ReeddNavHost(navController: NavHostController = rememberNavController()) {
                 viewModel(factory = LibraryViewModel.factory(container, context))
             LibraryScreen(
                 viewModel = viewModel,
-                onOpenBook = { navController.navigate(ReaderRoute(it)) },
+                onOpenBook = { navController.navigate(ReaderRoute(it, autoPlay = true)) },
                 onOpenDetail = { navController.navigate(DetailRoute(it)) },
                 onOpenSettings = { navController.navigate(SettingsRoute) },
             )
@@ -82,15 +85,15 @@ fun ReeddNavHost(navController: NavHostController = rememberNavController()) {
         }
 
         composable<ReaderRoute> { entry ->
-            val bookId = entry.toRoute<ReaderRoute>().bookId
+            val route = entry.toRoute<ReaderRoute>()
             val viewModel: ReaderViewModel =
-                viewModel(factory = ReaderViewModel.factory(container, bookId))
+                viewModel(factory = ReaderViewModel.factory(container, route.bookId))
             // Separate ViewModel: one owns the open publication, the other the
             // audio. They have different lifetimes and different reasons to change.
             val readAlongViewModel: ReadAlongViewModel =
-                viewModel(factory = ReadAlongViewModel.factory(container, bookId))
+                viewModel(factory = ReadAlongViewModel.factory(container, route.bookId, route.autoPlay))
             val notesViewModel: NotesViewModel =
-                viewModel(factory = NotesViewModel.factory(container, bookId))
+                viewModel(factory = NotesViewModel.factory(container, route.bookId))
             ReaderScreen(
                 viewModel = viewModel,
                 readAlongViewModel = readAlongViewModel,

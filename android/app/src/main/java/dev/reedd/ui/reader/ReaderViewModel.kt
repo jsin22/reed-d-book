@@ -113,10 +113,26 @@ class ReaderViewModel(
 
         readium.open(file).fold(
             onSuccess = { publication ->
+                // Whatever was last saved, or Readium's own default (the
+                // spine's first resource) for a book that has never been
+                // opened. A whole run of attempts at guessing "chapter 1"
+                // instead -- an alignment-vote-based firstChapterLocator,
+                // then simulating a tap-and-"Read from here" on open -- each
+                // broke on a real book in a new way (a stray text collision,
+                // a large novel's own legitimate front-matter audio
+                // outvoting its real chapter 1, a table of contents whose
+                // own first entry was front matter too) and was scrapped by
+                // explicit request rather than chased further: autoPlay
+                // (see ReadAlongViewModel.start) already starts playback at
+                // the right *audio* position on its own, independent of
+                // whatever the page happens to show first, and read-along
+                // follow mode (FollowController) already exists to bring the
+                // page in line with the audio once it does.
+                val initialLocator = book.readingLocator?.toLocator()
                 _state.value = ReaderState.Ready(
                     publication = publication,
                     navigatorFactory = EpubNavigatorFactory(publication),
-                    initialLocator = book.readingLocator?.toLocator(),
+                    initialLocator = initialLocator,
                     tableOfContents = publication.tableOfContents,
                 )
             },

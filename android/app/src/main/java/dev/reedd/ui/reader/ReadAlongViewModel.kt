@@ -190,6 +190,10 @@ class ReadAlongViewModel(
     private val aligner: ReadAlongAligner,
     private val dictionary: Dictionary,
     val player: PlayerConnection,
+    /** Start audio immediately once loaded -- the library's play button, not
+     *  every way of reaching the reader. See `ReeddNavHost.kt`'s
+     *  `ReaderRoute.autoPlay` for where this comes from. */
+    private val autoPlay: Boolean = false,
 ) : ViewModel() {
 
     private val follower = FollowController(following = true)
@@ -311,6 +315,18 @@ class ReadAlongViewModel(
         loadIndex(book)
         if (book.needsAlignment) realign(book)
 
+        // The saved position is wherever playback last happened to be paused
+        // -- almost never a sentence's own start -- but the sentence it falls
+        // inside gets highlighted whole either way, so resuming from the raw
+        // saved value played from *inside* the highlighted sentence rather
+        // than its beginning. playFrom()/seekPositionFor already snap a
+        // deliberate "read from here" or a next/previous-sentence tap to the
+        // sentence's own start; this makes the very first resume do the same
+        // rather than being the one path that does not.
+        val resumeStartMs = index.indexAt(book.playbackPositionMs).takeIf { it >= 0 }
+            ?.let { index.seekPositionFor(it) }
+            ?: book.playbackPositionMs
+
         player.connect()
         player.prepare(
             bookId = bookId,
@@ -318,15 +334,21 @@ class ReadAlongViewModel(
             title = book.title,
             author = book.author,
             coverPath = book.coverPath,
-            startMs = book.playbackPositionMs,
+            startMs = resumeStartMs,
         )
+        // The library's play button, not every way of reaching the reader --
+        // see this class's own constructor doc. prepare() only loads/buffers;
+        // without this, the reader opened paused regardless of how it was
+        // reached, requiring an extra manual tap on the transport controls
+        // every time, first sentence or a hundredth chapter in alike.
+        if (autoPlay) player.play()
 
         // Seed from the position just handed to the player, not a live read of
         // it, for the same reason `firstTick` exists: this value is known good,
         // a poll tick's read of the player this soon after `prepare()` might not
         // be yet. `onNavigated` records it without emitting a navigation, so the
         // reader is not asked to move from wherever it already opened.
-        index.indexAt(book.playbackPositionMs).takeIf { it >= 0 }?.let { seedIndex ->
+        index.indexAt(resumeStartMs).takeIf { it >= 0 }?.let { seedIndex ->
             _state.value = _state.value.copy(currentIndex = seedIndex)
             follower.onNavigated(seedIndex)
         }
@@ -687,7 +709,7 @@ class ReadAlongViewModel(
         const val OFFSET_STEP_MS = 25L
         const val OFFSET_LIMIT_MS = 2_000L
 
-        fun factory(container: AppContainer, bookId: String) = object : ViewModelProvider.Factory {
+        fun factory(container: AppContainer, bookId: String, autoPlay: Boolean = false) = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T = ReadAlongViewModel(
                 bookId,
@@ -695,6 +717,7 @@ class ReadAlongViewModel(
                 container.readAlongAligner,
                 container.dictionary,
                 container.playerConnection,
+                autoPlay,
             ) as T
         }
     }
