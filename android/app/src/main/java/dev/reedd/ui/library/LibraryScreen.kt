@@ -192,7 +192,7 @@ fun LibraryScreen(
                             onLongClick = if (isAdmin) ({ onOpenDetail(book.id) }) else null,
                             onRead = { onOpenBook(book.id) },
                             onDownload = { viewModel.downloadBook(book.id) },
-                            onDeleteDownloaded = { viewModel.deleteDownloadedContent(book.id) },
+                            onDeleteDownloaded = { viewModel.deleteLocalContent(book.id) },
                             onRetryConversion = { viewModel.retryConversion(book.id) },
                             onCancel = { viewModel.cancelConversion(book.id) },
                         )
@@ -451,7 +451,7 @@ private fun BookCard(
                     IconButton(onClick = onDeleteDownloaded) {
                         Icon(
                             Icons.Filled.Delete,
-                            contentDescription = "Delete downloaded content",
+                            contentDescription = "Delete local content",
                             tint = MaterialTheme.colorScheme.error,
                         )
                     }

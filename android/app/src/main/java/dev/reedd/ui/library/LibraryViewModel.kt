@@ -9,6 +9,7 @@ import androidx.lifecycle.viewModelScope
 import dev.reedd.data.BookRepository
 import dev.reedd.data.db.BookEntity
 import dev.reedd.data.db.DownloadState
+import dev.reedd.data.db.NoteDao
 import dev.reedd.data.local.EpubImporter
 import dev.reedd.data.remote.ApiException
 import dev.reedd.data.remote.ApiProvider
@@ -20,6 +21,7 @@ import dev.reedd.data.settings.ServerSettings
 import dev.reedd.data.settings.SettingsStore
 import dev.reedd.di.AppContainer
 import dev.reedd.diagnostics.CrashLog
+import dev.reedd.diagnostics.CrashReporter
 import dev.reedd.domain.AuthStatus
 import dev.reedd.domain.AuthStatusMonitor
 import dev.reedd.domain.ConversionWatcher
@@ -42,6 +44,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
@@ -81,6 +84,7 @@ class LibraryViewModel(
     private val crashLog: CrashLog,
     private val player: PlayerConnection,
     private val authMonitor: AuthStatusMonitor,
+    private val noteDao: NoteDao,
 ) : ViewModel() {
 
     val books: StateFlow<List<BookEntity>> =
@@ -315,17 +319,53 @@ class LibraryViewModel(
     }
 
     /**
-     * The card's trash icon: clear the audiobook/sync file this device already
-     * downloaded, freeing their space, without touching the book row, the epub,
-     * or the server's job. The card stays exactly where it is, just back in the
-     * "ready to download" state -- distinct from [dev.reedd.ui.detail.
-     * BookDetailViewModel.delete], which removes the whole book.
+     * The card's trash icon: wipe everything this device holds locally for the
+     * book -- epub, cover, audiobook, sync file, reading/playback position,
+     * alignment -- without touching the book row or the server's job (see
+     * [BookRepository.deleteLocalContent] for exactly what survives and why).
+     * The card stays exactly where it is, just back in the "ready to download"
+     * state -- distinct from [dev.reedd.ui.detail.BookDetailViewModel.delete],
+     * which removes the whole book, including from the server.
      */
-    fun deleteDownloadedContent(bookId: String) {
+    fun deleteLocalContent(bookId: String) {
         viewModelScope.launch {
             DownloadWorker.cancel(context, bookId)
-            repository.deleteDownloadedContent(bookId)
+            // Otherwise a book playing (or paused) right now keeps showing
+            // in the "now playing" bar and its own card's chip after its
+            // audio file is gone -- see PlayerConnection.clear's own doc.
+            player.clear(bookId)
+            // Captured before the delete: the old paths are what has to
+            // actually be gone from disk afterward, and the row itself no
+            // longer names them once deleteLocalContent clears the columns.
+            val before = repository.get(bookId)
+            repository.deleteLocalContent(bookId)
+            verifyLocalContentCleared(bookId, before)
         }
+    }
+
+    /**
+     * Diagnostic for confirming the trash-can icon actually leaves nothing
+     * behind except notes -- remove once confirmed. Posts what survived to
+     * the server's crash-report endpoint the same way every other
+     * diagnostic this session has (see CrashReporter.reportDiagnostic);
+     * readable straight off the `.txt` files under `server/data/crashes`,
+     * no device access needed to check it.
+     */
+    private suspend fun verifyLocalContentCleared(bookId: String, before: BookEntity?) {
+        val after = repository.get(bookId)
+        val filesGone = listOfNotNull(before?.epubPath, before?.coverPath, before?.audiobookPath, before?.syncPath)
+            .all { !java.io.File(it).exists() }
+        val chunksLeft = repository.syncChunks(bookId).size
+        val notesLeft = noteDao.observe(bookId).first().size
+        CrashReporter.reportDiagnostic(
+            context, "ReeddDeleteLocalContent",
+            "book='${before?.title}' rowSurvived=${after != null} filesGone=$filesGone " +
+                "audiobookPath=${after?.audiobookPath} syncPath=${after?.syncPath} coverPath=${after?.coverPath} " +
+                "downloadState=${after?.downloadState} readingLocator=${after?.readingLocator} " +
+                "playbackPositionMs=${after?.playbackPositionMs} syncOffsetMs=${after?.syncOffsetMs} " +
+                "alignedChunks=${after?.alignedChunks} totalChunks=${after?.totalChunks} " +
+                "alignmentVersion=${after?.alignmentVersion} chunksLeft=$chunksLeft notesLeft=$notesLeft",
+        )
     }
 
     /**
@@ -406,6 +446,7 @@ class LibraryViewModel(
                 container.crashLog,
                 container.playerConnection,
                 container.authStatusMonitor,
+                container.noteStore,
             ) as T
         }
     }

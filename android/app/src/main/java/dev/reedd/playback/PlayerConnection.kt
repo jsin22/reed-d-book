@@ -136,6 +136,30 @@ class PlayerConnection(private val context: Context) {
 
     fun pause() = controller?.pause()
 
+    /**
+     * Stops and unloads the player, but only if it currently has this exact
+     * book loaded -- a no-op for any other book, since this exists for one
+     * caller: deleting a book's local content. The audio file the
+     * controller has open is about to disappear from disk, and Media3 has
+     * no way to notice that on its own -- without this, [state]'s `bookId`
+     * (and so the library's "now playing" bar and the card's own playing/
+     * paused chip) would keep pointing at a book with nothing left behind
+     * it until the process happened to be killed and restarted.
+     */
+    fun clear(bookId: String) {
+        val controller = controller ?: return
+        if (controller.currentMediaItem?.mediaId != bookId) return
+        controller.stop()
+        controller.clearMediaItems()
+        _state.value = _state.value.copy(
+            isPlaying = false,
+            positionMs = 0,
+            durationMs = 0,
+            bookId = null,
+            error = null,
+        )
+    }
+
     fun togglePlayPause() {
         val controller = controller ?: return
         if (controller.isPlaying) controller.pause() else controller.play()

@@ -223,8 +223,8 @@ interface BookDao {
     @Query("UPDATE books SET syncOffsetMs = :offsetMs WHERE id = :id")
     suspend fun updateSyncOffset(id: String, offsetMs: Long)
 
-    @Query("UPDATE books SET alignedChunks = :aligned, totalChunks = :total WHERE id = :id")
-    suspend fun updateAlignment(id: String, aligned: Int, total: Int)
+    @Query("UPDATE books SET alignedChunks = :aligned, totalChunks = :total, alignmentVersion = :version WHERE id = :id")
+    suspend fun updateAlignment(id: String, aligned: Int, total: Int, version: Int)
 
     @Query(
         """
@@ -233,4 +233,15 @@ interface BookDao {
         """
     )
     suspend fun updateMetadata(id: String, title: String, author: String?, coverPath: String?, sizeBytes: Long)
+
+    /** Narrower than [updateMetadata]: used where only the cover file itself is
+     *  gone, and title/author/sizeBytes must not be touched alongside it. */
+    @Query("UPDATE books SET coverPath = NULL WHERE id = :id")
+    suspend fun clearCover(id: String)
+
+    /** The other direction of [clearCover] -- a cover [dev.reedd.work.
+     *  DownloadWorker] fetched from the server for a book whose epub had
+     *  none of its own. */
+    @Query("UPDATE books SET coverPath = :coverPath WHERE id = :id")
+    suspend fun setCoverPath(id: String, coverPath: String)
 }

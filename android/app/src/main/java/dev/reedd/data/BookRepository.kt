@@ -1,5 +1,6 @@
 package dev.reedd.data
 
+import dev.reedd.data.align.ChunkAligner
 import dev.reedd.data.db.BookDao
 import dev.reedd.data.db.BookEntity
 import dev.reedd.data.db.Converters
@@ -119,8 +120,8 @@ class BookRepository(
     suspend fun setSync(bookId: String, file: File?, durationMs: Long?) =
         bookDao.setSync(bookId, file?.absolutePath, durationMs)
 
-    suspend fun setAlignment(bookId: String, aligned: Int, total: Int) =
-        bookDao.updateAlignment(bookId, aligned, total)
+    suspend fun setAlignment(bookId: String, aligned: Int, total: Int, version: Int = ChunkAligner.ALIGNMENT_VERSION) =
+        bookDao.updateAlignment(bookId, aligned, total, version)
 
     suspend fun updatePlaybackPosition(bookId: String, positionMs: Long) =
         bookDao.updatePlaybackPosition(bookId, positionMs)
@@ -134,6 +135,8 @@ class BookRepository(
 
     suspend fun updateMetadata(bookId: String, title: String, author: String?, coverPath: String?, sizeBytes: Long) =
         bookDao.updateMetadata(bookId, title, author, coverPath, sizeBytes)
+
+    suspend fun setCoverPath(bookId: String, coverPath: String) = bookDao.setCoverPath(bookId, coverPath)
 
     suspend fun updateReadingPosition(bookId: String, locator: String?) =
         bookDao.updateReadingPosition(bookId, locator, System.currentTimeMillis())
@@ -158,18 +161,50 @@ class BookRepository(
     }
 
     /**
-     * Removes only the downloaded audiobook and sync file from this device --
-     * the epub, cover, book row and the server's job are all left untouched, so
-     * the card stays in the library exactly where it was, just back in the
-     * "ready to download" state. This is the "free up space, keep the book"
-     * action; [deleteBook] is the "forget this book entirely" one.
+     * Wipes every local trace of a book except its library entry and the
+     * server's job: the epub, cover, downloaded audiobook and sync file are
+     * all deleted from disk; the read-along mapping (sync_chunks/
+     * sync_chapters), reading position, playback position, sync offset, and
+     * alignment state are all reset. This is the trash-can icon on the
+     * library card -- "start this book's local state over, but keep it in
+     * my library."
+     *
+     * Notes are the one deliberate exception: [NoteDao] has no server
+     * counterpart at all, so deleting them here would be unrecoverable in a
+     * way nothing else in this function is (everything else can simply be
+     * re-fetched). A user asking to clear a book's local state is not
+     * asking to lose annotations they wrote.
+     *
+     * The book row itself, and its `jobId`, survive: the card stays in the
+     * library, back in the "ready to download" state, since the server
+     * still has everything needed to fetch it all again --
+     * `DownloadWorker.ensureEpub` already handles a book whose `epubPath`
+     * names a file that turns out not to be there, re-fetching it (and
+     * regenerating the cover from it) exactly the way it already does for
+     * a book newly adopted from another device.
      */
-    suspend fun deleteDownloadedContent(bookId: String) {
+    suspend fun deleteLocalContent(bookId: String) {
         val book = bookDao.get(bookId) ?: return
-        listOfNotNull(book.audiobookPath, book.syncPath).forEach { runCatching { File(it).delete() } }
+        listOfNotNull(book.epubPath, book.coverPath, book.audiobookPath, book.syncPath)
+            .forEach { runCatching { File(it).delete() } }
         updateDownload(bookId, DownloadState.NONE, downloadedBytes = 0, totalBytes = 0, error = null)
         setAudiobook(bookId, null)
         setSync(bookId, null, null)
+        bookDao.clearCover(bookId)
+        updateReadingPosition(bookId, null)
+        bookDao.updatePlaybackPosition(bookId, 0)
+        bookDao.updateSyncOffset(bookId, 0)
+        syncDao.clearChunks(bookId)
+        syncDao.clearChapters(bookId)
+        // Otherwise a re-download never gets a fresh alignment pass: the
+        // sync_chunks rows themselves are untouched by this function, and
+        // BookEntity.needsAlignment only becomes true again from
+        // alignedChunks == 0 -- an existing (possibly imperfect, e.g. from
+        // an aligner bug fixed since) alignment permanently forecloses
+        // ever recomputing it otherwise. Moot now that clearChunks/
+        // clearChapters above also run, but kept as the explicit, direct
+        // statement of intent rather than relying on that as a side effect.
+        setAlignment(bookId, aligned = 0, total = 0, version = 0)
     }
 
     /**
