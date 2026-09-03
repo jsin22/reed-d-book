@@ -30,7 +30,18 @@
         android:supportsRtl="true"
         android:networkSecurityConfig="@xml/network_security_config"
         tools:ignore="InsecureBaseConfiguration"
-        android:theme="@style/Theme.Reedd">
+        android:theme="@style/Theme.Reedd"
+        android:largeHeap="true">
+        <!-- Confirmed live: ExoPlayer's own MP4 extractor threw
+             OutOfMemoryError trying to make a single, roughly 100MB
+             allocation while opening "The Count of Monte Cristo" (882MB,
+             over 2 hours, 35,145 sentences, far larger than anything else
+             this app has been tested against), against the default heap's
+             256MB growth limit, most of which was already spent on
+             everything else the app holds resident (the reader's own
+             WebView, the whole library list, in flight downloads). Every
+             other book this session, all far smaller, never came close to
+             this ceiling. -->
 
         <activity
             android:name=".MainActivity"
