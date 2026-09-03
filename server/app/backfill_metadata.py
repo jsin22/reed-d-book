@@ -12,10 +12,11 @@ whose epub is gone, or whose OPF metadata has no title, is skipped and
 reported rather than guessed at.
 
 `--recheck` re-runs a job that already has *some* category/genres too, and
-bypasses the cache -- for re-enriching books that were "resolved" before
-the Ollama pass existed (see LLM_GENRE_ENRICHMENT.md): a plain re-run would
-otherwise skip exactly those, since having any category/genres at all
-already counts as resolved.
+bypasses the cache -- for re-enriching books that were "resolved" under an
+older lookup (Ollama, then Open Library/Google Books, now Gemini -- see
+LLM_GENRE_ENRICHMENT.md) before the current one existed: a plain re-run
+would otherwise skip exactly those, since having any category/genres at
+all already counts as resolved.
 
     python -m app.backfill_metadata              # writes the results
     python -m app.backfill_metadata --dry-run     # prints what it would do

@@ -32,9 +32,10 @@ _CONFIDENCE_THRESHOLD = 7
 # added after live testing against non-fiction titles kept surfacing
 # "Philosophy"/"Psychology" with real confidence even under an explicit
 # "only use this list" instruction -- the original 20 leaned fiction-heavy
-# and had no good analog for either. Also promotes several words
-# book_metadata._NONFICTION_MARKERS already treated as non-fiction
-# *signals* into actual genre *tags*.
+# and had no good analog for either. Also promotes several words the
+# pre-Gemini, Open-Library/Google-Books-based lookup only ever treated as
+# non-fiction *signals* (see LLM_GENRE_ENRICHMENT.md) into actual genre
+# *tags* here.
 _GENRES = (
     'Science Fiction', 'Short Stories', 'Young Adult', 'Self-Help',
     'Historical Fiction', 'History', 'Biography', 'Horror', 'Mystery',

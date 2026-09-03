@@ -9,6 +9,8 @@ Each job owns a directory::
         out/                     audiblez' output folder
             book.m4b             the audiobook
             book.json            the sync mapping (see audiblez/SYNC.md)
+            cover                cover art, no extension -- from the epub itself,
+                                 or fetched by app.cover_lookup if it had none
             book_chapter_*.wav   intermediate, deleted unless keep_intermediate
         worker.log               audiblez' stdout for this job
 

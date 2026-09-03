@@ -197,11 +197,17 @@ class ChunkAligner(private val contextChars: Int = DEFAULT_CONTEXT) {
          * author, license text all pass its char-count floor) instead of real
          * chapter 1 -- and stayed that way indefinitely, since alignedChunks
          * was already nonzero and nothing ever asked the aligner to run again.
-         * Only a manual delete-and-redownload (which happens to reset
-         * alignedChunks to 0 as a side effect) forced a fresh pass and fixed
-         * it. Every book aligned before this field existed reads it as 0,
-         * which is always less than this constant, so the fix reaches them
-         * too without any separate backfill.
+         * A manual delete-and-redownload (which happens to reset alignedChunks
+         * to 0 as a side effect) forced a fresh pass and did correctly resolve
+         * the alignment vote to the real chapter 1 -- confirmed by the vote
+         * itself, logged live. That book's playback was still broken after
+         * this fix, but by then for an entirely separate reason (an
+         * out-of-memory failure loading its unusually large audio file, see
+         * AndroidManifest.xml's largeHeap flag) -- this fix owns the alignment
+         * problem specifically, not that whole incident. Every book aligned
+         * before this field existed reads it as 0, which is always less than
+         * this constant, so the fix reaches them too without any separate
+         * backfill.
          */
         const val ALIGNMENT_VERSION = 2
     }
