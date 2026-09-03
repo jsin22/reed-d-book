@@ -141,6 +141,7 @@ class JobStore:
             'celery_task_id': None,
             'audiobook': None,
             'sync': None,
+            'cover': None,
             'owner': owner,
             'public': False,
             'title': title,

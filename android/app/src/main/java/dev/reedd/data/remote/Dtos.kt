@@ -37,6 +37,11 @@ data class JobDto(
     @SerialName("celery_task_id") val celeryTaskId: String? = null,
     val audiobook: FileRefDto? = null,
     val sync: FileRefDto? = null,
+    /** Absent on a job whose epub had no cover and nothing was ever found for
+     *  it at `GET /api/jobs/{id}/cover` -- see that endpoint's own doc for
+     *  why polling alone never fills this in: the lookup only runs when a
+     *  device actually downloads the cover, not on every poll. */
+    val cover: FileRefDto? = null,
     /** Absent on a job from before per-user accounts existed; treat as private. */
     val public: Boolean = false,
     /** Only ever present from `GET /api/admin/jobs` -- null everywhere else. */

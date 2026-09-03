@@ -111,6 +111,7 @@ class DownloadWorker(
             container.repository.updateDownload(bookId, DownloadState.RUNNING, error = null)
 
             ensureEpub(book, jobId)
+            downloadCoverIfMissing(bookId, jobId)
 
             val audiobook = downloadAudiobook(book, jobId, progress)
             val sync = downloadSync(book, jobId)
@@ -190,8 +191,8 @@ class DownloadWorker(
      * [BookEntity.epubPath], see ServerLibraryAdopter) but no file there yet --
      * a book this device converted or imported itself already does. Fetches
      * it and replaces the server manifest's best-effort title/author/size with
-     * the real, Readium-derived ones (plus a cover, which the manifest never
-     * had at all).
+     * the real, Readium-derived ones, including a cover extracted straight from
+     * the epub if it has one.
      */
     private suspend fun ensureEpub(book: BookEntity, jobId: String) {
         val target = File(book.epubPath)
@@ -199,6 +200,31 @@ class DownloadWorker(
         container.downloader.download(url = container.api.url("api/jobs/$jobId/epub"), target = target)
         val imported = container.importer.fromServerCopy(bookId, book.originalFilename)
         container.repository.updateMetadata(bookId, imported.title, imported.author, imported.coverPath, imported.sizeBytes)
+    }
+
+    /**
+     * A fallback for a book whose epub had no cover of its own at all --
+     * [ensureEpub]'s Readium-derived extraction just above already covers
+     * the common case, so this only ever fetches anything when that left
+     * [BookEntity.coverPath] null. `GET /api/jobs/{id}/cover`
+     * (server/app/main.py) does the actual lookup (Open Library, best-effort)
+     * server-side, on first request -- itself resilient the same way this
+     * call site is, so a book with genuinely no cover anywhere costs one
+     * cheap 410 per download, never a failed one.
+     *
+     * Deliberately outside `doWork()`'s own try/catch: a missing cover is
+     * never worth failing the whole audiobook+sync download over, the same
+     * way a book plays fine with no highlighting when alignment fails.
+     */
+    private suspend fun downloadCoverIfMissing(bookId: String, jobId: String) {
+        val current = container.repository.get(bookId) ?: return
+        if (current.coverPath != null) return
+        val target = container.files.cover(bookId)
+        runCatching {
+            container.downloader.download(url = container.api.url("api/jobs/$jobId/cover"), target = target)
+        }.onSuccess {
+            container.repository.setCoverPath(bookId, target.absolutePath)
+        }
     }
 
     private suspend fun downloadAudiobook(

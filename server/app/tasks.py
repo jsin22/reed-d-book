@@ -16,6 +16,7 @@ from pathlib import Path
 
 from .celery_app import CONVERT_TASK, celery_app
 from .config import get_settings
+from .cover_lookup import fetch_cover
 from .store import DONE, ERROR, RUNNING, JobNotFound, JobStore, utcnow
 
 # Keep the tail of a traceback: enough to diagnose, small enough to poll.
@@ -192,9 +193,23 @@ def convert_epub(self, job_id):
     if not get_settings().keep_intermediate:
         _cleanup_intermediates(output_dir)
 
+    # audiblez already wrote this if the epub had a cover of its own
+    # (core.py's find_cover, muxed into the .m4b by create_m4b); this is
+    # only reached for the epub-had-none case. Best-effort and never
+    # allowed to fail the job -- see cover_lookup.fetch_cover's own doc.
+    cover_path = output_dir / 'cover'
+    if not cover_path.is_file():
+        fetched = fetch_cover(manifest.get('title'), manifest.get('author'))
+        if fetched:
+            cover_path.write_bytes(fetched)
+
+    update_fields = dict(status=DONE, finished_at=utcnow(), progress=100, eta=None,
+                          audiobook=_describe(m4b), sync=_describe(sync))
+    if cover_path.is_file():
+        update_fields['cover'] = _describe(cover_path)
+
     try:
-        store.update(job_id, status=DONE, finished_at=utcnow(), progress=100, eta=None,
-                     audiobook=_describe(m4b), sync=_describe(sync))
+        store.update(job_id, **update_fields)
     except JobNotFound:
         return None  # deleted while converting; the output went with it
     return {'job_id': job_id, 'audiobook': m4b.name, 'sync': sync.name}

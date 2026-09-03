@@ -55,6 +55,7 @@ from .book_metadata import LookupUnavailable, lookup as lookup_book_metadata
 from .book_metadata_store import BookMetadataStore
 from .celery_app import enqueue, revoke
 from .config import get_settings
+from .cover_lookup import fetch_cover
 from .mailer import invite_configured, send_invite
 from .metadata_health import MetadataHealth
 from .store import (DONE, TERMINAL_STATUSES, JobNotFound, JobStore, UploadTooLarge,
@@ -429,6 +430,47 @@ def download_epub(job_id: str, user: dict = Depends(require_user)):
     if not path.is_file():
         raise HTTPException(status_code=410, detail='epub is no longer on disk')
     return FileResponse(path, media_type='application/epub+zip', filename=path.name)
+
+
+def _sniff_image_media_type(path: Path) -> str:
+    """`cover` is written with no extension (see app.tasks.convert_epub), so
+    the content type has to come from the bytes themselves, not the name."""
+    with open(path, 'rb') as f:
+        header = f.read(8)
+    return 'image/png' if header.startswith(b'\x89PNG\r\n\x1a\n') else 'image/jpeg'
+
+
+@app.get('/api/jobs/{job_id}/cover')
+def download_cover(job_id: str, user: dict = Depends(require_user)):
+    """The cover image, if one exists -- extracted from the epub itself by
+    audiblez, or (see app.cover_lookup) fetched from Open Library as a
+    fallback once conversion finished with none (app.tasks.convert_epub).
+
+    A job that finished *before* that fallback existed gets one lazily,
+    right here, the first time anything actually asks for it -- "backfill
+    the covers of everything already converted" this way, on demand as each
+    book is next downloaded, rather than a separate one-time pass over the
+    whole job store that would spend the lookup on books nobody is
+    revisiting.
+    """
+    manifest = get_job(job_id, user)
+    if manifest['status'] != DONE:
+        detail = manifest.get('error') or f'job is {manifest["status"]}'
+        raise HTTPException(status_code=409, detail=detail)
+    output_dir = store().output_dir(job_id)
+    entry = manifest.get('cover') or {}
+    cover_path = output_dir / entry.get('file', 'cover')
+    if not entry.get('file') or not cover_path.is_file():
+        fetched = fetch_cover(manifest.get('title'), manifest.get('author'))
+        if not fetched:
+            raise HTTPException(status_code=410, detail='no cover available for this book')
+        cover_path = output_dir / 'cover'
+        cover_path.write_bytes(fetched)
+        try:
+            store().update(job_id, cover={'file': cover_path.name, 'bytes': cover_path.stat().st_size})
+        except JobNotFound:
+            pass  # deleted between the check above and now; still serve this one response
+    return FileResponse(cover_path, media_type=_sniff_image_media_type(cover_path), filename='cover.jpg')
 
 
 # -- app diagnostics --------------------------------------------------------

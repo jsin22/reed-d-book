@@ -406,6 +406,59 @@ class DownloadTest(ApiTestCase):
         self.assertIn('Chapter 1', response.text)
 
 
+class CoverTest(ApiTestCase):
+    def test_serves_a_cover_already_recorded_on_the_manifest(self):
+        job_id = self.upload().json()['job_id']
+        self.finish(job_id)
+        (self.store.output_dir(job_id) / 'cover').write_bytes(b'\xff\xd8\xff fake jpeg')
+        self.store.update(job_id, cover={'file': 'cover', 'bytes': 11})
+
+        with mock.patch('app.main.fetch_cover') as fetch_cover:
+            response = self.client.get(f'/api/jobs/{job_id}/cover')
+            fetch_cover.assert_not_called()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b'\xff\xd8\xff fake jpeg')
+        self.assertEqual(response.headers['content-type'], 'image/jpeg')
+
+    def test_sniffs_a_png_by_its_own_bytes_not_the_extensionless_filename(self):
+        job_id = self.upload().json()['job_id']
+        self.finish(job_id)
+        png_header = b'\x89PNG\r\n\x1a\n' + b'rest of a fake png'
+        (self.store.output_dir(job_id) / 'cover').write_bytes(png_header)
+        self.store.update(job_id, cover={'file': 'cover', 'bytes': len(png_header)})
+
+        response = self.client.get(f'/api/jobs/{job_id}/cover')
+        self.assertEqual(response.headers['content-type'], 'image/png')
+
+    def test_a_job_finished_before_this_feature_existed_fetches_lazily_on_first_request(self):
+        job_id = self.upload().json()['job_id']
+        self.finish(job_id)  # no cover recorded -- an "old" job
+        self.store.update(job_id, title='A Real Book', author='A Real Author')
+
+        with mock.patch('app.main.fetch_cover', return_value=b'lazily fetched') as fetch_cover:
+            response = self.client.get(f'/api/jobs/{job_id}/cover')
+            fetch_cover.assert_called_once_with('A Real Book', 'A Real Author')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b'lazily fetched')
+        # Cached: a second request must not look it up again.
+        with mock.patch('app.main.fetch_cover') as fetch_cover:
+            self.client.get(f'/api/jobs/{job_id}/cover')
+            fetch_cover.assert_not_called()
+        self.assertEqual(self.store.read(job_id)['cover']['bytes'], len(b'lazily fetched'))
+
+    def test_no_cover_anywhere_is_410_not_500(self):
+        job_id = self.upload().json()['job_id']
+        self.finish(job_id)
+        with mock.patch('app.main.fetch_cover', return_value=None):
+            self.assertEqual(self.client.get(f'/api/jobs/{job_id}/cover').status_code, 410)
+
+    def test_cover_before_the_job_finishes_is_409(self):
+        job_id = self.upload().json()['job_id']
+        self.assertEqual(self.client.get(f'/api/jobs/{job_id}/cover').status_code, 409)
+
+
 class DeleteTest(ApiTestCase):
     def test_deletes_files_and_cancels_a_running_job(self):
         job_id = self.upload().json()['job_id']

@@ -132,6 +132,45 @@ class ConversionTest(TaskTestCase):
         self.run_task(job_id, audiblez=overshooting)
         self.assertEqual(seen, [100])
 
+    def test_a_cover_audiblez_already_extracted_is_recorded_without_any_lookup(self):
+        job_id = self.make_job()
+
+        def with_cover(file_path, voice, pick_manually, speed, output_folder, post_event=None, **kw):
+            fake_audiblez()(file_path, voice, pick_manually, speed, output_folder, post_event)
+            from pathlib import Path
+            (Path(output_folder) / 'cover').write_bytes(b'fake cover bytes')
+
+        with mock.patch('app.tasks.fetch_cover') as fetch_cover:
+            self.run_task(job_id, audiblez=with_cover)
+            fetch_cover.assert_not_called()
+
+        manifest = self.store.read(job_id)
+        self.assertEqual(manifest['cover']['file'], 'cover')
+        self.assertEqual(manifest['cover']['bytes'], len(b'fake cover bytes'))
+
+    def test_a_missing_cover_falls_back_to_the_lookup_by_title_and_author(self):
+        job_id = self.make_job()
+        self.store.update(job_id, title='A Real Book', author='A Real Author')
+
+        with mock.patch('app.tasks.fetch_cover', return_value=b'fetched bytes') as fetch_cover:
+            self.run_task(job_id)
+            fetch_cover.assert_called_once_with('A Real Book', 'A Real Author')
+
+        manifest = self.store.read(job_id)
+        self.assertEqual(manifest['cover']['bytes'], len(b'fetched bytes'))
+        self.assertEqual((self.store.output_dir(job_id) / 'cover').read_bytes(), b'fetched bytes')
+
+    def test_a_lookup_miss_leaves_the_job_done_with_no_cover_at_all(self):
+        job_id = self.make_job()
+
+        with mock.patch('app.tasks.fetch_cover', return_value=None):
+            result = self.run_task(job_id)
+
+        self.assertTrue(result.successful(), result.traceback)
+        manifest = self.store.read(job_id)
+        self.assertEqual(manifest['status'], 'done')
+        self.assertIsNone(manifest['cover'])
+
     def test_repeated_percentages_do_not_rewrite_the_manifest(self):
         # CORE_PROGRESS fires per sentence; a novel would otherwise hammer the disk.
         job_id = self.make_job()
