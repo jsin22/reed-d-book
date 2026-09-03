@@ -4,9 +4,11 @@ import dev.reedd.data.remote.ApiException
 import dev.reedd.data.remote.ApiProvider
 import dev.reedd.data.remote.ServerNotConfigured
 import dev.reedd.data.settings.SettingsStore
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.withTimeout
 import java.io.IOException
 
 /** Whether this device can currently talk to the server as someone -- distinct
@@ -39,6 +41,7 @@ sealed interface AuthStatus {
 class AuthStatusMonitor(
     private val settingsStore: SettingsStore,
     private val api: ApiProvider,
+    private val checkTimeoutMs: Long = CHECK_TIMEOUT_MS,
 ) {
     private val _status = MutableStateFlow<AuthStatus>(AuthStatus.Unknown)
     val status: StateFlow<AuthStatus> = _status.asStateFlow()
@@ -65,12 +68,28 @@ class AuthStatusMonitor(
             return
         }
         try {
-            val me = api.service().me()
+            // OkHttpClient.connectTimeout does not reliably bound DNS
+            // resolution on Android -- confirmed live: with Tailscale
+            // connected at app launch, resolving this server's MagicDNS
+            // name (`*.ts.net`, only resolvable through Tailscale's own
+            // resolver) could hang well past it, apparently while that
+            // resolver was still settling in right as the app's very first
+            // request fired, leaving this stuck in AuthStatus.Unknown
+            // forever with no error to show. withTimeout bounds it from the
+            // coroutine side regardless of what the underlying blocking
+            // call is actually stuck on: cancelling a suspending Retrofit
+            // call this way does call the underlying OkHttp Call.cancel(),
+            // which unblocks the caller even if a leaked native thread
+            // doing the actual DNS lookup lingers a little longer in the
+            // background -- an acceptable trade against hanging forever.
+            val me = withTimeout(checkTimeoutMs) { api.service().me() }
             setOk(me.isAdmin)
         } catch (e: ApiException) {
             if (e.isUnauthorized) setNeedsToken() else setUnreachable(describe(e))
         } catch (e: ServerNotConfigured) {
             setNeedsToken()
+        } catch (e: TimeoutCancellationException) {
+            setUnreachable("timed out reaching the server")
         } catch (e: IOException) {
             setUnreachable(describe(e))
         }
@@ -92,6 +111,10 @@ class AuthStatusMonitor(
     }
 
     companion object {
+        /** How long [check] waits before giving up and reporting
+         *  [AuthStatus.Unreachable] instead of hanging indefinitely. */
+        private const val CHECK_TIMEOUT_MS = 15_000L
+
         private fun describe(e: Throwable): String = when (e) {
             is ApiException -> e.detail ?: "the server returned ${e.code}"
             else -> e.message ?: "could not reach the server"

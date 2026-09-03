@@ -15,12 +15,14 @@ import dev.reedd.data.settings.SettingsStore
 import dev.reedd.di.AppContainer
 import dev.reedd.domain.AuthStatusMonitor
 import dev.reedd.domain.ConversionWatcher
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 import java.io.IOException
 
 /** Result of the non-admin Save button's own `GET /api/me` check -- distinct
@@ -79,7 +81,13 @@ class SettingsViewModel(
 
     fun refreshMe() {
         viewModelScope.launch {
-            val result = runCatching { api.service().me() }.getOrNull()
+            // See AuthStatusMonitor.check's own doc: an unbounded me() call
+            // here (this fires from init, the moment this screen opens) can
+            // hang past any reasonable wait rather than failing outright --
+            // runCatching already treats the resulting
+            // TimeoutCancellationException the same as any other failure,
+            // which is exactly the fallback this block already wants.
+            val result = runCatching { withTimeout(CHECK_TIMEOUT_MS) { api.service().me() } }.getOrNull()
             _me.value = result
             if (result != null) {
                 // Already have the answer this call just gave us -- publish it
@@ -204,12 +212,17 @@ class SettingsViewModel(
             settingsStore.setServer(baseUrl, token)
             _check.value = ConnectionCheck.Checking
             _check.value = try {
-                val health = api.service().health()
+                // See AuthStatusMonitor.check's own doc: connectTimeout does
+                // not reliably bound DNS resolution on Android, confirmed
+                // live to leave this screen stuck on "Checking" forever
+                // with Tailscale connected at launch. withTimeout bounds it
+                // from the coroutine side instead.
+                val health = withTimeout(CHECK_TIMEOUT_MS) { api.service().health() }
                 if (health.status != "ok") {
                     ConnectionCheck.Unreachable("The server answered '${health.status}'.")
                 } else {
                     try {
-                        val me = api.service().me()
+                        val me = withTimeout(CHECK_TIMEOUT_MS) { api.service().me() }
                         _me.value = me
                         ConnectionCheck.Reachable(health.dataDir, health.broker, me.email)
                     } catch (e: ApiException) {
@@ -225,6 +238,8 @@ class SettingsViewModel(
                 ConnectionCheck.Unreachable("No address set.")
             } catch (e: ApiException) {
                 ConnectionCheck.Unreachable(e.detail ?: "The server returned ${e.code}.")
+            } catch (e: TimeoutCancellationException) {
+                ConnectionCheck.Unreachable("Timed out reaching that address.")
             } catch (e: IOException) {
                 ConnectionCheck.Unreachable(e.message ?: "Could not reach that address.")
             }
@@ -240,6 +255,11 @@ class SettingsViewModel(
     fun normalizedPreview(baseUrl: String): String? = ServerAddress.normalize(baseUrl)
 
     companion object {
+        /** How long [testConnection] waits on each request before giving up
+         *  and reporting [ConnectionCheck.Unreachable] instead of hanging
+         *  indefinitely on "Checking". */
+        private const val CHECK_TIMEOUT_MS = 15_000L
+
         fun factory(container: AppContainer) = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T = SettingsViewModel(
