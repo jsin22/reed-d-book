@@ -68,17 +68,22 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.fragment.app.FragmentActivity
 import androidx.fragment.compose.AndroidFragment
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import dev.reedd.data.settings.ReaderSettings
+import dev.reedd.diagnostics.CrashReporter
 import dev.reedd.domain.NoteLocators
+import dev.reedd.domain.resolveLink
 import dev.reedd.domain.spineIndexOf
 import dev.reedd.ui.theme.paperColorScheme
 import org.readium.r2.navigator.epub.EpubNavigatorFragment
@@ -107,6 +112,16 @@ private val PAGE_INDICATOR_RESERVED_HEIGHT = 24.dp
 
 /** How often continuous scroll checks whether it needs to catch up. See [ScrollFollower]. */
 private const val SCROLL_FOLLOW_CHECK_INTERVAL_MS = 400L
+
+/**
+ * How long after the last drag/scroll signal to wait before deciding
+ * whether it actually disengaged follow -- see the effect that uses this
+ * in [EpubNavigator]. Long enough for a swipe's page turn (or a scroll's
+ * settle) to actually land, short enough not to feel laggy if it really
+ * was a deliberate look-away. Not derived from a real measurement; a
+ * reasonable, tunable guess.
+ */
+private const val DRAG_SETTLE_DELAY_MS = 400L
 
 /**
  * The reading screen, with read-along.
@@ -509,6 +524,7 @@ private fun ReaderPalette(paper: Boolean, content: @Composable () -> Unit) {
  *  endpoints, in CSS px. See the `extendRequests` flow in [EpubNavigator]. */
 private data class ExtendRequest(val startX: Float, val startY: Float, val endX: Float, val endY: Float)
 
+@OptIn(FlowPreview::class)
 @Composable
 private fun EpubNavigator(
     state: ReaderState.Ready,
@@ -532,6 +548,11 @@ private fun EpubNavigator(
     // separate onProgressionChanged path that lagged behind rapid page turns
     // enough to send "Read from here" to the wrong page (BUGS.md BUG-17).
     var lastPageLocator by remember { mutableStateOf<Locator?>(null) }
+
+    // A drag/scroll settling -- see the LaunchedEffect further down that
+    // debounces this for why the decision to disengage follow no longer
+    // happens directly inside InputListener.onDrag.
+    val dragSettleSignal = remember { MutableStateFlow(0L) }
 
     // See the AndroidFragment's own onGloballyPositioned below: added into
     // every SelectionHandle anchor to convert its WebView-viewport-relative
@@ -824,13 +845,56 @@ private fun EpubNavigator(
                 // real bug this guards against (dismissWordMenu wiping the
                 // handle's own state out from under it, mid-drag).
                 if (readAlongViewModel.isHandleDragActive) return true
-                readAlongViewModel.onUserDragged()
+                // Whether this drag should actually disengage follow is
+                // decided once it settles, not here -- see the debounced
+                // effect further down for why.
+                dragSettleSignal.value = System.nanoTime()
                 readAlongViewModel.dismissWordMenu()
                 return false // let Readium scroll or page as normal
             }
         }
         fragment.addInputListener(input)
         Log.i(TAG_TAP, "input listener attached to the navigator")
+    }
+
+    // Follow used to disengage the instant any drag was seen at all (inside
+    // InputListener.onDrag, directly) -- see FollowController's own doc for
+    // why dragging should stop it, but confirmed live to fire far too
+    // eagerly: viewing a word's definition (no deliberate page-turn
+    // intended at all -- pausing playback for it is correct, disengaging
+    // follow is not) and manually flipping to the very next page because a
+    // sentence spans the boundary between two pages (FEATURES.md's own
+    // documented limitation -- the page cannot turn mid-sentence, so
+    // catching up by hand is the only way to keep reading along) both left
+    // the reader looking at exactly the passage still playing, yet both
+    // disengaged follow anyway.
+    //
+    // Deferred until DRAG_SETTLE_DELAY_MS after the last drag signal, then
+    // only actually disengages if the settled position is not still
+    // showing the resource the currently-playing sentence belongs to. A
+    // spurious onDrag call with no real page change behind it never
+    // reaches here at all once a newer signal (or none) supersedes it
+    // (collectLatest); a real page turn that lands back on the same
+    // resource -- the exact two-pages-one-sentence case -- now leaves
+    // follow alone instead of assuming any drag at all means "look away".
+    LaunchedEffect(navigator) {
+        val fragment = navigator ?: return@LaunchedEffect
+        dragSettleSignal.filter { it != 0L }.debounce(DRAG_SETTLE_DELAY_MS).collectLatest {
+            val currentChunk = readAlongViewModel.chunkIndex()
+                .chunkAtIndex(readAlongViewModel.state.value.currentIndex)
+            val currentHref = currentChunk?.resourceHref?.let { resolveLink(state.publication, it) }
+            val settledHref = (lastPageLocator ?: fragment.currentLocator.value).href
+            val disengaging = currentHref == null || currentHref != settledHref
+            // Diagnostic for "definitions/spanning-a-page-boundary disengage
+            // follow when they should not" -- remove once confirmed fixed.
+            CrashReporter.reportDiagnostic(
+                context, "ReeddFollowDisengage",
+                "currentChunkHref=$currentHref settledHref=$settledHref disengaging=$disengaging",
+            )
+            if (disengaging) {
+                readAlongViewModel.onUserDragged()
+            }
+        }
     }
 
     // Drives SelectionTextResolver.extend() as a handle is dragged. A
