@@ -59,6 +59,28 @@ class ChunkAlignerTest {
     }
 
     @Test
+    fun `ordinal 0 is never aligned even when the resource's own text would match it`() {
+        // Confirmed live, on a real book ("Lamb to the Slaughter"): a
+        // chapter-1 resource that itself opens with the book's title and
+        // author as a heading -- ordinary front matter -- satisfies
+        // audiblez's injected "<title> - <author>." chunk 0 by pure
+        // coincidence, not a bug in this search. Chunk 0 must stay
+        // unaligned regardless of what the page actually says, since it
+        // does not correspond to any real sentence there -- the read-along
+        // "follow" feature trusted a match like this the instant playback
+        // started, jumping the page to the heading for an instant.
+        val page = ResourceText("EPUB/c1.xhtml", "Lamb to the Slaughter. Roald Dahl. The room was warm.")
+        val chunks = listOf(chunk(0, "Lamb to the Slaughter. Roald Dahl."), chunk(1, "The room was warm."))
+
+        val result = aligner.align(chunks, listOf(chapter(1, "c1.xhtml")), listOf(page))
+
+        assertFalse(result.chunks[0].isAligned)
+        assertNull(result.chunks[0].resourceHref)
+        assertTrue(result.chunks[1].isAligned)
+        assertEquals("The room was warm.", result.chunks[1].textHighlight)
+    }
+
+    @Test
     fun `a heading whose chunk has an added period still matches`() {
         // The epub's <h1> is "Understanding Digital Formats"; audiblez speaks
         // "Understanding Digital Formats." with a period it appended.
@@ -130,9 +152,9 @@ class ChunkAlignerTest {
         // The reason context is stored at all.
         val page = ResourceText("EPUB/c1.xhtml", "Alpha here. He nodded. Beta here. He nodded. Gamma here.")
         val chunks = listOf(
-            chunk(0, "He nodded."),
-            chunk(1, "Beta here."),
-            chunk(2, "He nodded."),
+            chunk(1, "He nodded."),
+            chunk(2, "Beta here."),
+            chunk(3, "He nodded."),
         )
 
         val result = aligner.align(chunks, listOf(chapter(1, "c1.xhtml")), listOf(page))
@@ -152,7 +174,7 @@ class ChunkAlignerTest {
         // audiblez only reads title/p/h1-h4/li, so a table or blockquote in between
         // is text on the page that is never spoken.
         val page = ResourceText("EPUB/c1.xhtml", "First sentence. SKIPPED TABLE CONTENT. Second sentence.")
-        val chunks = listOf(chunk(0, "First sentence."), chunk(1, "Second sentence."))
+        val chunks = listOf(chunk(1, "First sentence."), chunk(2, "Second sentence."))
 
         val result = aligner.align(chunks, listOf(chapter(1, "c1.xhtml")), listOf(page))
 
@@ -167,7 +189,7 @@ class ChunkAlignerTest {
             "\n      He said “hello” — then left.\n      Next one.\n",
         )
         // audiblez' copy: collapsed spacing and ASCII punctuation.
-        val chunks = listOf(chunk(0, "\nHe said \"hello\" - then left."))
+        val chunks = listOf(chunk(1, "\nHe said \"hello\" - then left."))
 
         val result = aligner.align(chunks, listOf(chapter(1, "c1.xhtml")), listOf(page))
 
@@ -179,7 +201,7 @@ class ChunkAlignerTest {
 
     @Test
     fun `a chapter whose resource is missing leaves its chunks unaligned but intact`() {
-        val chunks = listOf(chunk(0, "Anything."))
+        val chunks = listOf(chunk(1, "Anything."))
 
         val result = aligner.align(chunks, listOf(chapter(1, "gone.xhtml")), emptyList())
 
@@ -193,7 +215,7 @@ class ChunkAlignerTest {
     @Test
     fun `a sentence that is not on the page is left unaligned`() {
         val page = ResourceText("EPUB/c1.xhtml", "Only this text exists here.")
-        val chunks = listOf(chunk(0, "Only this text exists here."), chunk(1, "This was never in the book."))
+        val chunks = listOf(chunk(1, "Only this text exists here."), chunk(2, "This was never in the book."))
 
         val result = aligner.align(chunks, listOf(chapter(1, "c1.xhtml")), listOf(page))
 
@@ -206,7 +228,7 @@ class ChunkAlignerTest {
     @Test
     fun `chapters are matched to resources by filename despite a path prefix`() {
         val page = ResourceText("EPUB/text/c1.xhtml", "A sentence.")
-        val result = aligner.align(listOf(chunk(0, "A sentence.")), listOf(chapter(1, "c1.xhtml")), listOf(page))
+        val result = aligner.align(listOf(chunk(1, "A sentence.")), listOf(chapter(1, "c1.xhtml")), listOf(page))
         assertEquals("EPUB/text/c1.xhtml", result.chunks.single().resourceHref)
     }
 
@@ -214,7 +236,7 @@ class ChunkAlignerTest {
     fun `each chapter's chunks are aligned against that chapter's own resource`() {
         val c1 = ResourceText("EPUB/c1.xhtml", "Chapter one text.")
         val c2 = ResourceText("EPUB/c2.xhtml", "Chapter two text.")
-        val chunks = listOf(chunk(0, "Chapter one text.", chapter = 1), chunk(1, "Chapter two text.", chapter = 2))
+        val chunks = listOf(chunk(1, "Chapter one text.", chapter = 1), chunk(2, "Chapter two text.", chapter = 2))
 
         val result = aligner.align(chunks, listOf(chapter(1, "c1.xhtml"), chapter(2, "c2.xhtml")), listOf(c1, c2))
 
@@ -226,7 +248,7 @@ class ChunkAlignerTest {
     fun `context is present but bounded`() {
         val page = ResourceText("EPUB/c1.xhtml", "x".repeat(500) + " Target sentence. " + "y".repeat(500))
         val result = ChunkAligner(contextChars = 10)
-            .align(listOf(chunk(0, "Target sentence.")), listOf(chapter(1, "c1.xhtml")), listOf(page))
+            .align(listOf(chunk(1, "Target sentence.")), listOf(chapter(1, "c1.xhtml")), listOf(page))
 
         val aligned = result.chunks.single()
         assertNotNull(aligned.textBefore)
@@ -237,21 +259,21 @@ class ChunkAlignerTest {
     @Test
     fun `a sentence at the very start has no before context`() {
         val page = ResourceText("EPUB/c1.xhtml", "Right at the start. Then more.")
-        val result = aligner.align(listOf(chunk(0, "Right at the start.")), listOf(chapter(1, "c1.xhtml")), listOf(page))
+        val result = aligner.align(listOf(chunk(1, "Right at the start.")), listOf(chapter(1, "c1.xhtml")), listOf(page))
         assertNull(result.chunks.single().textBefore)
     }
 
     @Test
     fun `an empty chunk is not matched to an arbitrary position`() {
         val page = ResourceText("EPUB/c1.xhtml", "Some text.")
-        val result = aligner.align(listOf(chunk(0, "   \n  ")), listOf(chapter(1, "c1.xhtml")), listOf(page))
+        val result = aligner.align(listOf(chunk(1, "   \n  ")), listOf(chapter(1, "c1.xhtml")), listOf(page))
         assertFalse(result.chunks.single().isAligned)
     }
 
     @Test
     fun `the ratio reports how much of the book can be highlighted`() {
         val page = ResourceText("EPUB/c1.xhtml", "One. Two.")
-        val chunks = listOf(chunk(0, "One."), chunk(1, "Two."), chunk(2, "Three."), chunk(3, "Four."))
+        val chunks = listOf(chunk(1, "One."), chunk(2, "Two."), chunk(3, "Three."), chunk(4, "Four."))
 
         val result = aligner.align(chunks, listOf(chapter(1, "c1.xhtml")), listOf(page))
 
@@ -273,7 +295,7 @@ class ChunkAlignerTest {
         // retrying itself forever instead of ever reaching a finished state.
         val text = "She trailed off… ".repeat(250) + "The final sentence."
         val page = ResourceText("EPUB/c1.xhtml", text)
-        val target = chunk(0, "The final sentence.")
+        val target = chunk(1, "The final sentence.")
 
         val result = aligner.align(listOf(target), listOf(chapter(1, "c1.xhtml")), listOf(page)) // must not throw
 

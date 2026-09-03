@@ -100,6 +100,16 @@ class ChunkAligner(private val contextChars: Int = DEFAULT_CONTEXT) {
         var cursor = 0
 
         return chunks.map { chunk ->
+            // The whole book's chunk 0 (this class's own doc) is never even
+            // searched for, rather than searched and left to fail by luck:
+            // a chapter-1 resource whose own real text happens to start
+            // with a title/byline heading -- ordinary front matter, not a
+            // coincidence -- can and does satisfy that search. Confirmed
+            // live, on a real book: the read-along "follow" feature trusted
+            // that alignment the instant playback started, jumping the page
+            // to the heading for an instant before the real first sentence
+            // took over a moment later.
+            if (chunk.ordinal == 0) return@map chunk
             val match = findNext(haystack, chunk.text, cursor)
             if (match == null) {
                 chunk
@@ -164,11 +174,35 @@ class ChunkAligner(private val contextChars: Int = DEFAULT_CONTEXT) {
         )
     }
 
-    private companion object {
+    companion object {
         /**
          * Enough context to disambiguate a repeated sentence without bloating the
          * database by a multiple of the book's text.
          */
-        const val DEFAULT_CONTEXT = 40
+        private const val DEFAULT_CONTEXT = 40
+
+        /**
+         * Bumped whenever this class's own matching logic changes in a way that
+         * would produce a different result for a book already aligned under an
+         * older version -- the `ordinal == 0` guard above is version 2's own
+         * reason to exist. [BookEntity.needsAlignment] compares a book's stored
+         * [dev.reedd.data.db.BookEntity.alignmentVersion] against this, so an
+         * improvement here is not permanently wasted on every book that happened
+         * to align once before it shipped.
+         *
+         * Confirmed live as a real gap, not a hypothetical one: "The Count of
+         * Monte Cristo" aligned once, before this guard existed, landed its
+         * majority vote on the book's own front matter (which audiblez had
+         * synthesized as a legitimate, sizeable early "chapter" -- title,
+         * author, license text all pass its char-count floor) instead of real
+         * chapter 1 -- and stayed that way indefinitely, since alignedChunks
+         * was already nonzero and nothing ever asked the aligner to run again.
+         * Only a manual delete-and-redownload (which happens to reset
+         * alignedChunks to 0 as a side effect) forced a fresh pass and fixed
+         * it. Every book aligned before this field existed reads it as 0,
+         * which is always less than this constant, so the fix reaches them
+         * too without any separate backfill.
+         */
+        const val ALIGNMENT_VERSION = 2
     }
 }

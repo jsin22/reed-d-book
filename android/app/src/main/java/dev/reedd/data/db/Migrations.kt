@@ -157,3 +157,18 @@ val MIGRATION_6_7 = object : Migration(6, 7) {
         db.execSQL("ALTER TABLE books ADD COLUMN autoDownload INTEGER NOT NULL DEFAULT 0")
     }
 }
+
+/**
+ * 7 -> 8: [ChunkAligner.ALIGNMENT_VERSION][dev.reedd.data.align.ChunkAligner].
+ *
+ * A plain counter, defaulted 0: every row written before this column existed
+ * reads as older than any real version the aligner will ever declare, so
+ * [BookEntity.needsAlignment] picks every one of them up for a fresh pass the
+ * next time its book opens -- exactly the self-healing this column exists
+ * for, with no separate backfill query needed here.
+ */
+val MIGRATION_7_8 = object : Migration(7, 8) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE books ADD COLUMN alignmentVersion INTEGER NOT NULL DEFAULT 0")
+    }
+}

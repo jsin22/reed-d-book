@@ -4,6 +4,7 @@ import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
+import dev.reedd.data.align.ChunkAligner
 import dev.reedd.data.remote.JobStatus
 
 /**
@@ -141,6 +142,16 @@ data class BookEntity(
      */
     @ColumnInfo(defaultValue = "0") val alignedChunks: Int = 0,
     @ColumnInfo(defaultValue = "0") val totalChunks: Int = 0,
+    /**
+     * Which [dev.reedd.data.align.ChunkAligner.ALIGNMENT_VERSION] produced
+     * [alignedChunks]. A row written before this column existed reads 0,
+     * always below the current constant, so [needsAlignment] treats it the
+     * same as a book that has never been aligned at all -- see
+     * [dev.reedd.data.align.ChunkAligner]'s own doc on why that matters: an
+     * aligner improvement must reach books that already ran an older pass,
+     * not just ones downloaded from now on.
+     */
+    @ColumnInfo(defaultValue = "0") val alignmentVersion: Int = 0,
 
     // -- sort/filter (see SORT_GROUP_LIBRARY.md) ------------------------------
     /**
@@ -173,7 +184,8 @@ data class BookEntity(
      * re-run for books downloaded before the aligner existed.
      */
     val needsAlignment: Boolean
-        get() = isPlayable && totalChunks > 0 && alignedChunks == 0
+        get() = isPlayable && totalChunks > 0 &&
+            (alignedChunks == 0 || alignmentVersion < ChunkAligner.ALIGNMENT_VERSION)
 }
 
 enum class DownloadState { NONE, QUEUED, RUNNING, DONE, FAILED }

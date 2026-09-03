@@ -80,6 +80,7 @@ class MigrationTest {
         Room.databaseBuilder(context, ReeddDatabase::class.java, DB_NAME)
             .addMigrations(
                 MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7,
+                MIGRATION_7_8,
             )
             .allowMainThreadQueries()
             .build()
@@ -321,6 +322,31 @@ class MigrationTest {
         val db = openMigrated()
         try {
             assertFalse(db.books().get("b1")!!.autoDownload)
+        } finally {
+            db.close()
+        }
+    }
+
+    @Test
+    fun `MIGRATION_7_8 defaults an existing book's alignment version to 0`() = runTest {
+        // A book aligned before this column existed reads 0, always below
+        // ChunkAligner.ALIGNMENT_VERSION -- see BookEntityTest for why that
+        // by itself is enough to flag a re-alignment, with no backfill query
+        // needed here beyond the plain column default.
+        createVersion1().use { old ->
+            old.execSQL(
+                """
+                INSERT INTO books (id, epubPath, originalFilename, title, sizeBytes, addedAt,
+                                   jobProgress, jobChaptersDone, jobMissing, uploadedBytes,
+                                   downloadState, downloadedBytes, downloadTotalBytes)
+                VALUES ('b1', '/e', 'Book.epub', 'Book', 1, 1, 0, 0, 0, 0, 'NONE', 0, 0)
+                """.trimIndent()
+            )
+        }
+
+        val db = openMigrated()
+        try {
+            assertEquals(0, db.books().get("b1")!!.alignmentVersion)
         } finally {
             db.close()
         }
