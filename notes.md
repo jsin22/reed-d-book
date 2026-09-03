@@ -16,7 +16,7 @@ id, and does the work elsewhere.
 |---|---|---|
 | **uvicorn** (`app.main`) | speaks HTTP: takes uploads, answers polls, serves files | fast, always responsive |
 | **Redis/valkey** | the queue: a list of job ids waiting to be picked up | just a broker |
-| **Celery worker** (`app.tasks`) | runs audiblez, one book at a time | torch, kokoro, ffmpeg |
+| **Celery worker** (`app.tasks`) | runs audiblez, one book at a time | torch, pocket_tts, ffmpeg |
 
 They share two things: the **Redis URL** (how work is handed over) and the
 **data directory** (where files and state live). Nothing else — the API and
@@ -39,7 +39,7 @@ Everything after that point is bookkeeping — no TTS has happened.
 The worker is blocked on Redis waiting for an id. It gets one, flips the
 manifest to `running`, then calls `audiblez.core.main()` in-process — the same
 function `audiblez book.epub -o out/` calls. audiblez does the real work: splits
-chapters, runs Kokoro sentence by sentence, writes per-chapter `.wav`s,
+chapters, runs the TTS engine (Pocket TTS) sentence by sentence, writes per-chapter `.wav`s,
 concatenates them to `.m4b` via ffmpeg, and (thanks to the Phase 2 changes)
 emits the sync `.json`.
 
@@ -90,7 +90,7 @@ The consequence: the manifest is written by the worker and read by the API
 concurrently, so `JobStore.write` (`server/app/store.py`) writes a temp file and
 `os.replace`s it — a poll can never catch a half-written file.
 
-The second decision: **uvicorn never imports torch or kokoro.** It dispatches by
+The second decision: **uvicorn never imports torch or pocket_tts.** It dispatches by
 task *name* (`send_task('reedd.convert_epub', ...)`) rather than importing the
 task function. That's why the API starts instantly, stays small in RAM, and why
 the test suite runs the whole HTTP contract without the TTS stack installed.

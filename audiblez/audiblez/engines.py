@@ -1,24 +1,26 @@
 # -*- coding: utf-8 -*-
 """TTS backends audiblez can synthesize with.
 
-Each engine wraps one backend's own generate-a-sentence call behind the same
-small interface (`synthesize`), so the chapter loop in core.py does not need
-to know or care which backend actually produced the audio -- see
-_run_chapters_sequential / _run_chapters_parallel there.
+Pocket TTS is the only one left -- see git history for KokoroEngine and
+SupertonicEngine, removed once the Android app's own picker had been
+locked to Pocket TTS alone for a while (ImportSheet.kt) and nothing in
+this project's real usage ever selected the other two. `TTSEngine` and
+`ENGINES`/`load_engine` stay as the shape they were: the chapter loop in
+core.py still goes through `synthesize()` rather than calling Pocket TTS
+directly, so a future second engine (or reviving one from history) is a
+new subclass and a new `ENGINES` entry, not a rewrite of the dispatch.
 
-Backend imports (kokoro, pocket_tts, supertonic -- torch or onnxruntime, both
-heavy) are deferred to inside each class's __init__, not made at module
-level, so importing this module -- e.g. just to list engine/voice names, as
-server/app/audiblez_meta.py effectively does via the voices modules below --
-never pulls in the TTS stack. voices.py, pocket_tts_voices.py and
-supertonic_voices.py follow the same discipline for the same reason.
+The backend import (torch, pocket_tts -- both heavy) is deferred to inside
+the class's `__init__`, not made at module level, so importing this module
+-- e.g. just to list the voice names, as server/app/audiblez_meta.py
+effectively does via pocket_tts_voices.py below -- never pulls in the TTS
+stack. pocket_tts_voices.py follows the same discipline for the same
+reason.
 """
 
 from pathlib import Path
 
 from audiblez import pocket_tts_voices
-from audiblez import supertonic_voices
-from audiblez import voices as kokoro_voices
 
 
 def split_long_sentence(text, max_length=400):
@@ -40,10 +42,10 @@ def split_long_sentence(text, max_length=400):
 class TTSEngine:
     """One loaded model, reused across every chapter/sentence a worker handles.
 
-    Constructing one loads the model -- expensive (seconds for Kokoro,
-    tens of seconds to minutes on a cold cache for others) -- which is why
-    core.py builds exactly one per pipeline (sequential run) or per worker
-    process (parallel run), never per chapter or per sentence.
+    Constructing one loads the model -- expensive (tens of seconds to
+    minutes on a cold cache) -- which is why core.py builds exactly one
+    per pipeline (sequential run) or per worker process (parallel run),
+    never per chapter or per sentence.
     """
 
     #: Sample rate every `synthesize()` call returns audio at, as a *class*
@@ -51,49 +53,22 @@ class TTSEngine:
     #: below without constructing (expensive) an instance. audiblez uses one
     #: rate for a whole book's sync timeline and output .wav files, resolved
     #: from the selected engine's class before anything is synthesized (see
-    #: main() in core.py) -- Kokoro and Pocket TTS both happen to use 24000,
-    #: but Supertonic uses 44100, which is exactly the kind of assumption
-    #: that would otherwise have gone unnoticed.
+    #: main() in core.py).
     sample_rate: int
 
     def __init__(self, voice, threads=None):
         """`threads` is a hint, not a guarantee: a worker process running
         several engines in parallel (core.py's _run_chapters_parallel) passes
         its fair share of CPU cores so this instance does not oversubscribe
-        them, but an engine with no way to bound its own thread pool (Kokoro
-        and Pocket TTS rely on the process-wide torch.set_num_threads() the
-        worker already set instead) can simply ignore it.
+        them, but an engine with no way to bound its own thread pool (Pocket
+        TTS relies on the process-wide torch.set_num_threads() the worker
+        already set instead) can simply ignore it.
         """
         raise NotImplementedError
 
     def synthesize(self, text, voice, speed):
         """Return a list of numpy audio chunks for one sentence of text, at self.sample_rate."""
         raise NotImplementedError
-
-
-class KokoroEngine(TTSEngine):
-    sample_rate = 24000
-
-    def __init__(self, voice, threads=None):
-        from kokoro import KPipeline
-
-        from audiblez.espeak import set_espeak_library
-        set_espeak_library()
-        self.pipeline = KPipeline(lang_code=voice[0])
-
-    def synthesize(self, text, voice, speed):
-        # Kokoro truncates long sentences for non-English languages (English
-        # voice codes 'a'/'b' are never affected), so those are pre-split.
-        if voice[0] not in 'ab' and len(text) > 400:
-            print(f'Warning: Sentence too long ({len(text)} chars), splitting into smaller sentences.')
-            parts = split_long_sentence(text, 400)
-        else:
-            parts = [text]
-        segments = []
-        for part in parts:
-            for _gs, _ps, audio in self.pipeline(part, voice=voice, speed=speed, split_pattern=r'\n\n\n'):
-                segments.append(audio)
-        return segments
 
 
 #: Named voices resolved to a local reference clip rather than one of Pocket
@@ -111,11 +86,12 @@ class PocketTTSEngine(TTSEngine):
     """Kyutai's Pocket TTS (github.com/kyutai-labs/pocket-tts): ~100M params,
     designed to run well on CPU rather than needing a GPU to be usable at all.
     `TTSModel.load_model()` always loads onto CPU regardless -- moved onto
-    CUDA here, same auto-detect KokoroEngine relies on, when one is present.
+    CUDA here, auto-detected, when one is present.
     Measured 85.5 -> 322.4 chars/sec (~3.8x) on an RTX 2060 eGPU.
 
-    `speed` is accepted for interface symmetry with KokoroEngine but has no
-    effect -- pocket_tts.TTSModel.generate_audio has no speed control.
+    `speed` is accepted for interface symmetry with other engines this
+    project has used but has no effect -- pocket_tts.TTSModel.generate_audio
+    has no speed control.
 
     Long sentences get more conservative generation settings than short ones
     (see `_stable_settings_for`): Pocket TTS silently re-splits anything over
@@ -167,65 +143,12 @@ class PocketTTSEngine(TTSEngine):
         return [audio.cpu().numpy()]
 
 
-class SupertonicEngine(TTSEngine):
-    """Supertone's Supertonic 3 (github.com/supertone-inc/supertonic): ~99M
-    params, ONNX Runtime rather than PyTorch. Ten built-in named voices
-    (M1-M5, F1-F5), multilingual, and -- unlike Pocket TTS -- `speed` is
-    genuinely supported by the backend itself.
-
-    The library hardcodes `CPUExecutionProvider` in its own
-    `supertonic.loader.DEFAULT_ONNX_PROVIDERS` (its own comment: "GPU support
-    can be added by extending this list") and never exposes a `providers`
-    argument through `TTS()`, so CUDA is enabled here by patching that list
-    before constructing `TTS`, when onnxruntime actually has CUDA available
-    -- same auto-detect KokoroEngine/PocketTTSEngine rely on. Measured
-    44.1 -> 541.4 chars/sec (~12x) on an RTX 2060 eGPU. Needs
-    `onnxruntime-gpu` (not plain `onnxruntime`) pinned to a version built
-    against the CUDA/cuDNN major versions actually installed -- the latest
-    onnxruntime-gpu at the time (1.29) silently fell back to CPU because it
-    requires CUDA 13, while this machine's torch-provided CUDA libraries are
-    12.4; onnxruntime-gpu==1.20.2 is the one confirmed working here.
-    """
-
-    sample_rate = 44100
-
-    def __init__(self, voice, threads=None):
-        import onnxruntime as ort
-        import supertonic.loader as _supertonic_loader
-        from supertonic import TTS
-        if 'CUDAExecutionProvider' in ort.get_available_providers():
-            _supertonic_loader.DEFAULT_ONNX_PROVIDERS = ['CUDAExecutionProvider', 'CPUExecutionProvider']
-        # Not torch: torch.set_num_threads() (what constrains the other two
-        # engines' CPU usage per parallel worker) has no effect on an
-        # onnxruntime session. This is the equivalent knob for this engine.
-        kwargs = {}
-        if threads:
-            kwargs['intra_op_num_threads'] = threads
-            kwargs['inter_op_num_threads'] = 1
-        self.tts = TTS(auto_download=True, **kwargs)
-        self.voice_style = self.tts.get_voice_style(voice_name=voice)
-
-    def synthesize(self, text, voice, speed):
-        wav, _duration = self.tts.synthesize(
-            text=text, voice_style=self.voice_style, speed=speed, lang='en')
-        # supertonic returns shape (1, samples) -- a leading channel
-        # dimension -- rather than the flat (samples,) array Kokoro and
-        # Pocket TTS both return. sync.num_frames() already tolerates either
-        # shape (it reads shape[-1]), but np.concatenate()'ing several
-        # (1, samples) chunks of *different* lengths fails outright, since
-        # dimension 0 no longer broadcasts once dimension 1 does not match.
-        # Flattened here so every engine hands core.py the same shape.
-        return [wav.reshape(-1)]
-
-
 # engine name -> (engine class, {lang/country code: [voice names]})
 ENGINES = {
-    'kokoro': (KokoroEngine, kokoro_voices.voices),
     'pocket_tts': (PocketTTSEngine, pocket_tts_voices.voices),
-    'supertonic': (SupertonicEngine, supertonic_voices.voices),
 }
 
-DEFAULT_ENGINE = 'kokoro'
+DEFAULT_ENGINE = 'pocket_tts'
 
 
 def load_engine(engine_name, voice, threads=None):

@@ -37,7 +37,7 @@ Durations come from frame counts, never from a wall clock:
 
     chunk_duration = len(audio_array) / 24000
 
-Sentences that Kokoro internally splits into several segments are recorded as a
+Sentences that the TTS engine internally splits into several segments are recorded as a
 single chunk, since they are contiguous in the output.
 
 ## Known caveats
@@ -101,9 +101,9 @@ still open (project_plan Phase 2); RDNA 3.5 usually needs
 .venv/bin/python -m unittest test.test_sync test.test_sync_integration
 ```
 
-`test_sync.py` covers the timeline arithmetic and has no torch/kokoro/spacy
+`test_sync.py` covers the timeline arithmetic and has no torch/pocket_tts/spacy
 imports. `test_sync_integration.py` runs `main()` end to end against a fake
-Kokoro that returns silence proportional to text length, and asserts the JSON
+TTS engine that returns silence proportional to text length, and asserts the JSON
 matches the real durations of the `.wav`/`.m4b` files on disk. Neither needs
 network access. The pre-existing `test_main.py` still downloads real books and
 needs a real voice.

@@ -168,9 +168,11 @@ The `sample-medium.epub` runs took 33–34 s each.
    usually needs `HSA_OVERRIDE_GFX_VERSION=11.0.0`; whether the 890M is workable
    with current ROCm is the thing to establish first, since an unsupported iGPU can
    be slower than CPU or simply fail.
-2. **ONNX Runtime.** Kokoro has ONNX exports, and ONNX Runtime with a DirectML or
-   ROCm provider avoids the torch/ROCm problem entirely. Likely the more reliable
-   route on this hardware, at the cost of changing how audiblez loads the model.
+2. **ONNX Runtime.** Written when Kokoro was the engine, which ships ONNX exports;
+   ONNX Runtime with a DirectML or ROCm provider would have avoided the
+   torch/ROCm problem entirely. Pocket TTS is the engine now and its ONNX-export
+   situation hasn't been checked, so this route needs re-evaluating before
+   pursuing it.
 3. **Cheap wins regardless of backend:** the worker is pinned to
    `--concurrency=1` because TTS saturates the machine, but per-sentence batching
    inside Kokoro is not being exploited — batching sentences into one forward pass

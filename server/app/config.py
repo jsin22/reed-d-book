@@ -34,7 +34,6 @@ class Settings:
     broker_url: str
     result_backend: str
     default_engine: str
-    default_voice: str
     default_speed: float
     max_upload_bytes: int
     keep_intermediate: bool
@@ -82,7 +81,6 @@ def load_settings() -> Settings:
         broker_url=_env('BROKER_URL', f'{DEFAULT_REDIS}/0'),
         result_backend=_env('RESULT_BACKEND', f'{DEFAULT_REDIS}/1'),
         default_engine=_env('DEFAULT_ENGINE', 'pocket_tts'),
-        default_voice=_env('DEFAULT_VOICE', 'af_heart'),
         default_speed=float(_env('DEFAULT_SPEED', '1.0')),
         # Epubs are text; 200 MB is already absurdly generous and stops a bad
         # client from filling the Pocket 4's disk with a single request.

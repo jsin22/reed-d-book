@@ -2,34 +2,37 @@
 """The few facts about audiblez the API needs to validate a request.
 
 Kept apart from :mod:`app.tasks` because the web process must not import
-audiblez' heavy modules -- ``audiblez.voices``, ``audiblez.pocket_tts_voices``
-and ``audiblez.supertonic_voices`` are plain dicts importing nothing but the
-stdlib, so they are safe to read here even though the engines that actually
-use them (``audiblez.engines``, which imports kokoro/torch/pocket_tts/
-supertonic, but only inside each engine class's __init__, not at module
-level) are not.
+audiblez' heavy modules -- ``audiblez.pocket_tts_voices`` is a plain dict
+importing nothing but the stdlib, so it is safe to read here even though
+the engine that actually uses it (``audiblez.engines``, which imports
+torch/pocket_tts, but only inside the engine class's __init__, not at
+module level) is not.
+
+Pocket TTS is the only engine this server ever offers or accepts --
+audiblez itself once supported two more (Kokoro, Supertonic 3; see git
+history on audiblez/engines.py), but nothing in this project's real usage
+ever selected either, and the Android app's own picker had already locked
+to Pocket TTS alone (ImportSheet.kt) by the time they were removed.
+``ENGINES``/``DEFAULT_VOICE_BY_ENGINE`` stay shaped as a collection keyed
+by engine name, even with one entry, so a future second engine is a new
+entry here and in audiblez.engines.ENGINES, not a reshape of every call
+site that reads these.
 """
 
 from functools import lru_cache
 
-# audiblez' CLI advertises 0.5 to 2.0 (see audiblez/cli.py). Only meaningful
-# for engines that support speed control -- Kokoro and Supertonic do; Pocket
-# TTS accepts a speed value for API/manifest consistency but ignores it (see
-# audiblez.engines.PocketTTSEngine).
+# audiblez' CLI advertises 0.5 to 2.0 (see audiblez/cli.py). Pocket TTS
+# accepts a speed value for API/manifest consistency but ignores it (see
+# audiblez.engines.PocketTTSEngine) -- kept validated regardless, so the
+# contract does not change out from under a client if a future engine
+# actually honours it.
 MIN_SPEED = 0.5
 MAX_SPEED = 2.0
 
-ENGINES = ('kokoro', 'pocket_tts', 'supertonic')
-# The Android app no longer lets the user choose an engine and always sends
-# 'pocket_tts' explicitly (ImportSheet.kt) -- this is the fallback for
-# whatever does not, e.g. a request that omits the field entirely.
+ENGINES = ('pocket_tts',)
 DEFAULT_ENGINE = 'pocket_tts'
 
-# Kokoro's default voice comes from Settings.default_voice (env-configurable,
-# 'af_heart'), since that setting predates multi-engine support and there is
-# no reason to add a second knob for the same thing. Every other engine never
-# shared that setting, so each gets its own fixed fallback here instead.
-DEFAULT_VOICE_BY_ENGINE = {'pocket_tts': 'alba', 'supertonic': 'M1'}
+DEFAULT_VOICE_BY_ENGINE = {'pocket_tts': 'alba'}
 
 
 @lru_cache(maxsize=None)
@@ -42,12 +45,8 @@ def known_voices(engine=DEFAULT_ENGINE):
     upload/poll flow without the TTS stack installed.
     """
     try:
-        if engine == 'kokoro':
-            from audiblez.voices import voices as voices_by_lang
-        elif engine == 'pocket_tts':
+        if engine == 'pocket_tts':
             from audiblez.pocket_tts_voices import voices as voices_by_lang
-        elif engine == 'supertonic':
-            from audiblez.supertonic_voices import voices as voices_by_lang
         else:
             return []
     except Exception:

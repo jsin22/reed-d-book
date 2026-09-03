@@ -3,7 +3,7 @@
 
 Only the worker imports this module; see :mod:`app.celery_app` for why.
 audiblez itself is imported lazily inside the task so that even the worker pays
-for torch/kokoro/spacy at first job rather than at import, and so tests can
+for torch/pocket_tts/spacy at first job rather than at import, and so tests can
 substitute a fake.
 """
 
@@ -148,7 +148,8 @@ def _cleanup_intermediates(output_dir: Path):
 
 @celery_app.task(name=CONVERT_TASK, bind=True)
 def convert_epub(self, job_id):
-    """Convert one uploaded epub to .m4b + sync .json. Status goes to the manifest."""
+    """Convert one uploaded epub to .m4b + sync .json (+ cover art, best-effort).
+    Status goes to the manifest."""
     store = _store()
     manifest = store.read(job_id)  # raises if the job was deleted before we started
     output_dir = store.output_dir(job_id)
@@ -173,9 +174,12 @@ def convert_epub(self, job_id):
                 post_event=progress,
                 workers=get_settings().conversion_workers,
                 # Jobs created before engine selection existed have no
-                # 'engine' key; treat those as the kokoro they were always
-                # converted with.
-                engine=manifest.get('engine', 'kokoro'),
+                # 'engine' key -- none exist on this server any more (every
+                # real job's manifest already carries one), but the
+                # historically-accurate fallback (kokoro) is no longer even
+                # a valid engine (see audiblez.engines), so this defaults to
+                # the one that's actually still there instead.
+                engine=manifest.get('engine', 'pocket_tts'),
             )
     except Exception:
         _fail(store, job_id, traceback.format_exc())

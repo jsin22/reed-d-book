@@ -1,10 +1,20 @@
 # -*- coding: utf-8 -*-
 """End-to-end checks that the .json mapping actually describes the audio.
 
-Kokoro is replaced by a fake pipeline that returns silence proportional to the
-text length, so these run in under a second and are deterministic. What is being
-tested is the bookkeeping, and for that a fake voice is as good as a real one --
-the timestamps are derived from frame counts either way.
+The real TTS engine (audiblez.engines.load_engine) is replaced by a fake
+that returns silence proportional to the text length, so these run in under
+a second and are deterministic. What is being tested is the bookkeeping, and
+for that a fake voice is as good as a real one -- the timestamps are derived
+from frame counts either way.
+
+Was previously patching a `core.KPipeline` attribute left over from before
+audiblez supported more than one engine -- core.py hasn't constructed a TTS
+pipeline directly since that refactor moved it into audiblez.engines, so
+every test here had been silently erroring (AttributeError on the patch
+target) rather than actually exercising anything. `workers=1` is passed
+explicitly now for the same reason this needed noticing at all: the fake
+engine instance lives in this process, and a parallel chapter worker is a
+forked *process*, which would not see it.
 """
 
 import json
@@ -23,24 +33,26 @@ from audiblez import core, sync
 FRAMES_PER_CHAR = 100  # a "voice" that reads 240 chars/second
 
 
-class FakePipeline:
-    """Stands in for kokoro.KPipeline."""
+class FakeEngine:
+    """Stands in for a real TTSEngine (audiblez.engines) -- silent,
+    deterministic audio proportional to the text length."""
 
-    def __init__(self, lang_code=None, repo_id=None):
-        self.lang_code = lang_code
+    sample_rate = 24000
+
+    def __init__(self, voice=None, threads=None):
         self.calls = []
 
-    def __call__(self, text, voice=None, speed=1, split_pattern=None):
+    def synthesize(self, text, voice, speed):
         self.calls.append(text)
         frames = max(1, len(text) * FRAMES_PER_CHAR)
         if '||' in text:
-            # Exercise the case where Kokoro splits one sentence into several
-            # segments: the sentence's duration is the sum of them.
+            # Exercise the case where an engine splits one sentence into
+            # several segments (Pocket TTS does this for a long sentence --
+            # see PocketTTSEngine's own _stable_settings_for): the
+            # sentence's duration is the sum of them.
             half = frames // 2
-            yield 'gs', 'ps', np.zeros(half, dtype=np.float32)
-            yield 'gs', 'ps', np.zeros(frames - half, dtype=np.float32)
-        else:
-            yield 'gs', 'ps', np.zeros(frames, dtype=np.float32)
+            return [np.zeros(half, dtype=np.float32), np.zeros(frames - half, dtype=np.float32)]
+        return [np.zeros(frames, dtype=np.float32)]
 
 
 def make_epub(path, title='The Test Book', creator='A. Writer', chapters=3):
@@ -82,9 +94,9 @@ class SyncIntegrationTest(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
     def run_main(self, **kwargs):
-        with mock.patch.object(core, 'KPipeline', FakePipeline):
-            core.main(str(self.epub_path), voice='af_heart', pick_manually=False,
-                      speed=1.0, output_folder=str(self.dir), **kwargs)
+        with mock.patch.object(core, 'load_engine', return_value=FakeEngine()):
+            core.main(str(self.epub_path), voice='alba', pick_manually=False,
+                      speed=1.0, output_folder=str(self.dir), workers=1, **kwargs)
         return json.loads(self.sync_path.read_text(encoding='utf-8'))
 
     def chapter_wavs(self):
@@ -215,9 +227,9 @@ class M4bTest(unittest.TestCase):
         self.epub_path = make_epub(self.dir / 'book.epub', chapters=2)
 
     def test_m4b_and_json_are_produced_together(self):
-        with mock.patch.object(core, 'KPipeline', FakePipeline):
-            core.main(str(self.epub_path), voice='af_heart', pick_manually=False,
-                      speed=1.0, output_folder=str(self.dir))
+        with mock.patch.object(core, 'load_engine', return_value=FakeEngine()):
+            core.main(str(self.epub_path), voice='alba', pick_manually=False,
+                      speed=1.0, output_folder=str(self.dir), workers=1)
 
         m4b = self.dir / 'book.m4b'
         payload = json.loads((self.dir / 'book.json').read_text(encoding='utf-8'))

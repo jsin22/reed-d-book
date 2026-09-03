@@ -35,14 +35,14 @@ private const val ENGINE = "pocket_tts"
 /**
  * Voice and speed for one conversion.
  *
- * The engine itself is not a choice here: `pocket_tts` is the one this app
- * offers, a deliberate simplification -- the server still supports Kokoro and
- * Supertonic (`GET /api/engines`), reachable directly for anything that wants
- * them, but this app locks to the one voice found to sound best. Voices still
- * come from that same endpoint, scoped to `pocket_tts`'s own catalog. When the
- * server does not report `pocket_tts` at all (no TTS stack installed, or an
- * older server) this falls back to a free-text voice field submitted with no
- * engine chosen, rather than an empty picker the user cannot get past.
+ * The engine itself is not a choice here: `pocket_tts` is the only one this
+ * app -- or, as of this session, the server itself -- offers at all (Kokoro
+ * and Supertonic were both removed server-side; see git history on
+ * audiblez/engines.py). Voices come from `GET /api/engines`, scoped to
+ * `pocket_tts`'s own catalog. When the server does not report `pocket_tts`
+ * at all (no TTS stack installed, or an older server) this falls back to a
+ * free-text voice field submitted with no engine chosen, rather than an
+ * empty picker the user cannot get past.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

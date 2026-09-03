@@ -13,6 +13,13 @@ dependencies = [
     "pick (>=2.4.0,<3.0.0)",
     "bs4 (>=0.0.2,<0.0.3)",
     "spacy (>=3.8.3,<4.0.0)",
+    # Kokoro itself, and its own phonemizer (misaki), are no longer part of
+    # the actual conversion pipeline (see the Pocket TTS entry below) --
+    # kept only because the original, standalone CLI/GUI this project vendors
+    # (audiblez.cli / audiblez.ui, plus audiblez.voices' own voice table)
+    # still call Kokoro directly and were never updated when the pipeline
+    # moved to Pocket TTS. Neither entry point is used by this project's own
+    # server; if they are ever retired too, these two can go with them.
     "kokoro (==0.9.4)",
     "misaki[zh] (>=0.9.2)",
     "tabulate (>=0.9.0,<0.10.0)",
@@ -29,17 +36,15 @@ dependencies = [
     # that does not hit that restriction, precisely because it exists to let
     # Celery's own internals do exactly this.
     "billiard (>=4.2.0,<5.0.0)",
-    # Second TTS backend (audiblez.engines.PocketTTSEngine), alongside Kokoro.
-    # Kyutai's Pocket TTS: ~100M params, built for CPU inference specifically,
-    # rather than being a GPU model that happens to also run on CPU. Measured
-    # faster than Kokoro on this project's own reference CPU.
+    # The one TTS backend the actual pipeline (server/app/tasks.py) uses --
+    # audiblez.engines.PocketTTSEngine. Kyutai's Pocket TTS: ~100M params,
+    # built for CPU inference specifically, rather than being a GPU model
+    # that happens to also run on CPU. Two other backends (Kokoro, Supertone's
+    # Supertonic 3) were supported here at one point -- see git history on
+    # audiblez/engines.py -- but nothing in this project's real usage ever
+    # selected either, and the Android app's own picker had already locked
+    # to Pocket TTS alone (ImportSheet.kt) by the time they were removed.
     "pocket-tts[audio] (>=2.1.0,<3.0.0)",
-    # Third TTS backend (audiblez.engines.SupertonicEngine). Supertone's
-    # Supertonic 3: ~99M params, ONNX Runtime rather than PyTorch, genuinely
-    # supports a speed parameter (Pocket TTS does not). Note its audio comes
-    # back at 44100Hz, not the 24000Hz Kokoro and Pocket TTS both use --
-    # see audiblez.engines.engine_sample_rate.
-    "supertonic (>=1.3.0,<2.0.0)",
 ]
 exclude = [
     "imgs",

@@ -12,12 +12,15 @@ The contract the Android app codes against:
     GET    /api/jobs/{job_id}/audiobook the .m4b         (Range-resumable)
     GET    /api/jobs/{job_id}/sync      the timing .json
     GET    /api/jobs/{job_id}/epub      the original upload (Range-resumable)
+    GET    /api/jobs/{job_id}/cover     cover art -- from the epub, or fetched
+                                         from Open Library on first request if
+                                         it had none; see app.cover_lookup
     GET    /api/jobs/{job_id}/log       audiblez' output for this job
     DELETE /api/jobs/{job_id}           cancel and/or reclaim the disk (owner or admin only)
     GET    /api/jobs                    every job you own, plus every public job,
                                          newest first -- doubles as the library
                                          listing; see README.md
-    GET    /api/voices                  voices for one engine (default kokoro), for a picker
+    GET    /api/voices                  voices for one engine (default pocket_tts), for a picker
     GET    /api/engines                 every engine and its voices, for a two-level picker
     GET    /api/voices/{voice}/sample   a short fixed-text clip of one voice, generated
                                          once and cached; see SAMPLE_TEXT below
@@ -36,7 +39,7 @@ Admin-only (see app.users.UserStore):
                                           invitee who has no token yet
 
 Upload returns as soon as the file is on disk; the conversion happens in a
-Celery worker.  This process never imports torch or kokoro.
+Celery worker.  This process never imports torch or pocket_tts.
 """
 
 import logging
@@ -147,16 +150,15 @@ def health():
 
 @app.get('/api/voices')
 def voices(engine: str | None = None):
-    """Voices for one engine. Defaults to the server's default engine (kokoro
-    unless REEDD_DEFAULT_ENGINE says otherwise) if `engine` is not given, which
-    keeps this endpoint's existing contract for a client that has not been
-    updated to know engines exist at all.
+    """Voices for one engine. Defaults to the server's default engine
+    (pocket_tts unless REEDD_DEFAULT_ENGINE says otherwise) if `engine` is
+    not given, which keeps this endpoint's existing contract for a client
+    that has not been updated to know engines exist at all.
     """
     engine = engine or get_settings().default_engine
     if engine not in ENGINES:
         raise HTTPException(status_code=400, detail=f'unknown engine: {engine}')
-    default_voice = get_settings().default_voice if engine == 'kokoro' else DEFAULT_VOICE_BY_ENGINE.get(engine)
-    return {'voices': known_voices(engine), 'default': default_voice, 'engine': engine}
+    return {'voices': known_voices(engine), 'default': DEFAULT_VOICE_BY_ENGINE.get(engine), 'engine': engine}
 
 
 @app.get('/api/engines')
@@ -168,7 +170,7 @@ def engines():
             {
                 'id': e,
                 'voices': known_voices(e),
-                'default_voice': settings.default_voice if e == 'kokoro' else DEFAULT_VOICE_BY_ENGINE.get(e),
+                'default_voice': DEFAULT_VOICE_BY_ENGINE.get(e),
             }
             for e in ENGINES
         ],
@@ -195,7 +197,7 @@ def _synthesize_sample(engine: str, voice: str, path: Path) -> None:
     """Generate one voice's preview clip and cache it to `path`.
 
     Deferred imports, same discipline as everywhere else in this file: the
-    web process must not import torch/kokoro/pocket_tts at module level (see
+    web process must not import torch/pocket_tts at module level (see
     this module's own docstring), only from inside a request that actually
     needs them -- which, for this route, is only the very first request for
     a voice nobody has previewed yet.
@@ -318,7 +320,7 @@ def create_job(background_tasks: BackgroundTasks,
     if engine not in ENGINES:
         raise HTTPException(status_code=400, detail=f'unknown engine: {engine}')
     if voice is None:
-        voice = settings.default_voice if engine == 'kokoro' else DEFAULT_VOICE_BY_ENGINE.get(engine)
+        voice = DEFAULT_VOICE_BY_ENGINE.get(engine)
     speed = settings.default_speed if speed is None else speed
 
     valid = known_voices(engine)

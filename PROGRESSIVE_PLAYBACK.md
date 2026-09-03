@@ -84,12 +84,12 @@ None of this currently has a notion of "partially ready."
   playable, do those downloaded chapters stay playable, or does everything
   get cleared? Recommend keeping whatever's already downloaded, matching the
   existing "cancel leaves the card retryable" behavior for the whole-book case.
-- **Supertonic's different sample rate** (44100Hz vs Kokoro/Pocket TTS's
-  24000Hz) already needed special handling for the single-file sync timeline
-  (see server/README.md, "Chapters synthesize in parallel"). Per-chapter
-  playback needs the same rate-awareness per chapter -- likely a non-issue
-  since it's already resolved per-job today, just worth re-checking once
-  this is chapter-granular.
+- **Mixed sample rates across engines** used to need special handling for
+  the single-file sync timeline (Supertonic ran at 44100Hz against Kokoro/
+  Pocket TTS's 24000Hz; see server/README.md, "Chapters synthesize in
+  parallel"). Moot now that Supertonic and Kokoro are gone and Pocket TTS
+  (24000Hz) is the only engine -- noted here in case a future engine
+  reopens the question for chapter-granular playback.
 
 ## Suggested sequencing, whenever this gets picked up
 

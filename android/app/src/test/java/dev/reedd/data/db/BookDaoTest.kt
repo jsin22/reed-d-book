@@ -76,12 +76,12 @@ class BookDaoTest {
         )
         dao.markJobMissing("b1")
 
-        dao.attachJob("b1", jobId = "job-2", status = JobStatus.QUEUED, voice = "af_sky", speed = 1.25, engine = "kokoro")
+        dao.attachJob("b1", jobId = "job-2", status = JobStatus.QUEUED, voice = "giovanni", speed = 1.25, engine = "pocket_tts")
 
         val book = dao.get("b1")!!
         assertEquals("job-2", book.jobId)
         assertEquals(JobStatus.QUEUED, book.jobStatus)
-        assertEquals("af_sky", book.voice)
+        assertEquals("giovanni", book.voice)
         assertEquals(1.25, book.speed!!, 0.0)
         // A retry must not inherit the old failure, or the UI would show an
         // error banner over a job that is running fine.

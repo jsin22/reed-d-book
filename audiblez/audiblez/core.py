@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # audiblez - A program to convert e-books into audiobooks using
-# Kokoro-82M model for high-quality text-to-speech synthesis.
+# a variety of TTS models for high-quality text-to-speech synthesis
+# (see audiblez.engines) -- originally Kokoro-82M, per the project's own
+# upstream history (https://github.com/santinic/audiblez); this fork's own
+# server pipeline (server/app/tasks.py) uses Kyutai's Pocket TTS.
 # by Claudio Santini 2025 - https://claudio.uk
 import os
 
@@ -167,8 +170,10 @@ def resolve_worker_count(workers, num_chapters):
         return 1
     if workers is None:
         cpu = os.cpu_count() or 1
-        # Each worker process holds its own copy of the Kokoro model plus
-        # spaCy in memory -- measured at ~1.8GB RSS per process on the
+        # Each worker process holds its own copy of the loaded TTS model plus
+        # spaCy in memory -- measured at ~1.8GB RSS per process (with Kokoro,
+        # the engine in use when this was measured; Pocket TTS is a similarly
+        # sized ~100M-param model, not separately re-measured since) on the
         # reference machine (a 12-core/24-thread Ryzen AI handheld with 22GB
         # RAM) once loaded. Half the logical CPUs, capped at 6, is a starting
         # point that leaves room for the rest of the stack (Celery, Redis,
@@ -371,8 +376,9 @@ def gen_audio_segments(engine, text, voice, speed, stats=None, max_sentences=Non
     output audio, for read-along highlighting.
 
     Splitting into sentences happens here, once, for every engine -- any
-    further splitting a specific backend needs (Kokoro's own long-sentence
-    workaround, for instance) is that engine's own concern, inside its
+    further splitting a specific backend needs (Pocket TTS's own
+    conservative-generation-settings workaround for a long sentence, for
+    instance -- see PocketTTSEngine) is that engine's own concern, inside its
     `synthesize()`. Uses the quote-aware splitter in quote_split.py rather
     than a plain split, since a plain split would produce different sentence
     boundaries around dialogue in this kind of prose.
@@ -410,7 +416,7 @@ def gen_audio_segments(engine, text, voice, speed, stats=None, max_sentences=Non
     return audio_segments
 
 
-def gen_text(text, voice='af_heart', output_file='text.wav', speed=1, play=False, engine=DEFAULT_ENGINE):
+def gen_text(text, voice='alba', output_file='text.wav', speed=1, play=False, engine=DEFAULT_ENGINE):
     tts_engine = load_engine(engine, voice)
     load_spacy()
     timeline = sync.SyncTimeline(tts_engine.sample_rate)

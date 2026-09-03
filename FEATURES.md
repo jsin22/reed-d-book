@@ -53,12 +53,13 @@ once the book is on the device.
 - FastAPI accepts the upload and returns a job id immediately; a Celery
   worker does the actual synthesis, so the app never holds an HTTP request
   open for the minutes-to-hours a real novel takes.
-- **Three TTS engines**, chosen per job behind one interface
-  (`audiblez.engines.TTSEngine`): **Kokoro-82M**, **Pocket TTS**, and
-  **Supertonic 3**. The app always requests Pocket TTS (found to sound
-  best after live evaluation of all three, and of a fourth, Chatterbox,
-  which was rejected for being 2–25× slower); the server still serves all
-  three for direct API use.
+- **Pocket TTS**, the only engine left behind
+  `audiblez.engines.TTSEngine`'s per-job interface. Chosen after live
+  evaluation against Kokoro-82M, Supertonic 3, and a fourth, Chatterbox
+  (rejected for being 2–25× slower); Kokoro and Supertonic were later
+  removed from the pipeline entirely once nothing ever selected them, so
+  the interface now has one implementation instead of choosing among
+  three.
 - **Chapters synthesize in parallel** across several CPU worker processes
   (`REEDD_CONVERSION_WORKERS`, default ~half the logical CPUs, capped at
   6) rather than one at a time — the one form of parallelism that actually

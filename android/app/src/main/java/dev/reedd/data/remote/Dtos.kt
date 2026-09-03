@@ -24,7 +24,9 @@ data class JobDto(
     val voice: String,
     val speed: Double,
     /** Absent on a job created before the server tracked this; treat as the
-     *  server's default engine (kokoro unless configured otherwise). */
+     *  server's default engine (pocket_tts unless configured otherwise --
+     *  and, as of this session, the only engine the server accepts at all;
+     *  see server/app/audiblez_meta.py). */
     val engine: String? = null,
     @SerialName("created_at") val createdAt: String,
     @SerialName("started_at") val startedAt: String? = null,

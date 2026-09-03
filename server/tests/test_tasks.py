@@ -2,7 +2,7 @@
 """The Celery task, driven against a fake audiblez.
 
 Runs the task eagerly in-process, so no broker is needed, and stubs
-`_load_audiblez` so no torch/kokoro/spacy import happens either. What is being
+`_load_audiblez` so no torch/pocket_tts/spacy import happens either. What is being
 tested is the bookkeeping the Android app polls -- not the TTS, which
 audiblez' own test/test_sync_integration.py covers.
 """
@@ -56,7 +56,7 @@ class TaskTestCase(TempDataDirTestCase):
         super().setUp()
         self.store = JobStore(self.settings.jobs_dir)
 
-    def make_job(self, filename='Book One.epub', voice='af_heart', speed=1.0, engine='kokoro'):
+    def make_job(self, filename='Book One.epub', voice='alba', speed=1.0, engine='pocket_tts'):
         manifest = self.store.create(filename, voice, speed, engine)
         self.store.save_upload(manifest['job_id'], io.BytesIO(epub_bytes()),
                                max_bytes=1_000_000)

@@ -157,8 +157,8 @@ same `lookup()`/cache path `create_job`'s background task uses, and writes
 update()`. Idempotent -- a job that already has a resolved category/genres
 is skipped, so it is safe to run again after a future upload batch.
 `ebooklib` only, never `audiblez.core`: the web process this script shares
-code with must not import audiblez' heavy per-engine modules (torch/kokoro/
-etc), same rule as `audiblez_meta.py`.
+code with must not import audiblez' heavy per-engine modules (torch/
+pocket_tts/etc), same rule as `audiblez_meta.py`.
 
 Run once against the live server on 2026-08-30 and resolved all 8
 jobs that existed at the time (2 came back with no usable tags from either

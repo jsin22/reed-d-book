@@ -24,7 +24,7 @@ SYNC_FORMAT_VERSION = 1
 
 
 def num_frames(audio):
-    """Number of audio frames in a chunk produced by Kokoro.
+    """Number of audio frames in a chunk produced by a TTSEngine.
 
     Accepts either a numpy array or a torch tensor, mono or with a leading
     channel dimension.

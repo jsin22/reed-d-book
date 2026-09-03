@@ -2,7 +2,7 @@
 """The Celery app, plus the two queue operations the API needs.
 
 Importing this module must stay cheap: the web process imports it, and it must
-not drag in torch/kokoro/spacy (several seconds and a GB of RAM).  That is why
+not drag in torch/pocket_tts/spacy (several seconds and a GB of RAM).  That is why
 the API dispatches by task *name* with ``send_task`` instead of importing the
 task function -- only the worker imports :mod:`app.tasks`.
 """

@@ -74,9 +74,6 @@ class UploadTest(ApiTestCase):
     def test_defaults_come_from_settings(self):
         body = self.upload().json()
         self.assertEqual(body['engine'], self.settings.default_engine)
-        # Not self.settings.default_voice: that setting is Kokoro's own
-        # default specifically (see audiblez_meta.DEFAULT_VOICE_BY_ENGINE's
-        # comment) and the default engine is pocket_tts, which has its own.
         self.assertEqual(body['voice'], 'alba')
         self.assertEqual(body['speed'], self.settings.default_speed)
 
@@ -182,7 +179,15 @@ class UploadLimitTest(ApiTestCase):
 
 
 class EngineTest(ApiTestCase):
-    def test_pocket_tts_gets_its_own_default_voice_not_kokoros(self):
+    """Pocket TTS is the only engine the server offers or accepts -- Kokoro
+    and Supertonic were both removed (see git history on
+    audiblez/engines.py and audiblez_meta.py's own module doc); nothing in
+    this project's real usage ever selected either. `engine` stays a real,
+    validated field regardless -- these tests are what would need a second
+    case if a future engine ever gets added back.
+    """
+
+    def test_upload_gets_pocket_ttss_own_default_voice(self):
         body = self.upload(engine='pocket_tts').json()
         self.assertEqual(body['engine'], 'pocket_tts')
         self.assertEqual(body['voice'], 'alba')
@@ -191,14 +196,10 @@ class EngineTest(ApiTestCase):
         body = self.upload(engine='pocket_tts', voice='giovanni').json()
         self.assertEqual(body['voice'], 'giovanni')
 
-    def test_rejects_a_kokoro_voice_for_pocket_tts(self):
-        response = self.upload(engine='pocket_tts', voice='af_heart')
+    def test_rejects_an_unknown_voice_for_pocket_tts(self):
+        response = self.upload(engine='pocket_tts', voice='not_a_real_voice')
         self.assertEqual(response.status_code, 400)
         self.assertIn('voice', response.json()['detail'])
-
-    def test_rejects_a_pocket_tts_voice_for_kokoro(self):
-        response = self.upload(engine='kokoro', voice='alba')
-        self.assertEqual(response.status_code, 400)
 
     def test_rejects_an_unknown_engine(self):
         response = self.upload(engine='not_an_engine')
@@ -219,43 +220,18 @@ class EngineTest(ApiTestCase):
         self.assertEqual(body['engine'], 'pocket_tts')
         self.assertEqual(body['default'], 'alba')
         self.assertIn('alba', body['voices'])
-        self.assertNotIn('af_heart', body['voices'])
 
     def test_voices_endpoint_rejects_an_unknown_engine(self):
         response = self.client.get('/api/voices', params={'engine': 'not_an_engine'})
         self.assertEqual(response.status_code, 400)
 
-    def test_supertonic_gets_its_own_default_voice(self):
-        body = self.upload(engine='supertonic').json()
-        self.assertEqual(body['engine'], 'supertonic')
-        self.assertEqual(body['voice'], 'M1')
-
-    def test_accepts_an_explicit_supertonic_voice(self):
-        body = self.upload(engine='supertonic', voice='F3').json()
-        self.assertEqual(body['voice'], 'F3')
-
-    def test_rejects_a_kokoro_voice_for_supertonic(self):
-        response = self.upload(engine='supertonic', voice='af_heart')
-        self.assertEqual(response.status_code, 400)
-
-    def test_engine_voice_catalogs_are_kept_separate(self):
-        # Regression check specifically for cross-engine name collisions --
-        # each engine's job used its own catalog, not one shared list.
-        self.assertEqual(self.upload(engine='kokoro', voice='alba').status_code, 400)
-        self.assertEqual(self.upload(engine='pocket_tts', voice='M1').status_code, 400)
-        self.assertEqual(self.upload(engine='supertonic', voice='alba').status_code, 400)
-
-    def test_engines_endpoint_lists_every_engine_with_its_own_voices_and_default(self):
+    def test_engines_endpoint_lists_the_one_engine_with_its_voices_and_default(self):
         body = self.client.get('/api/engines').json()
         self.assertEqual(body['default'], self.settings.default_engine)
         by_id = {e['id']: e for e in body['engines']}
-        self.assertEqual(set(by_id), {'kokoro', 'pocket_tts', 'supertonic'})
-        self.assertEqual(by_id['kokoro']['default_voice'], self.settings.default_voice)
-        self.assertIn('af_heart', by_id['kokoro']['voices'])
+        self.assertEqual(set(by_id), {'pocket_tts'})
         self.assertEqual(by_id['pocket_tts']['default_voice'], 'alba')
         self.assertIn('alba', by_id['pocket_tts']['voices'])
-        self.assertEqual(by_id['supertonic']['default_voice'], 'M1')
-        self.assertIn('M1', by_id['supertonic']['voices'])
 
 
 class VoiceSampleTest(ApiTestCase):
@@ -285,9 +261,13 @@ class VoiceSampleTest(ApiTestCase):
         synth.assert_called_once()
 
     def test_accepts_an_explicit_engine(self):
+        # Only pocket_tts exists to pass here now, but the engine query
+        # param itself still has to actually reach _synthesize_sample, not
+        # just be silently ignored in favour of the default -- 'giovanni'
+        # (not 'alba', the default) is what would catch that.
         with mock.patch('app.main._synthesize_sample', side_effect=self._fake_synth) as synth:
-            self.client.get('/api/voices/M1/sample', params={'engine': 'supertonic'})
-        synth.assert_called_once_with('supertonic', 'M1', mock.ANY)
+            self.client.get('/api/voices/giovanni/sample', params={'engine': 'pocket_tts'})
+        synth.assert_called_once_with('pocket_tts', 'giovanni', mock.ANY)
 
     def test_rejects_an_unknown_voice(self):
         response = self.client.get('/api/voices/not_a_voice/sample')

@@ -46,8 +46,10 @@ itself is an enhancement, in rough order of expected payoff per risk:
 
 1. **Sentence batching.** Every sentence is currently its own forward pass. Batching
    helps on any backend and needs no new hardware support — the cheapest real win.
-2. **ONNX Runtime.** Kokoro ships ONNX exports, and ONNX Runtime sidesteps the
-   torch-on-ROCm problem entirely. Likely the most reliable route on this hardware.
+2. **ONNX Runtime.** Written when Kokoro was the engine, which ships ONNX exports,
+   and ONNX Runtime would have sidestepped the torch-on-ROCm problem entirely.
+   Pocket TTS is the engine now and its ONNX-export situation hasn't been
+   checked, so this needs re-evaluating before pursuing it.
 3. **torch + ROCm.** The obvious-looking option and the one to try last: gfx1150
    usually needs `HSA_OVERRIDE_GFX_VERSION=11.0.0`, and an unsupported iGPU under
    ROCm can be *slower* than CPU or simply fail to load.

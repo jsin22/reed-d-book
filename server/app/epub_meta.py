@@ -3,7 +3,7 @@
 
 `ebooklib` only, not `audiblez.core` -- the web process (and
 `backfill_metadata.py`, which imports this) must not import audiblez' heavy
-per-engine modules (torch/kokoro/pocket_tts/supertonic); see
+per-engine modules (torch/pocket_tts); see
 `audiblez_meta.py`'s own docstring for the same rule. `ebooklib` itself is
 just a zip/XML reader, safe to import here.
 

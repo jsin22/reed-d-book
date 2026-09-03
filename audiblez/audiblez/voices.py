@@ -1,4 +1,13 @@
 # -*- coding: utf-8 -*-
+"""Kokoro's own voice table.
+
+No longer read by audiblez.engines (see its own module doc) -- the
+server's real pipeline uses Pocket TTS exclusively now, via
+pocket_tts_voices.py instead. This file survives only because the
+standalone CLI/GUI (audiblez.cli / audiblez.ui) still import it directly
+and were never updated off Kokoro.
+"""
+
 import platform
 
 flags = {'a': '🇺🇸', 'b': '🇬🇧', 'e': '🇪🇸', 'f': '🇫🇷', 'h': '🇮🇳', 'i': '🇮🇹', 'j': '🇯🇵', 'p': '🇧🇷', 'z': '🇨🇳'}
