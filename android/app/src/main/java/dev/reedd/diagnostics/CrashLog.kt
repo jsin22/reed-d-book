@@ -70,9 +70,20 @@ class CrashLog(
         }
     }
 
+    /**
+     * Close the on-screen banner. Deliberately does *not* delete the
+     * underlying report file: [start] only calls [clear] once every pending
+     * report has actually been confirmed sent (`allSent`), and dismissing
+     * the banner is not the same event -- a slow or briefly-offline upload
+     * can easily still be in flight, or have already failed, at the moment
+     * someone taps past it. A dismissed-but-undelivered report is retried
+     * on the next launch instead of being silently lost; this is the fix
+     * for a real, confirmed case of exactly that (a new user's crash that
+     * was shown on-device but never reached the server -- see the Margin
+     * Notes follow-up, 2026-09-04).
+     */
     fun dismiss() {
         _lastReport.value = null
-        runCatching { clear() }
     }
 
     private companion object {

@@ -153,16 +153,15 @@ object CrashReporter {
     }
 
     private fun write(context: Context, thread: Thread, throwable: Throwable) {
-        val dir = directory(context)
-        val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
-        val file = File(dir, "crash-$stamp.txt")
-        file.writeText(report(thread, throwable))
-        prune(dir)
+        persist(context, report(thread, throwable))
     }
 
     /**
      * The report. Deliberately includes the environment, because "crashes on my
-     * phone but not in a test" is usually about the device or the build.
+     * phone but not in a test" is usually about the device or the build. Also
+     * includes [Breadcrumbs.snapshot] -- see that object's own doc for why:
+     * a stack trace says where; this is the only thing that can say *how it
+     * got there*.
      */
     fun report(thread: Thread, throwable: Throwable): String {
         val trace = StringWriter().also { throwable.printStackTrace(PrintWriter(it)) }
@@ -176,7 +175,74 @@ object CrashReporter {
             appendLine("exception: ${throwable.javaClass.name}: ${throwable.message}")
             appendLine()
             append(trace.toString())
+            appendLine()
+            appendLine()
+            appendLine("breadcrumbs:")
+            append(Breadcrumbs.snapshot())
         }
+    }
+
+    /**
+     * A WebView renderer (Chromium, out-of-process) died -- see
+     * `ReaderScreen.kt`'s `RenderProcessGoneWatcher`. Distinct from [write]
+     * in one important way: the *app* process is still alive to see this
+     * (only the sandboxed renderer died), so unlike an uncaught exception
+     * -- which can only persist a file and hope the next launch sends it --
+     * this can and does try to send itself right away, in addition to
+     * persisting exactly like a real crash so [CrashLog]'s normal
+     * pending-report retry still picks it up if that immediate send fails.
+     *
+     * No [Throwable] exists for this -- Android hands back a
+     * `RenderProcessGoneDetail`, not an exception -- so the report is built
+     * by hand in the same shape [report] produces, for one consistent
+     * format server-side regardless of which path a crash came in on.
+     */
+    fun reportRenderProcessGone(context: Context, didCrash: Boolean, rendererPriorityAtExit: Int) {
+        val appContext = context.applicationContext
+        val text = buildString {
+            appendLine("read-d-book crash report")
+            appendLine("when:      ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss z", Locale.US).format(Date())}")
+            appendLine("app:       ${BuildConfig.APPLICATION_ID} ${BuildConfig.VERSION_NAME} (${BuildConfig.BUILD_TYPE})")
+            appendLine("device:    ${Build.MANUFACTURER} ${Build.MODEL}")
+            appendLine("android:   ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
+            appendLine("thread:    (WebView renderer process, not a JVM thread)")
+            appendLine("exception: WebView renderer process gone (didCrash=$didCrash priorityAtExit=$rendererPriorityAtExit)")
+            appendLine()
+            appendLine("The reader's WebView renderer process ended -- either it crashed outright")
+            appendLine("(didCrash=true) or the OS reclaimed it under memory pressure while")
+            appendLine("backgrounded (didCrash=false). No JVM stack trace exists for this: it is")
+            appendLine("not a Kotlin/Java exception, which is exactly why this handler exists --")
+            appendLine("without it, the app either wedges on a dead WebView or the OS kills the")
+            appendLine("whole process with nothing recorded at all.")
+            appendLine()
+            appendLine("breadcrumbs:")
+            append(Breadcrumbs.snapshot())
+        }
+        val file = persist(appContext, text)
+        Thread({
+            runCatching { sendOne(appContext, file) }
+                .onFailure { Log.i(TAG, "immediate send of renderer-gone report failed: ${it.message}") }
+        }, "reedd-renderer-gone-send").start()
+    }
+
+    private fun persist(context: Context, text: String): File {
+        val dir = directory(context)
+        val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
+        val file = File(dir, "crash-$stamp.txt")
+        file.writeText(text)
+        prune(dir)
+        return file
+    }
+
+    /** Send one already-persisted report; the caller decides whether to delete
+     *  it afterward -- see [sendPendingEarly]'s own doc on why this path never
+     *  removes anything, unlike [CrashLog]'s normal send. */
+    private fun sendOne(context: Context, file: File) {
+        val settings = SettingsStore(context, CoroutineScope(SupervisorJob()))
+        val current = runBlocking { settings.current() }
+        val base = ServerAddress.normalize(current.baseUrl) ?: return
+        val token = current.token?.filterNot { it.isWhitespace() }?.takeIf { it.isNotBlank() }
+        postPlain(base, token, file.readText())
     }
 
     /** A crash loop must not fill the phone's storage. */

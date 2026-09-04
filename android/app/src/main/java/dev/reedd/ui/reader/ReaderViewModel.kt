@@ -9,6 +9,7 @@ import dev.reedd.data.readium.ReadiumComponents
 import dev.reedd.data.settings.ReaderSettings
 import dev.reedd.data.settings.SettingsStore
 import dev.reedd.di.AppContainer
+import dev.reedd.diagnostics.Breadcrumbs
 import dev.reedd.ui.theme.PaperPalette
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -129,6 +130,7 @@ class ReaderViewModel(
                 // follow mode (FollowController) already exists to bring the
                 // page in line with the audio once it does.
                 val initialLocator = book.readingLocator?.toLocator()
+                Breadcrumbs.leave("reader opened: '${book.title}' (${book.id})")
                 _state.value = ReaderState.Ready(
                     publication = publication,
                     navigatorFactory = EpubNavigatorFactory(publication),
@@ -230,8 +232,16 @@ class ReaderViewModel(
     }
 
     fun updateSettings(transform: (ReaderSettings) -> ReaderSettings) {
+        val before = readerSettings.value
+        val after = transform(before)
+        if (after != before) {
+            Breadcrumbs.leave(
+                "reader settings changed: scroll ${before.scroll}->${after.scroll} " +
+                    "fontSize ${before.fontSize}->${after.fontSize} theme ${before.theme}->${after.theme}",
+            )
+        }
         viewModelScope.launch {
-            settingsStore.setReaderSettings(transform(readerSettings.value))
+            settingsStore.setReaderSettings(after)
         }
     }
 

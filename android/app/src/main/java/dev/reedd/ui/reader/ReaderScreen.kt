@@ -1,7 +1,14 @@
 package dev.reedd.ui.reader
 
+import android.content.Context
 import android.content.Intent
 import android.util.Log
+import android.view.View
+import android.view.ViewGroup
+import android.view.ViewTreeObserver
+import android.webkit.RenderProcessGoneDetail
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
@@ -81,6 +88,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import dev.reedd.data.settings.ReaderSettings
+import dev.reedd.diagnostics.Breadcrumbs
 import dev.reedd.diagnostics.CrashReporter
 import dev.reedd.domain.NoteLocators
 import dev.reedd.domain.resolveLink
@@ -122,6 +130,66 @@ private const val SCROLL_FOLLOW_CHECK_INTERVAL_MS = 400L
  * reasonable, tunable guess.
  */
 private const val DRAG_SETTLE_DELAY_MS = 400L
+
+/**
+ * Catches a WebView renderer (Chromium, out-of-process) dying -- either a
+ * real crash, or the OS reclaiming it under memory pressure while the app
+ * is backgrounded. Neither throws a catchable Kotlin exception, so without
+ * this the app either wedges on a dead WebView or the platform kills the
+ * whole process with nothing ever recorded (see [CrashReporter.
+ * reportRenderProcessGone]'s own doc -- this is what prompted adding it: a
+ * new user's phone showed an on-device crash banner that never reached the
+ * server at all).
+ *
+ * Only [onRenderProcessGone] is overridden; every other callback falls back
+ * to [WebViewClient]'s own no-op default, which is exactly what these pages
+ * already got before this was attached -- Readium's own `R2WebView`/
+ * `R2BasicWebView` never call `setWebViewClient` anywhere in the navigator
+ * module (confirmed by decompiling `readium-navigator:3.3.0`), so there is
+ * no existing client this could ever displace or fight.
+ *
+ * Returns `true` (see the platform's own contract for this callback):
+ * `false` tells the OS this app did not handle it, which kills the whole
+ * process outright. `true` means "handled" and the app keeps running --
+ * this WebView instance itself is still unusable afterward (Android's own
+ * guidance), but Readium recreates a fresh page WebView the moment the
+ * reader is reopened, so nothing further is done to it here.
+ */
+private class RenderProcessGoneReporter(
+    private val context: Context,
+    private val onMessage: (String) -> Unit,
+) : WebViewClient() {
+    override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+        Breadcrumbs.leave(
+            "WebView renderer gone: didCrash=${detail.didCrash()} priorityAtExit=${detail.rendererPriorityAtExit()}",
+        )
+        CrashReporter.reportRenderProcessGone(context, detail.didCrash(), detail.rendererPriorityAtExit())
+        onMessage("The reader ran into a problem and needs to reopen this book.")
+        return true
+    }
+}
+
+/**
+ * Walks the fragment's own view tree for every [WebView] and attaches a
+ * [RenderProcessGoneReporter] to each -- Readium's paginated pages are
+ * created lazily as the reader turns pages (its `ViewPager2` creates each
+ * page's `WebView` on its own schedule, well after the fragment itself
+ * exists), so a one-time walk when the fragment first attaches would miss
+ * every page beyond the first. Re-walking is cheap and idempotent (a
+ * handful of views, one `is` check each), so it is done on every layout
+ * pass rather than trying to hook the exact moment a new page's WebView
+ * gets created.
+ */
+private fun patchWebViewsForRenderProcessGone(root: View, context: Context, onMessage: (String) -> Unit) {
+    if (root is WebView && root.webViewClient !is RenderProcessGoneReporter) {
+        root.webViewClient = RenderProcessGoneReporter(context, onMessage)
+    }
+    if (root is ViewGroup) {
+        for (i in 0 until root.childCount) {
+            patchWebViewsForRenderProcessGone(root.getChildAt(i), context, onMessage)
+        }
+    }
+}
 
 /**
  * The reading screen, with read-along.
@@ -724,6 +792,20 @@ private fun EpubNavigator(
     ) { fragment ->
         viewModel.onNavigatorReady(fragment)
         navigator = fragment
+    }
+
+    // See RenderProcessGoneReporter/patchWebViewsForRenderProcessGone's own
+    // docs. A ViewTreeObserver listener, not a one-time walk on `navigator`
+    // becoming non-null: new pages -- and their own WebView -- are created
+    // lazily as the reader paginates, well after this effect first runs.
+    DisposableEffect(navigator) {
+        val root = navigator?.view ?: return@DisposableEffect onDispose {}
+        patchWebViewsForRenderProcessGone(root, context, onMessage)
+        val listener = ViewTreeObserver.OnGlobalLayoutListener {
+            patchWebViewsForRenderProcessGone(root, context, onMessage)
+        }
+        root.viewTreeObserver.addOnGlobalLayoutListener(listener)
+        onDispose { root.viewTreeObserver.removeOnGlobalLayoutListener(listener) }
     }
 
     // Everything below hangs off `navigator`: the input listener that makes word taps
