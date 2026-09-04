@@ -71,6 +71,41 @@ app = FastAPI(
     version='1.0.0',
 )
 
+
+class _MaxUploadSizeMiddleware:
+    """Rejects an oversized POST /api/jobs by its Content-Length header,
+    before Starlette's multipart parser ever touches the body.
+
+    `UploadFile`'s own parser must fully spool the file to disk/RAM before
+    create_job's handler runs at all (confirmed against the installed
+    starlette.formparsers source -- its built-in size limit only covers
+    non-file form fields), so JobStore.save_upload's max_upload_bytes check
+    was only ever catching an oversized file *after* the whole thing had
+    already been received -- on a disk- and thermal-constrained handheld,
+    that means an oversized request could fill the OS temp partition before
+    the app-level guard ever got a say. Content-Length is client-supplied
+    and can be absent or wrong (chunked transfer-encoding, a lying header),
+    so this is a backstop for the common case, not a hard guarantee --
+    save_upload's own streaming check is what's actually trustworthy, and
+    stays in place unchanged.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope['type'] == 'http' and scope['method'] == 'POST' and scope['path'] == '/api/jobs':
+            max_bytes = get_settings().max_upload_bytes
+            content_length = next((v for k, v in scope['headers'] if k == b'content-length'), None)
+            if content_length is not None and int(content_length) > max_bytes:
+                response = PlainTextResponse(f'epub exceeds {max_bytes} bytes', status_code=413)
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(_MaxUploadSizeMiddleware)
+
 invite_log = logging.getLogger('reedd.mail')
 book_metadata_log = logging.getLogger('reedd.book_metadata')
 

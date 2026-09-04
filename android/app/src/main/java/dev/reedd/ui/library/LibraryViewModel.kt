@@ -7,6 +7,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import dev.reedd.data.BookRepository
+import dev.reedd.data.ConversionActions
 import dev.reedd.data.db.BookEntity
 import dev.reedd.data.db.DownloadState
 import dev.reedd.data.db.NoteDao
@@ -85,6 +86,7 @@ class LibraryViewModel(
     private val player: PlayerConnection,
     private val authMonitor: AuthStatusMonitor,
     private val noteDao: NoteDao,
+    private val conversionActions: ConversionActions = ConversionActions(context, repository, api),
 ) : ViewModel() {
 
     val books: StateFlow<List<BookEntity>> =
@@ -376,44 +378,22 @@ class LibraryViewModel(
      * moves it), so there is nothing to re-pick and nothing left for the user
      * to diagnose -- re-sending that same local file and getting a fresh job
      * is the whole of "try again" regardless of which of the two steps it
-     * failed on. This mirrors [dev.reedd.ui.detail.BookDetailViewModel.
-     * retryUpload] so the same action is reachable from the card directly,
-     * now that non-admins have no Detail screen to reach it from otherwise.
+     * failed on. Reachable from the detail screen too (now that non-admins
+     * have no Detail screen at all) via the same [ConversionActions.retry]
+     * this delegates to.
      */
     fun retryConversion(bookId: String) {
-        viewModelScope.launch {
-            repository.clearJob(bookId)
-            UploadWorker.enqueue(context, bookId)
-            PollWorker.enqueuePeriodic(context)
-            PollWorker.enqueueOnce(context)
-        }
+        viewModelScope.launch { conversionActions.retry(bookId) }
     }
 
     /**
      * The card's cancel (X) button while a book is queued, uploading, or
-     * converting: stops the workers, asks the server to drop the job if it
-     * has one, and clears this book's job state -- the epub and the row both
-     * stay, so [retryConversion] can pick the card back up exactly where
-     * cancel left it. A server-side failure is surfaced but not fatal to the
-     * local cancel, matching [dev.reedd.ui.detail.BookDetailViewModel.cancel],
-     * which this mirrors so the same action is reachable from the card.
+     * converting -- so the card the user tapped it from can go back to
+     * showing the retry it left, via [ConversionActions.cancel].
      */
     fun cancelConversion(bookId: String) {
         viewModelScope.launch {
-            UploadWorker.cancel(context, bookId)
-            DownloadWorker.cancel(context, bookId)
-            val book = repository.get(bookId)
-            val jobId = book?.jobId
-            if (jobId != null && book.jobMissing == false) {
-                try {
-                    api.service().deleteJob(jobId)
-                } catch (e: ApiException) {
-                    if (!e.isNotFound) _message.value = e.detail ?: e.message
-                } catch (e: IOException) {
-                    _message.value = e.message ?: "could not reach the server"
-                }
-            }
-            repository.clearJob(bookId)
+            conversionActions.cancel(bookId)?.let { _message.value = it }
         }
     }
 

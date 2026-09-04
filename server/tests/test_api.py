@@ -177,6 +177,17 @@ class UploadLimitTest(ApiTestCase):
         self.assertEqual(response.status_code, 413)
         self.assertEqual(self.store.list(), [])
 
+    def test_rejects_by_content_length_before_a_job_is_ever_created(self):
+        # The Content-Length pre-check (app.main._MaxUploadSizeMiddleware)
+        # runs ahead of Starlette's multipart parser, so an oversized
+        # request must never even create a job directory to clean up --
+        # unlike the save_upload path below it, which only notices after
+        # the whole file has already landed on disk.
+        response = self.upload(content=epub_bytes(body=b'x' * 5000))
+        self.assertEqual(response.status_code, 413)
+        self.assertFalse(self.settings.jobs_dir.is_dir() and list(self.settings.jobs_dir.iterdir()))
+        self.enqueue.assert_not_called()
+
 
 class EngineTest(ApiTestCase):
     """Pocket TTS is the only engine the server offers or accepts -- Kokoro

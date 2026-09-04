@@ -6,12 +6,11 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import dev.reedd.data.BookRepository
+import dev.reedd.data.ConversionActions
 import dev.reedd.data.db.BookEntity
-import dev.reedd.data.remote.ApiException
 import dev.reedd.data.remote.ApiProvider
 import dev.reedd.di.AppContainer
 import dev.reedd.work.DownloadWorker
-import dev.reedd.work.PollWorker
 import dev.reedd.work.UploadWorker
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -36,6 +35,7 @@ class BookDetailViewModel(
     private val context: Application,
     private val repository: BookRepository,
     private val api: ApiProvider,
+    private val conversionActions: ConversionActions = ConversionActions(context, repository, api),
 ) : ViewModel() {
 
     val book: StateFlow<BookEntity?> =
@@ -95,12 +95,7 @@ class BookDetailViewModel(
 
     /** Send the book again: after an upload failure, or a job the server lost. */
     fun retryUpload() {
-        viewModelScope.launch {
-            repository.clearJob(bookId)
-            UploadWorker.enqueue(context, bookId)
-            PollWorker.enqueuePeriodic(context)
-            PollWorker.enqueueOnce(context)
-        }
+        viewModelScope.launch { conversionActions.retry(bookId) }
     }
 
     /** Fetch the finished files again, e.g. after a failed download. */
@@ -111,20 +106,7 @@ class BookDetailViewModel(
     /** Stop the conversion and let the server reclaim its disk. */
     fun cancel() {
         viewModelScope.launch {
-            UploadWorker.cancel(context, bookId)
-            DownloadWorker.cancel(context, bookId)
-            val book = repository.get(bookId)
-            val jobId = book?.jobId
-            if (jobId != null && !book.jobMissing) {
-                try {
-                    api.service().deleteJob(jobId)
-                } catch (e: ApiException) {
-                    if (!e.isNotFound) _message.value = e.detail ?: e.message
-                } catch (e: IOException) {
-                    _message.value = e.message ?: "could not reach the server"
-                }
-            }
-            repository.clearJob(bookId)
+            conversionActions.cancel(bookId)?.let { _message.value = it }
         }
     }
 
