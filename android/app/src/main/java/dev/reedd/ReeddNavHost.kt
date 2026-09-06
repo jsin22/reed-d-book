@@ -18,6 +18,8 @@ import dev.reedd.ui.reader.NotesViewModel
 import dev.reedd.ui.reader.ReadAlongViewModel
 import dev.reedd.ui.reader.ReaderScreen
 import dev.reedd.ui.reader.ReaderViewModel
+import dev.reedd.ui.settings.BookmarkLabelsScreen
+import dev.reedd.ui.settings.BookmarkLabelsViewModel
 import dev.reedd.ui.settings.SettingsScreen
 import dev.reedd.ui.settings.SettingsViewModel
 import dev.reedd.ui.voices.VoicesScreen
@@ -35,6 +37,9 @@ object AdminRoute
 
 @Serializable
 object VoicesRoute
+
+@Serializable
+object BookmarkLabelsRoute
 
 @Serializable
 data class DetailRoute(val bookId: String)
@@ -109,7 +114,13 @@ fun ReeddNavHost(navController: NavHostController = rememberNavController()) {
                 onBack = { navController.popBackStack() },
                 onOpenAdmin = { navController.navigate(AdminRoute) },
                 onOpenVoices = { navController.navigate(VoicesRoute) },
+                onOpenBookmarkLabels = { navController.navigate(BookmarkLabelsRoute) },
             )
+        }
+
+        composable<BookmarkLabelsRoute> {
+            val viewModel: BookmarkLabelsViewModel = viewModel(factory = BookmarkLabelsViewModel.factory(container))
+            BookmarkLabelsScreen(viewModel = viewModel, onBack = { navController.popBackStack() })
         }
 
         composable<AdminRoute> {

@@ -172,3 +172,61 @@ val MIGRATION_7_8 = object : Migration(7, 8) {
         db.execSQL("ALTER TABLE books ADD COLUMN alignmentVersion INTEGER NOT NULL DEFAULT 0")
     }
 }
+
+/**
+ * 8 -> 9: bookmarks.
+ *
+ * A second, lighter-weight child table alongside notes -- a plain marked
+ * position instead of a quoted passage with a written note -- same shape
+ * as [MIGRATION_5_6]'s `notes` addition, so again nothing existing changes
+ * and there is nothing to backfill.
+ */
+val MIGRATION_8_9 = object : Migration(8, 9) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS bookmarks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                bookId TEXT NOT NULL,
+                type TEXT NOT NULL,
+                locatorJson TEXT NOT NULL,
+                resourceHref TEXT NOT NULL,
+                spineIndex INTEGER NOT NULL,
+                progression REAL,
+                createdAt INTEGER NOT NULL,
+                FOREIGN KEY(bookId) REFERENCES books(id) ON DELETE CASCADE
+            )
+            """.trimIndent()
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS index_bookmarks_bookId_spineIndex_progression " +
+                "ON bookmarks(bookId, spineIndex, progression)"
+        )
+    }
+}
+
+/**
+ * 9 -> 10: bookmarks and notes merge into one thing.
+ *
+ * A bookmark turned out to be nothing more than a note with no text and a
+ * color -- two features doing almost the same job, shown in two separate
+ * places. `notes` gains [NoteEntity.type] (defaulting to `DEFAULT`, the same
+ * "plain, uncolored" meaning it already had); every existing row in
+ * `bookmarks` becomes a `notes` row with that color and empty note/quoted
+ * text (a bookmark never had either), and the now-redundant table is
+ * dropped. Existing notes keep reading as plain/uncolored -- there is
+ * nothing truthful to backfill a color onto a note nobody ever picked one
+ * for.
+ */
+val MIGRATION_9_10 = object : Migration(9, 10) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE notes ADD COLUMN type TEXT NOT NULL DEFAULT 'DEFAULT'")
+        db.execSQL(
+            """
+            INSERT INTO notes (bookId, noteText, quotedText, locatorJson, resourceHref, spineIndex, progression, createdAt, type)
+            SELECT bookId, '', '', locatorJson, resourceHref, spineIndex, progression, createdAt, type FROM bookmarks
+            """.trimIndent()
+        )
+        db.execSQL("DROP TABLE bookmarks")
+    }
+}

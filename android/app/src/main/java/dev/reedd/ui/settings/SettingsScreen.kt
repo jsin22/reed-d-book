@@ -45,6 +45,7 @@ fun SettingsScreen(
     onBack: () -> Unit,
     onOpenAdmin: () -> Unit = {},
     onOpenVoices: () -> Unit = {},
+    onOpenBookmarkLabels: () -> Unit = {},
 ) {
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val check by viewModel.check.collectAsStateWithLifecycle()
@@ -247,6 +248,24 @@ fun SettingsScreen(
                     )
                 }
                 OutlinedButton(onClick = onOpenVoices) { Text("Browse") }
+            }
+
+            HorizontalDivider()
+
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f).padding(end = 8.dp)) {
+                    Text("Bookmark colors", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "Name what each of the four bookmark colors means to you.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                OutlinedButton(onClick = onOpenBookmarkLabels) { Text("Edit") }
             }
 
             if (isAdmin) {

@@ -33,6 +33,7 @@ class NoteDaoTest {
         quotedText: String = "a word",
         spineIndex: Int = 0,
         progression: Double? = 0.0,
+        type: BookmarkType = BookmarkType.DEFAULT,
     ) = NoteEntity(
         bookId = bookId,
         noteText = noteText,
@@ -42,6 +43,7 @@ class NoteDaoTest {
         spineIndex = spineIndex,
         progression = progression,
         createdAt = 1_000,
+        type = type,
     )
 
     @Test
@@ -90,5 +92,23 @@ class NoteDaoTest {
         notes.delete(id)
 
         assertEquals(listOf("still here"), notes.observe("b1").first().map { it.quotedText })
+    }
+
+    @Test
+    fun `a note can carry a color and no text, the same shape a bookmark used to be`() = runTest {
+        books.insert(book("b1"))
+        notes.insert(note("b1", noteText = "", quotedText = "", type = BookmarkType.NEEDS_REVIEW))
+
+        val saved = notes.observe("b1").first().single()
+        assertEquals(BookmarkType.NEEDS_REVIEW, saved.type)
+        assertEquals("", saved.noteText)
+    }
+
+    @Test
+    fun `a plain note with no color chosen defaults to DEFAULT`() = runTest {
+        books.insert(book("b1"))
+        notes.insert(note("b1"))
+
+        assertEquals(BookmarkType.DEFAULT, notes.observe("b1").first().single().type)
     }
 }

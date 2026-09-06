@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import dev.reedd.data.BookRepository
 import dev.reedd.data.db.BookEntity
+import dev.reedd.data.db.BookmarkType
 import dev.reedd.data.dictionary.Dictionary
 import dev.reedd.di.AppContainer
 import dev.reedd.diagnostics.Breadcrumbs
@@ -23,12 +24,15 @@ import java.io.File
 
 /** A note's passage, waiting to be highlighted once [resourceHref] is the
  *  resource actually loaded in the navigator -- see [ReadAlongViewModel.
- *  pendingHighlight]'s own docstring. */
+ *  pendingHighlight]'s own docstring. [type] is the note/bookmark's own
+ *  color -- resolved to an actual [androidx.compose.ui.graphics.Color] by
+ *  `ReaderScreen` (the UI layer), not here. */
 data class PendingHighlight(
     val resourceHref: String,
     val text: String,
     val before: String,
     val after: String,
+    val type: BookmarkType,
 )
 
 /** A definition being shown, or being looked up. */
@@ -114,11 +118,11 @@ class ReadAlongViewModel(
     val definition: StateFlow<DefinitionState?> = _definition.asStateFlow()
 
     /**
-     * The tap/selection a note is being written for, once the reader has
-     * picked "Notes" off the menu -- separate from [tappedWord] so choosing
-     * Notes can close the menu (clearing [tappedWord], which is what makes
-     * the popup and its highlight/selection cleanup disappear) without also
-     * losing what the note is about.
+     * The tap/selection a note/bookmark is being written for, once the
+     * reader has picked "Bookmark" off the menu -- separate from
+     * [tappedWord] so choosing it can close the menu (clearing [tappedWord],
+     * which is what makes the popup and its highlight/selection cleanup
+     * disappear) without also losing what the note is about.
      */
     private val _pendingNoteTarget = MutableStateFlow<WordMenuTarget?>(null)
     val pendingNoteTarget: StateFlow<WordMenuTarget?> = _pendingNoteTarget.asStateFlow()
@@ -136,8 +140,8 @@ class ReadAlongViewModel(
     private val _pendingHighlight = MutableStateFlow<PendingHighlight?>(null)
     val pendingHighlight: StateFlow<PendingHighlight?> = _pendingHighlight.asStateFlow()
 
-    fun requestHighlight(resourceHref: String, text: String, before: String, after: String) {
-        _pendingHighlight.value = PendingHighlight(resourceHref, text, before, after)
+    fun requestHighlight(resourceHref: String, text: String, before: String, after: String, type: BookmarkType) {
+        _pendingHighlight.value = PendingHighlight(resourceHref, text, before, after, type)
     }
 
     fun clearPendingHighlight() {
@@ -383,7 +387,7 @@ class ReadAlongViewModel(
      *  (if any were armed) have nothing left to extend. */
     fun dismissWordMenu() = selection.dismiss()
 
-    /** The menu's Notes row: close the menu, keep what it was about. */
+    /** The menu's Bookmark row: close the menu, keep what it was about. */
     fun openNoteEditor() {
         val target = tappedWord.value ?: return
         dismissWordMenu()

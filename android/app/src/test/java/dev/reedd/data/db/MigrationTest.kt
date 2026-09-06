@@ -44,9 +44,9 @@ class MigrationTest {
         listOf("", "-wal", "-shm").forEach { File(dbFile.path + it).delete() }
     }
 
-    /** Builds an empty version 1 database using Room's own exported DDL. */
-    private fun createVersion1(): android.database.sqlite.SQLiteDatabase {
-        val schema = JSONObject(readSchema(version = 1)).getJSONObject("database")
+    /** Builds an empty database at [version], using Room's own exported DDL. */
+    private fun createVersion(version: Int = 1): android.database.sqlite.SQLiteDatabase {
+        val schema = JSONObject(readSchema(version)).getJSONObject("database")
         val db = android.database.sqlite.SQLiteDatabase.openOrCreateDatabase(dbFile, null)
 
         val entities = schema.getJSONArray("entities")
@@ -66,7 +66,7 @@ class MigrationTest {
             "INSERT OR REPLACE INTO room_master_table (id, identity_hash) VALUES (42, ?)",
             arrayOf(schema.getString("identityHash")),
         )
-        db.version = 1
+        db.version = version
         return db
     }
 
@@ -80,7 +80,7 @@ class MigrationTest {
         Room.databaseBuilder(context, ReeddDatabase::class.java, DB_NAME)
             .addMigrations(
                 MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7,
-                MIGRATION_7_8,
+                MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10,
             )
             .allowMainThreadQueries()
             .build()
@@ -91,7 +91,7 @@ class MigrationTest {
 
     @Test
     fun `a version 1 library survives the migration with its books and timings`() = runTest {
-        createVersion1().use { old ->
+        createVersion().use { old ->
             old.execSQL(
                 """
                 INSERT INTO books (id, epubPath, originalFilename, title, sizeBytes, addedAt,
@@ -162,7 +162,7 @@ class MigrationTest {
         // local rows pointing at the same server job before jobId was
         // unique. The migration has to resolve this itself, not just refuse
         // to create the index and crash every future launch.
-        createVersion1().use { old ->
+        createVersion().use { old ->
             old.execSQL(
                 """
                 INSERT INTO books (id, epubPath, originalFilename, title, sizeBytes, addedAt,
@@ -205,7 +205,7 @@ class MigrationTest {
 
     @Test
     fun `an existing mapping is counted so it can be re-aligned lazily`() = runTest {
-        createVersion1().use { old ->
+        createVersion().use { old ->
             old.execSQL(
                 """
                 INSERT INTO books (id, epubPath, originalFilename, title, sizeBytes, addedAt,
@@ -241,7 +241,7 @@ class MigrationTest {
 
     @Test
     fun `a book with no mapping is not flagged for alignment`() = runTest {
-        createVersion1().use { old ->
+        createVersion().use { old ->
             old.execSQL(
                 """
                 INSERT INTO books (id, epubPath, originalFilename, title, sizeBytes, addedAt,
@@ -264,7 +264,7 @@ class MigrationTest {
 
     @Test
     fun `MIGRATION_5_6 adds an empty notes table a pre-existing library can write to`() = runTest {
-        createVersion1().use { old ->
+        createVersion().use { old ->
             old.execSQL(
                 """
                 INSERT INTO books (id, epubPath, originalFilename, title, sizeBytes, addedAt,
@@ -308,7 +308,7 @@ class MigrationTest {
         // asked to auto-download -- defaulting it true would fetch a whole
         // library's worth of already-finished audiobooks the first time a
         // migrated app polls, which nobody asked for.
-        createVersion1().use { old ->
+        createVersion().use { old ->
             old.execSQL(
                 """
                 INSERT INTO books (id, epubPath, originalFilename, title, sizeBytes, addedAt,
@@ -333,7 +333,7 @@ class MigrationTest {
         // ChunkAligner.ALIGNMENT_VERSION -- see BookEntityTest for why that
         // by itself is enough to flag a re-alignment, with no backfill query
         // needed here beyond the plain column default.
-        createVersion1().use { old ->
+        createVersion().use { old ->
             old.execSQL(
                 """
                 INSERT INTO books (id, epubPath, originalFilename, title, sizeBytes, addedAt,
@@ -354,7 +354,7 @@ class MigrationTest {
 
     @Test
     fun `the migrated database accepts new writes`() = runTest {
-        createVersion1().use { old ->
+        createVersion().use { old ->
             old.execSQL(
                 """
                 INSERT INTO books (id, epubPath, originalFilename, title, sizeBytes, addedAt,
@@ -383,6 +383,53 @@ class MigrationTest {
             assertEquals(0.25, aligned.progression!!, 0.0001)
             assertTrue(aligned.isAligned)
             assertEquals(1, db.sync().alignedCount("b1"))
+        } finally {
+            db.close()
+        }
+    }
+
+    @Test
+    fun `MIGRATION_9_10 folds bookmarks into notes and leaves existing notes their default color`() = runTest {
+        createVersion(9).use { old ->
+            old.execSQL(
+                """
+                INSERT INTO books (id, epubPath, originalFilename, title, sizeBytes, addedAt,
+                                   jobProgress, jobChaptersDone, jobMissing, uploadedBytes,
+                                   downloadState, downloadedBytes, downloadTotalBytes)
+                VALUES ('b1', '/e', 'Book.epub', 'Book', 1, 1, 0, 0, 0, 0, 'NONE', 0, 0)
+                """.trimIndent()
+            )
+            old.execSQL(
+                """
+                INSERT INTO notes (bookId, noteText, quotedText, locatorJson, resourceHref, spineIndex, progression, createdAt)
+                VALUES ('b1', 'a real note', 'quoted', '{"href":"c1.xhtml"}', 'c1.xhtml', 0, 0.1, 1000)
+                """.trimIndent()
+            )
+            old.execSQL(
+                """
+                INSERT INTO bookmarks (bookId, type, locatorJson, resourceHref, spineIndex, progression, createdAt)
+                VALUES ('b1', 'CRUCIAL_PLOT', '{"href":"c2.xhtml"}', 'c2.xhtml', 1, 0.5, 2000)
+                """.trimIndent()
+            )
+        }
+
+        val db = openMigrated()
+        try {
+            val notes = db.notes().observe("b1").first()
+            assertEquals(2, notes.size)
+
+            // A note taken before colors existed has nothing truthful to
+            // backfill a color onto -- it keeps reading as plain/uncolored.
+            val migratedNote = notes.single { it.noteText == "a real note" }
+            assertEquals(BookmarkType.DEFAULT, migratedNote.type)
+
+            // The old bookmark becomes a note with its color kept, and no
+            // text -- a bookmark never had any.
+            val migratedBookmark = notes.single { it.noteText.isEmpty() }
+            assertEquals(BookmarkType.CRUCIAL_PLOT, migratedBookmark.type)
+            assertEquals("", migratedBookmark.quotedText)
+            assertEquals("c2.xhtml", migratedBookmark.resourceHref)
+            assertEquals(0.5, migratedBookmark.progression!!, 0.0001)
         } finally {
             db.close()
         }

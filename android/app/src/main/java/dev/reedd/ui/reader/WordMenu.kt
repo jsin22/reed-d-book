@@ -13,9 +13,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.MenuBook
+import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.EditNote
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -70,7 +70,7 @@ fun WordMenuBar(
     target: WordMenuTarget,
     onReadFromHere: () -> Unit,
     onDefine: () -> Unit,
-    onNotes: () -> Unit,
+    onBookmark: () -> Unit,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -118,9 +118,9 @@ fun WordMenuBar(
                     )
                 }
                 MenuAction(
-                    icon = { Icon(Icons.Filled.EditNote, contentDescription = null) },
-                    label = "Notes",
-                    onClick = onNotes,
+                    icon = { Icon(Icons.Filled.Bookmark, contentDescription = null) },
+                    label = "Bookmark",
+                    onClick = onBookmark,
                 )
                 MenuAction(
                     icon = { Icon(Icons.Filled.ContentCopy, contentDescription = null) },

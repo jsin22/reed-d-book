@@ -1,12 +1,18 @@
 package dev.reedd.data.db
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.ForeignKey
 import androidx.room.Index
 import androidx.room.PrimaryKey
 
 /**
- * A note the reader took against a word or a passage.
+ * A note the reader took against a word or a passage -- and, since a
+ * bookmark turned out to be nothing more than one of these with no text
+ * (see [MIGRATION_9_10]'s own doc), a bookmark too: [type] is what a plain
+ * tap-to-mark used to be its own table for. A color-only entry (no
+ * [noteText]) renders exactly like the old bookmark did; one with both is
+ * what used to require two separate features to produce.
  *
  * [spineIndex]/[progression] are resolved once, at save time, from the
  * publication's own reading order -- not derived from [locatorJson] on every
@@ -30,7 +36,7 @@ import androidx.room.PrimaryKey
 data class NoteEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val bookId: String,
-    /** What the reader typed. */
+    /** What the reader typed -- optional; blank is a plain colored bookmark with no note. */
     val noteText: String,
     /** The tapped word, or the highlighted passage -- shown as context in the list. */
     val quotedText: String,
@@ -43,4 +49,7 @@ data class NoteEntity(
     /** Within-resource progression, 0..1 -- secondary sort key, same nullability as [SyncChunkEntity.progression]. */
     val progression: Double?,
     val createdAt: Long,
+    /** Which color this note/bookmark shows as -- chosen in the editor, defaulting
+     *  to [BookmarkType.DEFAULT] for a plain, uncolored note. */
+    @ColumnInfo(defaultValue = "'DEFAULT'") val type: BookmarkType = BookmarkType.DEFAULT,
 )

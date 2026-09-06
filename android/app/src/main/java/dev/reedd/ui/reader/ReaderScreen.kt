@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -54,6 +55,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInWindow
@@ -80,6 +82,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import dev.reedd.data.db.BookmarkType
 import dev.reedd.data.settings.ReaderSettings
 import dev.reedd.diagnostics.CrashReporter
 import dev.reedd.domain.NoteLocators
@@ -156,6 +159,8 @@ fun ReaderScreen(
     val tappedWord by readAlongViewModel.tappedWord.collectAsStateWithLifecycle()
     val pendingNoteTarget by readAlongViewModel.pendingNoteTarget.collectAsStateWithLifecycle()
     val definition by readAlongViewModel.definition.collectAsStateWithLifecycle()
+    val bookmarkLabels by notesViewModel.labels.collectAsStateWithLifecycle()
+    val lastUsedType by notesViewModel.lastUsedType.collectAsStateWithLifecycle()
 
     // Hide the system status and navigation bars too, not just the app's own toolbars
     // — otherwise "immersive" still leaves a status-bar strip above the text, which is
@@ -237,7 +242,7 @@ fun ReaderScreen(
                                 Icon(Icons.AutoMirrored.Filled.List, contentDescription = "Contents")
                             }
                             IconButton(onClick = { showNotes = true }) {
-                                Icon(Icons.Filled.EditNote, contentDescription = "Notes")
+                                Icon(Icons.Filled.EditNote, contentDescription = "Notes and bookmarks")
                             }
                             IconButton(onClick = { showAppearance = true }) {
                                 Icon(Icons.Filled.TextFields, contentDescription = "Appearance")
@@ -275,7 +280,7 @@ fun ReaderScreen(
                         target = menuTarget,
                         onReadFromHere = readAlongViewModel::readFromTappedWord,
                         onDefine = readAlongViewModel::defineTappedWord,
-                        onNotes = readAlongViewModel::openNoteEditor,
+                        onBookmark = readAlongViewModel::openNoteEditor,
                         onDismiss = readAlongViewModel::dismissWordMenu,
                     )
                 } else if (book?.isPlayable == true) {
@@ -433,11 +438,13 @@ fun ReaderScreen(
                 // against the publication -- nothing to save, so just close.
                 LaunchedEffect(target) { readAlongViewModel.dismissNoteEditor() }
             } else {
-                NoteEditorDialog(
+                BookmarkEditorDialog(
                     quotedText = pending.quotedText,
-                    onSave = { noteText ->
+                    initialType = lastUsedType,
+                    labels = bookmarkLabels,
+                    onSave = { type, noteText ->
                         val spineIndex = spineIndexOf(publication?.readingOrder.orEmpty(), pending.resourceHref) ?: 0
-                        scope.launch { notesViewModel.saveNote(pending, noteText, spineIndex) }
+                        scope.launch { notesViewModel.saveNote(pending, noteText, type, spineIndex) }
                         readAlongViewModel.dismissNoteEditor()
                     },
                     onCancel = readAlongViewModel::dismissNoteEditor,
@@ -518,6 +525,34 @@ private fun buildPendingNote(publication: Publication, target: WordMenuTarget): 
 @Composable
 private fun ReaderPalette(paper: Boolean, content: @Composable () -> Unit) {
     if (paper) MaterialTheme(colorScheme = paperColorScheme(), content = content) else content()
+}
+
+/**
+ * The color each [BookmarkType] renders as -- fixed hex values, not theme
+ * colors: the whole point is that a color someone is meant to *remember and
+ * pick out at a glance* must not shift with the app's theme. Same
+ * convention as [HANDLE_START_COLOR]/[HANDLE_END_COLOR] in [SelectionHandle].
+ */
+fun BookmarkType.color(): Color = when (this) {
+    BookmarkType.FAVORITE_QUOTE -> Color(0xFFF2C230)
+    BookmarkType.CRUCIAL_PLOT -> Color(0xFFD64545)
+    BookmarkType.NEEDS_REVIEW -> Color(0xFF3E7CB1)
+    BookmarkType.DEFAULT -> Color(0xFF4A4A4A)
+}
+
+/**
+ * A plain color name, for a screen reader -- [BookmarkType] itself carries
+ * no built-in meaning (see its own doc), so a still-unlabeled type needs
+ * *some* non-visual way to say which one it is. Never shown as on-screen
+ * text; the reader's own custom label (or nothing, before one is set) is
+ * what actually renders. Not private: [BookmarkEditorDialog] (a different
+ * file, same package) uses this same fallback for its own color picker.
+ */
+fun BookmarkType.colorName(): String = when (this) {
+    BookmarkType.FAVORITE_QUOTE -> "yellow"
+    BookmarkType.CRUCIAL_PLOT -> "red"
+    BookmarkType.NEEDS_REVIEW -> "blue"
+    BookmarkType.DEFAULT -> "dark grey"
 }
 
 /** One [SelectionTextResolver.extend] call's worth of input -- both
@@ -1033,7 +1068,7 @@ private fun EpubNavigator(
         val fragment = navigator ?: return@LaunchedEffect
         readAlongViewModel.pendingHighlight.filterNotNull().collectLatest { pending ->
             fragment.currentLocator.map { it.href.toString() }.first { it == pending.resourceHref }
-            TapTextResolver.highlightPassage(fragment, pending.text, pending.before, pending.after)
+            TapTextResolver.highlightPassage(fragment, pending.text, pending.before, pending.after, pending.type.color())
             readAlongViewModel.clearPendingHighlight()
         }
     }

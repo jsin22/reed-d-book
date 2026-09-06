@@ -26,6 +26,13 @@ class Converters {
     fun stringToDownloadState(value: String): DownloadState =
         runCatching { DownloadState.valueOf(value) }.getOrDefault(DownloadState.NONE)
 
+    @TypeConverter
+    fun bookmarkTypeToString(type: BookmarkType): String = type.name
+
+    @TypeConverter
+    fun stringToBookmarkType(value: String): BookmarkType =
+        runCatching { BookmarkType.valueOf(value) }.getOrDefault(BookmarkType.DEFAULT)
+
     /**
      * JSON rather than a delimiter-joined string: a genre tag comes from the
      * server's own keyword list (`_GENRE_KEYWORDS` in `book_metadata.py`), all

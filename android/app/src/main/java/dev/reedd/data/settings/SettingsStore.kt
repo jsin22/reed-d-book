@@ -9,6 +9,7 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import dev.reedd.data.db.BookmarkType
 import dev.reedd.domain.LibrarySort
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.Flow
@@ -219,6 +220,45 @@ class SettingsStore(context: Context, scope: CoroutineScope) {
         }
     }
 
+    /** Whichever [BookmarkType] the color picker was last used to choose --
+     *  a single tap on the marker reuses it, so bookmarking several spots
+     *  in a row with the same color does not mean opening the picker every
+     *  time. Global, not per-book: the four types mean the same thing in
+     *  every book. */
+    val lastBookmarkType: Flow<BookmarkType> = dataStore.data.map { prefs ->
+        prefs[KEY_LAST_BOOKMARK_TYPE]?.let { runCatching { BookmarkType.valueOf(it) }.getOrNull() }
+            ?: BookmarkType.DEFAULT
+    }
+
+    suspend fun setLastBookmarkType(type: BookmarkType) {
+        dataStore.edit { prefs -> prefs[KEY_LAST_BOOKMARK_TYPE] = type.name }
+    }
+
+    /**
+     * What the reader has named each [BookmarkType] on the Bookmark colors
+     * settings screen -- a fresh install maps every type to `""`, since
+     * [BookmarkType] itself carries no built-in meaning any more (see its
+     * own doc). Always has all four keys, never a partial map, so a caller
+     * can index it directly without a `?:` fallback at every use.
+     */
+    val bookmarkLabels: Flow<Map<BookmarkType, String>> = dataStore.data.map { prefs ->
+        BookmarkType.entries.associateWith { prefs[bookmarkLabelKey(it)] ?: "" }
+    }
+
+    /** A blank [label] clears the custom name back to "no label" rather than
+     *  storing an empty string forever. */
+    suspend fun setBookmarkLabel(type: BookmarkType, label: String) {
+        dataStore.edit { prefs ->
+            val trimmed = label.trim()
+            if (trimmed.isEmpty()) prefs.remove(bookmarkLabelKey(type)) else prefs[bookmarkLabelKey(type)] = trimmed
+        }
+    }
+
+    /** One preference key per [BookmarkType], derived rather than hand-listed
+     *  as four separate `KEY_*` constants -- a fifth type added later gets a
+     *  working key for free instead of needing a matching new constant. */
+    private fun bookmarkLabelKey(type: BookmarkType) = stringPreferencesKey("bookmark_label_${type.name.lowercase()}")
+
     private companion object {
         val KEY_BASE_URL = stringPreferencesKey("base_url")
         val KEY_TOKEN = stringPreferencesKey("api_token")
@@ -232,6 +272,7 @@ class SettingsStore(context: Context, scope: CoroutineScope) {
         val KEY_LIBRARY_SORT = stringPreferencesKey("library_sort")
         val KEY_LIBRARY_FILTER_CATEGORY = stringPreferencesKey("library_filter_category")
         val KEY_LIBRARY_FILTER_GENRES = stringSetPreferencesKey("library_filter_genres")
+        val KEY_LAST_BOOKMARK_TYPE = stringPreferencesKey("last_bookmark_type")
 
         /** Not a real theme name -- see [readerSettings] and [setReaderSettings]. */
         const val SYSTEM_THEME_SENTINEL = "SYSTEM"

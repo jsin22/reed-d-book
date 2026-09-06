@@ -1,5 +1,6 @@
 package dev.reedd.ui.reader
 
+import androidx.compose.ui.graphics.Color
 import org.json.JSONObject
 import org.readium.r2.navigator.epub.EpubNavigatorFragment
 
@@ -76,13 +77,13 @@ object TapTextResolver {
      * match is worth relaxing rather than silently failing to highlight
      * anything.
      */
-    suspend fun highlightPassage(fragment: EpubNavigatorFragment, text: String, before: String, after: String): Boolean {
-        val raw = runCatching { fragment.evaluateJavascript(highlightScript(text, before, after)) }.getOrNull()
+    suspend fun highlightPassage(fragment: EpubNavigatorFragment, text: String, before: String, after: String, color: Color): Boolean {
+        val raw = runCatching { fragment.evaluateJavascript(highlightScript(text, before, after, color)) }.getOrNull()
             ?: return false
         return raw.trim().trim('"') == "true"
     }
 
-    private fun highlightScript(text: String, before: String, after: String): String {
+    private fun highlightScript(text: String, before: String, after: String, color: Color): String {
         // JSONObject.quote produces a properly escaped, quoted JS string
         // literal -- required here since, unlike every other script in this
         // file/SelectionTextResolver, these values are arbitrary stored note
@@ -90,6 +91,7 @@ object TapTextResolver {
         val textLit = JSONObject.quote(text)
         val beforeLit = JSONObject.quote(before)
         val afterLit = JSONObject.quote(after)
+        val colorCss = color.toCssRgba(alpha = 0.45f)
         return """
             (function() {
               try {
@@ -127,13 +129,18 @@ object TapTextResolver {
                 range.setStart(start.node, start.offset);
                 range.setEnd(end.node, end.offset);
                 if (!(window.CSS && CSS.highlights)) { return false; }
-                if (!document.getElementById('reedd-highlight-style')) {
-                  var style = document.createElement('style');
+                var style = document.getElementById('reedd-highlight-style');
+                if (!style) {
+                  style = document.createElement('style');
                   style.id = 'reedd-highlight-style';
-                  style.textContent =
-                    '::highlight($HIGHLIGHT_NAME) { background-color: rgba(255, 196, 0, 0.45); }';
                   document.head.appendChild(style);
                 }
+                // Always overwritten, not just created once: this style element
+                // is shared with the plain word-tap highlight below (same
+                // $HIGHLIGHT_NAME), and each note/bookmark has its own color --
+                // reusing a stale color from whichever was painted last would
+                // bleed one entry's color onto a later, differently-colored one.
+                style.textContent = '::highlight($HIGHLIGHT_NAME) { background-color: $colorCss; }';
                 CSS.highlights.set('$HIGHLIGHT_NAME', new Highlight(range));
                 return true;
               } catch (e) {
@@ -141,6 +148,15 @@ object TapTextResolver {
               }
             })();
         """.trimIndent()
+    }
+
+    /** A CSS `rgba(...)` literal for [highlightScript] -- Compose's [Color]
+     *  stores channels as 0f..1f, CSS wants 0..255. */
+    private fun Color.toCssRgba(alpha: Float): String {
+        val r = (red * 255).toInt()
+        val g = (green * 255).toInt()
+        val b = (blue * 255).toInt()
+        return "rgba($r, $g, $b, $alpha)"
     }
 
     /** Removes the word highlight, e.g. when the menu is dismissed. */
@@ -252,13 +268,16 @@ object TapTextResolver {
             // the menu still works, there is simply no highlight.
             try {
               if (window.CSS && CSS.highlights) {
-                if (!document.getElementById('reedd-highlight-style')) {
-                  var style = document.createElement('style');
+                // Always overwritten -- see highlightScript's own comment on
+                // why this style element cannot just be created once.
+                var style = document.getElementById('reedd-highlight-style');
+                if (!style) {
+                  style = document.createElement('style');
                   style.id = 'reedd-highlight-style';
-                  style.textContent =
-                    '::highlight($HIGHLIGHT_NAME) { background-color: rgba(255, 196, 0, 0.45); }';
                   document.head.appendChild(style);
                 }
+                style.textContent =
+                  '::highlight($HIGHLIGHT_NAME) { background-color: rgba(255, 196, 0, 0.45); }';
                 CSS.highlights.set('$HIGHLIGHT_NAME', new Highlight(range));
               }
             } catch (e) {}

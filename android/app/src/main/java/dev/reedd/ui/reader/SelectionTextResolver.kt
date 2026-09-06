@@ -217,13 +217,17 @@ object SelectionTextResolver {
             // single-word tap already uses, just repainted with a wider range.
             try {
               if (window.CSS && CSS.highlights) {
-                if (!document.getElementById('reedd-highlight-style')) {
-                  var style = document.createElement('style');
+                // Always overwritten -- see TapTextResolver.highlightScript's
+                // own comment on why this shared style element cannot just be
+                // created once.
+                var style = document.getElementById('reedd-highlight-style');
+                if (!style) {
+                  style = document.createElement('style');
                   style.id = 'reedd-highlight-style';
-                  style.textContent =
-                    '::highlight(${TapTextResolver.HIGHLIGHT_NAME}) { background-color: rgba(255, 196, 0, 0.45); }';
                   document.head.appendChild(style);
                 }
+                style.textContent =
+                  '::highlight(${TapTextResolver.HIGHLIGHT_NAME}) { background-color: rgba(255, 196, 0, 0.45); }';
                 CSS.highlights.set('${TapTextResolver.HIGHLIGHT_NAME}', new Highlight(range));
               }
             } catch (e) {}
