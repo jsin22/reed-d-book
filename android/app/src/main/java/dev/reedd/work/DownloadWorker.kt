@@ -66,13 +66,32 @@ class DownloadWorker(
     override suspend fun getForegroundInfo(): ForegroundInfo =
         container.notifications.foreground(
             Notifications.transferId(bookId),
-            notification(container.repository.get(bookId)?.title ?: "book", null),
+            notification(container.repository.get(bookId)?.title ?: "book", null, null),
         )
 
-    private fun notification(title: String, percent: Int?) =
+    /**
+     * Which file is currently moving -- shown whenever [percent] is not yet
+     * known (no `Content-Length`/`Content-Range` from the server) and, more
+     * importantly, at the very start of each step: without this the
+     * notification just froze on "Fetching the audiobook" for however long
+     * [ensureEpub]'s own download took, since only [downloadAudiobook] ever
+     * fed the progress channel. A book adopted from another device -- one
+     * this device never uploaded itself, so it has no epub yet -- can have a
+     * multi-megabyte illustrated epub to fetch first, entirely invisibly.
+     */
+    private enum class TransferStep(val label: String) {
+        EPUB("Fetching the book text"),
+        AUDIOBOOK("Fetching the audiobook"),
+    }
+
+    private fun notification(title: String, step: TransferStep?, percent: Int?) =
         container.notifications.transfer(
             title = "Downloading $title",
-            text = if (percent == null) "Fetching the audiobook" else "$percent%",
+            text = when {
+                percent != null -> "$percent%"
+                step != null -> step.label
+                else -> "Preparing…"
+            },
             progress = percent,
         )
 
@@ -87,21 +106,25 @@ class DownloadWorker(
 
         // Byte counts arrive far too often to write straight to the database, so
         // they cross into coroutine land through a conflated channel: only the
-        // latest matters.
-        val progress = Channel<Pair<Long, Long>>(Channel.CONFLATED)
+        // latest matters. The epub step's own bytes are not worth persisting to
+        // downloadedBytes/totalBytes -- those columns describe the audiobook, per
+        // BookEntity's own doc -- so only the notification reflects that step.
+        val progress = Channel<Triple<TransferStep, Long, Long>>(Channel.CONFLATED)
         val writer = launch {
-            for ((downloaded, total) in progress) {
-                container.repository.updateDownload(
-                    bookId,
-                    DownloadState.RUNNING,
-                    downloadedBytes = downloaded,
-                    totalBytes = total,
-                    error = null,
-                )
+            for ((step, downloaded, total) in progress) {
                 val percent = if (total > 0L) ((downloaded * 100) / total).toInt() else null
+                if (step == TransferStep.AUDIOBOOK) {
+                    container.repository.updateDownload(
+                        bookId,
+                        DownloadState.RUNNING,
+                        downloadedBytes = downloaded,
+                        totalBytes = total,
+                        error = null,
+                    )
+                }
                 container.notifications.post(
                     Notifications.transferId(bookId),
-                    notification(book.title, percent),
+                    notification(book.title, step, percent),
                 )
             }
         }
@@ -110,7 +133,7 @@ class DownloadWorker(
             setForeground(getForegroundInfo())
             container.repository.updateDownload(bookId, DownloadState.RUNNING, error = null)
 
-            ensureEpub(book, jobId)
+            ensureEpub(book, jobId, progress)
             downloadCoverIfMissing(bookId, jobId)
 
             val audiobook = downloadAudiobook(book, jobId, progress)
@@ -194,10 +217,17 @@ class DownloadWorker(
      * the real, Readium-derived ones, including a cover extracted straight from
      * the epub if it has one.
      */
-    private suspend fun ensureEpub(book: BookEntity, jobId: String) {
+    private suspend fun ensureEpub(book: BookEntity, jobId: String, progress: SendChannel<Triple<TransferStep, Long, Long>>) {
         val target = File(book.epubPath)
         if (target.isFile) return
-        container.downloader.download(url = container.api.url("api/jobs/$jobId/epub"), target = target)
+        var lastPercent = -1
+        container.downloader.download(url = container.api.url("api/jobs/$jobId/epub"), target = target) { downloaded, total ->
+            val percent = if (total <= 0L) -1 else ((downloaded * 100) / total).toInt()
+            if (percent != lastPercent) {
+                lastPercent = percent
+                progress.trySend(Triple(TransferStep.EPUB, downloaded, total))
+            }
+        }
         val imported = container.importer.fromServerCopy(bookId, book.originalFilename)
         container.repository.updateMetadata(bookId, imported.title, imported.author, imported.coverPath, imported.sizeBytes)
     }
@@ -230,7 +260,7 @@ class DownloadWorker(
     private suspend fun downloadAudiobook(
         book: BookEntity,
         jobId: String,
-        progress: SendChannel<Pair<Long, Long>>,
+        progress: SendChannel<Triple<TransferStep, Long, Long>>,
     ): File {
         val target = container.files.audiobook(bookId, book.audiobookFilename())
         var lastPercent = -1
@@ -242,7 +272,7 @@ class DownloadWorker(
             val percent = if (total <= 0L) -1 else ((downloaded * 100) / total).toInt()
             if (percent != lastPercent) {
                 lastPercent = percent
-                progress.trySend(downloaded to total)
+                progress.trySend(Triple(TransferStep.AUDIOBOOK, downloaded, total))
             }
         }
         container.repository.setAudiobook(bookId, file)
