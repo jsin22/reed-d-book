@@ -106,4 +106,15 @@ interface ReeddService {
     /** Whether the category/genre lookup is currently working -- see [MetadataHealthDto]. */
     @GET("api/admin/metadata-health")
     suspend fun metadataHealth(): MetadataHealthDto
+
+    /** What `/download/app` serves right now, versus the newest build
+     *  waiting in `REEDD_APK_BUILD_DIR` -- see [ApkStatusDto]. */
+    @GET("api/admin/apk")
+    suspend fun apkStatus(): ApkStatusDto
+
+    /** "Push Update": copies the newest build over what `/download/app`
+     *  serves. Deliberately not automatic on every build -- see
+     *  `server/app/main.py`'s `push_apk` for why. */
+    @POST("api/admin/push-apk")
+    suspend fun pushApk(): PushApkResultDto
 }

@@ -36,6 +36,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import dev.reedd.data.remote.ApkStatusDto
 import dev.reedd.data.remote.JobDto
 import dev.reedd.data.remote.MetadataHealthDto
 import dev.reedd.data.remote.UserDto
@@ -49,6 +50,8 @@ fun AdminScreen(
     val jobs by viewModel.jobs.collectAsStateWithLifecycle()
     val users by viewModel.users.collectAsStateWithLifecycle()
     val metadataHealth by viewModel.metadataHealth.collectAsStateWithLifecycle()
+    val apkStatus by viewModel.apkStatus.collectAsStateWithLifecycle()
+    val pushingApk by viewModel.pushingApk.collectAsStateWithLifecycle()
     val rechecking by viewModel.rechecking.collectAsStateWithLifecycle()
     val inviteResult by viewModel.inviteResult.collectAsStateWithLifecycle()
     val message by viewModel.message.collectAsStateWithLifecycle()
@@ -95,6 +98,10 @@ fun AdminScreen(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+
+            HorizontalDivider()
+
+            AppUpdateSection(status = apkStatus, pushing = pushingApk, onPush = viewModel::pushApk)
 
             HorizontalDivider()
 
@@ -265,6 +272,52 @@ private fun MetadataHealthBanner(health: MetadataHealthDto) {
             }
         }
     }
+}
+
+/**
+ * "Push Update": what invitees currently download from `/download/app`
+ * (`status.live`) versus the newest debug build sitting on the server's own
+ * machine waiting to be pushed there (`status.pending`) -- see
+ * `AdminViewModel.pushApk`'s own doc for why a rebuild does not reach
+ * `/download/app` on its own. `status == null` (not yet loaded, or the
+ * request failed) shows neither line rather than a misleading "no update".
+ */
+@Composable
+private fun AppUpdateSection(status: ApkStatusDto?, pushing: Boolean, onPush: () -> Unit) {
+    Text("App update", style = MaterialTheme.typography.titleMedium)
+    status?.live?.let {
+        Text("Live now: ${it.filename} · ${it.bytes.mb()} · built ${it.builtAt}", style = MaterialTheme.typography.bodySmall)
+    } ?: Text(
+        "Nothing is live yet -- REEDD_APK_PATH is not configured, or no version has been pushed.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    status?.pending?.let {
+        Text(
+            "Waiting to push: ${it.filename} · ${it.bytes.mb()} · built ${it.builtAt}",
+            style = MaterialTheme.typography.bodySmall,
+        )
+    }
+    Button(
+        onClick = onPush,
+        enabled = !pushing && status?.pending != null,
+    ) {
+        Text(if (pushing) "Pushing…" else "Push update")
+    }
+    Text(
+        "Copies the newest debug build on this server's own machine over what " +
+            "/download/app serves. A rebuild never goes live on its own -- this is " +
+            "the deliberate step that does, so nobody updates to a version still " +
+            "being tested.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+}
+
+private fun Long.mb(): String = when {
+    this <= 0 -> "-"
+    this < 1024 * 1024 -> "${this / 1024} kB"
+    else -> "%.1f MB".format(this / 1024.0 / 1024.0)
 }
 
 @Composable

@@ -180,6 +180,7 @@ Everything has a working default; override with environment variables.
 | `REEDD_SMTP_FROM` | `REEDD_SMTP_USER` | |
 | `REEDD_PUBLIC_SERVER_URL` | *(empty)* | the externally-reachable URL, for the `/download/app` link in invite emails |
 | `REEDD_APK_PATH` | *(empty: `/download/app` returns 404)* | path to the APK it serves |
+| `REEDD_APK_BUILD_DIR` | `android/app/build/outputs/apk/debug` | where a fresh debug build lands -- "Push Update" on the Admin screen copies the newest `.apk` there onto `REEDD_APK_PATH`, so a rebuild doesn't reach invitees until pushed on purpose |
 | `REEDD_GEMINI_API_KEY` | *(empty: every lookup fails, see "Watching for trouble")* | from [Google AI Studio](https://aistudio.google.com/apikey) |
 | `REEDD_GEMINI_MODEL` | `gemini-3.1-flash-lite` | category/genre lookup, see below |
 

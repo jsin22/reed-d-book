@@ -45,6 +45,7 @@ class Settings:
     smtp_from: str
     public_server_url: str
     apk_path: str
+    apk_build_dir: Path
     gemini_api_key: str
     gemini_model: str
 
@@ -107,8 +108,19 @@ def load_settings() -> Settings:
         # never needs to be told this.
         public_server_url=_env('PUBLIC_SERVER_URL', ''),
         # Path to the APK served at GET /download/app. Empty disables that
-        # route (404) rather than serving nothing silently.
+        # route (404) rather than serving nothing silently. Deliberately not
+        # updated by every build: POST /api/admin/push-apk is what copies a
+        # newer file here, on request, so a rebuild does not go live to
+        # every invitee the moment it finishes (see apk_build_dir below).
         apk_path=_env('APK_PATH', ''),
+        # Where a debug build lands (`./gradlew :app:assembleDebug`'s own
+        # default output directory) -- Push Update, the admin screen's
+        # button, copies the newest .apk it finds here to apk_path. Same
+        # repo checkout as this server, so this is a plain local path, not
+        # a URL: both live on one machine (see README.md).
+        apk_build_dir=Path(_env(
+            'APK_BUILD_DIR', str(here.parent / 'android' / 'app' / 'build' / 'outputs' / 'apk' / 'debug'),
+        )).expanduser(),
         # Gemini is the sole source for category/genre lookups (see
         # app/llm_metadata.py, LLM_GENRE_ENRICHMENT.md) -- unlike every
         # other source this project has used, this one needs a real

@@ -165,6 +165,31 @@ data class MetadataHealthDto(
     @SerialName("last_success_at") val lastSuccessAt: String? = null,
 )
 
+/** One `.apk` file the server knows about -- either what `GET /download/app`
+ *  currently serves, or what a rebuild left waiting to be pushed there. */
+@Serializable
+data class ApkInfoDto(
+    val filename: String,
+    val bytes: Long,
+    @SerialName("built_at") val builtAt: String,
+)
+
+/** `GET /api/admin/apk` -- what invitees get right now vs. what a "Push
+ *  Update" would replace it with, if anything. Either can be null: `live`
+ *  when `REEDD_APK_PATH` is unconfigured or the file is missing, `pending`
+ *  when no build is sitting in `REEDD_APK_BUILD_DIR`. */
+@Serializable
+data class ApkStatusDto(
+    val live: ApkInfoDto? = null,
+    val pending: ApkInfoDto? = null,
+)
+
+/** `POST /api/admin/push-apk` -- what is live immediately after the push. */
+@Serializable
+data class PushApkResultDto(
+    val pushed: ApkInfoDto,
+)
+
 /** The server's status strings, plus a bucket for anything newer than this app. */
 enum class JobStatus {
     QUEUED, RUNNING, DONE, ERROR, UNKNOWN;

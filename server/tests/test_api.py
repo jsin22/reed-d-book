@@ -5,11 +5,15 @@ The queue is stubbed out: these tests cover the API's own behaviour, not
 Celery's, and they must run without Redis or the TTS stack installed.
 """
 
+import os
+import time
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from fastapi.testclient import TestClient
 
+from app import config
 from app.book_metadata import LookupUnavailable
 from app.main import app
 from app.store import JobStore
@@ -697,6 +701,88 @@ class InviteWithSmtpTest(ApiTestCase):
         self.assertEqual(response.status_code, 201)
         self.assertFalse(response.json()['email_sent'])
         self.assertTrue(response.json()['token'])
+
+
+class PushApkTest(ApiTestCase):
+    """The Admin screen's "Push Update" button: `apk_build_dir` (a rebuild's
+    own output) stays separate from `apk_path` (what GET /download/app
+    serves) until an admin explicitly pushes one to the other -- see
+    push_apk's own doc for why that separation exists at all.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.build_dir = Path(self.settings.data_dir) / 'apk-build'
+        self.build_dir.mkdir()
+        self.apk_path = Path(self.settings.data_dir) / 'live' / 'reedd.apk'
+        os.environ['REEDD_APK_BUILD_DIR'] = str(self.build_dir)
+        os.environ['REEDD_APK_PATH'] = str(self.apk_path)
+        config.get_settings.cache_clear()
+        self.settings = config.get_settings()
+        _, admin_token = self.make_user('admin@example.com', is_admin=True)
+        self.client.headers['Authorization'] = f'Bearer {admin_token}'
+
+    def touch(self, name: str, content: bytes, age_seconds: float = 0) -> Path:
+        path = self.build_dir / name
+        path.write_bytes(content)
+        if age_seconds:
+            stamp = time.time() - age_seconds
+            os.utime(path, (stamp, stamp))
+        return path
+
+    def test_admin_routes_reject_a_non_admin(self):
+        self.client.headers['Authorization'] = f'Bearer {self.token}'  # the plain user, not the admin
+        self.assertEqual(self.client.get('/api/admin/apk').status_code, 403)
+        self.assertEqual(self.client.post('/api/admin/push-apk').status_code, 403)
+
+    def test_push_apk_copies_the_newest_build_over_the_live_one(self):
+        self.touch('app-debug-old.apk', b'old build', age_seconds=60)
+        self.touch('app-debug.apk', b'new build')
+
+        response = self.client.post('/api/admin/push-apk')
+
+        self.assertEqual(response.status_code, 200)
+        # The served *filename* stays whatever apk_path itself names --
+        # download_app takes it from Path(apk_path).name, not the source
+        # build's own filename -- only the newer build's *content* moved.
+        self.assertEqual(self.apk_path.name, response.json()['pushed']['filename'])
+        self.assertEqual(b'new build', self.apk_path.read_bytes())
+
+    def test_push_apk_creates_the_live_apks_own_directory(self):
+        # apk_path's own directory ('live/' here) does not exist until the
+        # first push -- REEDD_APK_PATH names a file, not a pre-made folder.
+        self.touch('app-debug.apk', b'a build')
+        self.assertFalse(self.apk_path.parent.is_dir())
+
+        self.client.post('/api/admin/push-apk')
+
+        self.assertTrue(self.apk_path.is_file())
+
+    def test_push_apk_is_404_when_the_build_directory_has_no_apk(self):
+        response = self.client.post('/api/admin/push-apk')
+        self.assertEqual(response.status_code, 404)
+        self.assertFalse(self.apk_path.exists())
+
+    def test_push_apk_is_400_when_apk_path_is_not_configured(self):
+        os.environ['REEDD_APK_PATH'] = ''
+        config.get_settings.cache_clear()
+        self.touch('app-debug.apk', b'a build')
+
+        response = self.client.post('/api/admin/push-apk')
+
+        self.assertEqual(response.status_code, 400)
+
+    def test_admin_apk_status_reports_live_and_pending_separately(self):
+        self.touch('app-debug.apk', b'a newer build than what is live')
+
+        before_push = self.client.get('/api/admin/apk').json()
+        self.assertIsNone(before_push['live'])
+        self.assertEqual('app-debug.apk', before_push['pending']['filename'])
+
+        self.client.post('/api/admin/push-apk')
+
+        after_push = self.client.get('/api/admin/apk').json()
+        self.assertEqual(self.apk_path.name, after_push['live']['filename'])
 
 
 if __name__ == '__main__':

@@ -34,9 +34,12 @@ Admin-only (see app.users.UserStore):
     GET    /api/admin/users              every invited user
     POST   /api/admin/users              {"email": str} -- invite a new user, email them a token
     DELETE /api/admin/users/{user_id}    revoke a user's access (not your own account)
+    GET    /api/admin/apk                the live (/download/app) and pending (apk_build_dir) APKs
+    POST   /api/admin/push-apk           copy the newest build over the live one -- "Push Update"
 
     GET    /download/app                 unauthenticated: serves the APK, for an
-                                          invitee who has no token yet
+                                          invitee who has no token yet -- see push_apk above for
+                                          why a rebuild does not reach this on its own
 
 Upload returns as soon as the file is on disk; the conversion happens in a
 Celery worker.  This process never imports torch or pocket_tts.
@@ -44,6 +47,7 @@ Celery worker.  This process never imports torch or pocket_tts.
 
 import logging
 import os
+import shutil
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -680,3 +684,55 @@ def download_app():
         raise HTTPException(status_code=404, detail='app download not configured')
     return FileResponse(path, media_type='application/vnd.android.package-archive',
                         filename=Path(path).name)
+
+
+def _apk_info(path_str: str) -> dict | None:
+    path = Path(path_str) if path_str else None
+    if path is None or not path.is_file():
+        return None
+    stat = path.stat()
+    return {
+        'filename': path.name,
+        'bytes': stat.st_size,
+        'built_at': datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+    }
+
+
+def _newest_built_apk(build_dir: Path) -> Path | None:
+    candidates = list(build_dir.glob('*.apk')) if build_dir.is_dir() else []
+    return max(candidates, key=lambda p: p.stat().st_mtime, default=None)
+
+
+@app.get('/api/admin/apk', dependencies=[Depends(require_admin)])
+def admin_apk_status():
+    """What invitees would download right now (`live`), versus the newest
+    build sitting in `apk_build_dir` waiting to be pushed there (`pending`)
+    -- see `push_apk` below for why these two are allowed to differ.
+    """
+    settings = get_settings()
+    return {
+        'live': _apk_info(settings.apk_path),
+        'pending': _apk_info(str(newest)) if (newest := _newest_built_apk(settings.apk_build_dir)) else None,
+    }
+
+
+@app.post('/api/admin/push-apk', dependencies=[Depends(require_admin)])
+def push_apk():
+    """Copies the newest build in `apk_build_dir` over `apk_path` -- the
+    Admin screen's "Push Update" button.
+
+    A rebuild does not reach `GET /download/app` on its own: every other
+    person using this app was invited to it, and them force-updating to
+    whatever this machine happens to be mid-testing (or a build that
+    doesn't even run) is a worse failure mode than the small extra step of
+    pushing deliberately once it is actually ready.
+    """
+    settings = get_settings()
+    if not settings.apk_path:
+        raise HTTPException(status_code=400, detail='REEDD_APK_PATH is not configured')
+    source = _newest_built_apk(settings.apk_build_dir)
+    if source is None:
+        raise HTTPException(status_code=404, detail=f'no .apk found in {settings.apk_build_dir}')
+    Path(settings.apk_path).parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, settings.apk_path)
+    return {'pushed': _apk_info(settings.apk_path)}

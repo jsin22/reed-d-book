@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import dev.reedd.data.remote.ApiException
 import dev.reedd.data.remote.ApiProvider
+import dev.reedd.data.remote.ApkStatusDto
 import dev.reedd.data.remote.InviteRequestDto
 import dev.reedd.data.remote.InviteResultDto
 import dev.reedd.data.remote.JobDto
@@ -58,6 +59,11 @@ class AdminViewModel(
     private val _metadataHealth = MutableStateFlow<MetadataHealthDto?>(null)
     val metadataHealth: StateFlow<MetadataHealthDto?> = _metadataHealth.asStateFlow()
 
+    /** What `/download/app` currently serves, vs. the newest build sitting in
+     *  `REEDD_APK_BUILD_DIR` waiting to be pushed there -- see [pushApk]. */
+    private val _apkStatus = MutableStateFlow<ApkStatusDto?>(null)
+    val apkStatus: StateFlow<ApkStatusDto?> = _apkStatus.asStateFlow()
+
     private val _inviteResult = MutableStateFlow<InviteResult>(InviteResult.Idle)
     val inviteResult: StateFlow<InviteResult> = _inviteResult.asStateFlow()
 
@@ -73,6 +79,7 @@ class AdminViewModel(
             runCatching { api.service().adminJobs().jobs }.onSuccess { _jobs.value = it }
             runCatching { api.service().adminUsers().users }.onSuccess { _users.value = it }
             runCatching { api.service().metadataHealth() }.onSuccess { _metadataHealth.value = it }
+            runCatching { api.service().apkStatus() }.onSuccess { _apkStatus.value = it }
         }
     }
 
@@ -185,6 +192,36 @@ class AdminViewModel(
                 _message.value = e.message ?: "could not reach the server"
             } finally {
                 _rechecking.value = false
+            }
+        }
+    }
+
+    /** True while [pushApk] is running, so the button can show a spinner and
+     *  not be tapped twice. */
+    private val _pushingApk = MutableStateFlow(false)
+    val pushingApk: StateFlow<Boolean> = _pushingApk.asStateFlow()
+
+    /**
+     * "Push Update": copies the newest debug build (wherever the machine
+     * running this server keeps `./gradlew :app:assembleDebug`'s own output --
+     * see `server/app/main.py`'s `apk_build_dir`) onto what `GET /download/app`
+     * actually serves. A rebuild does not reach that route on its own; this
+     * button is the explicit, deliberate step that does, so every other
+     * invitee only ever updates to a version this device has confirmed is
+     * ready, not whatever a rebuild happened to leave behind mid-testing.
+     */
+    fun pushApk() {
+        viewModelScope.launch {
+            _pushingApk.value = true
+            try {
+                api.service().pushApk()
+                refresh()
+            } catch (e: ApiException) {
+                _message.value = e.detail ?: e.message
+            } catch (e: IOException) {
+                _message.value = e.message ?: "could not reach the server"
+            } finally {
+                _pushingApk.value = false
             }
         }
     }
