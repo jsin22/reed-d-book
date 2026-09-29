@@ -3,6 +3,7 @@ package dev.reedd.data.db
 import android.content.Context
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import dev.reedd.data.remote.UploadMode
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.json.JSONObject
@@ -80,7 +81,8 @@ class MigrationTest {
         Room.databaseBuilder(context, ReeddDatabase::class.java, DB_NAME)
             .addMigrations(
                 MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7,
-                MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10,
+                MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12,
+                MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16,
             )
             .allowMainThreadQueries()
             .build()
@@ -294,9 +296,10 @@ class MigrationTest {
             )
             assertEquals("worth remembering", db.notes().observe("b1").first().single { it.id == noteId }.noteText)
 
-            // And it cascades with the book, same as sync_chunks/sync_chapters.
+            // Unlike sync_chunks/sync_chapters, a note now survives its book
+            // being deleted -- see NoteEntity's own doc / MIGRATION_13_14.
             db.books().delete("b1")
-            assertTrue(db.notes().observe("b1").first().isEmpty())
+            assertEquals(1, db.notes().observe("b1").first().size)
         } finally {
             db.close()
         }
@@ -430,6 +433,189 @@ class MigrationTest {
             assertEquals("", migratedBookmark.quotedText)
             assertEquals("c2.xhtml", migratedBookmark.resourceHref)
             assertEquals(0.5, migratedBookmark.progression!!, 0.0001)
+        } finally {
+            db.close()
+        }
+    }
+
+    @Test
+    fun `MIGRATION_11_12 defaults an existing book to no saved live position`() = runTest {
+        createVersion(11).use { old ->
+            old.execSQL(
+                """
+                INSERT INTO books (id, epubPath, originalFilename, title, sizeBytes, addedAt,
+                                   jobProgress, jobChaptersDone, jobMissing, uploadedBytes,
+                                   downloadState, downloadedBytes, downloadTotalBytes, uploadMode)
+                VALUES ('b1', '/e', 'Book.epub', 'Book', 1, 1, 0, 0, 0, 0, 'NONE', 0, 0, 'LIVE')
+                """.trimIndent()
+            )
+        }
+
+        val db = openMigrated()
+        try {
+            val book = db.books().get("b1")!!
+            assertNull(book.liveResourceHref)
+            assertEquals(0, book.liveSentenceIndex)
+        } finally {
+            db.close()
+        }
+    }
+
+    @Test
+    fun `MIGRATION_12_13 defaults an existing book to preferring the downloaded audiobook`() = runTest {
+        createVersion(12).use { old ->
+            old.execSQL(
+                """
+                INSERT INTO books (id, epubPath, originalFilename, title, sizeBytes, addedAt,
+                                   jobProgress, jobChaptersDone, jobMissing, uploadedBytes,
+                                   downloadState, downloadedBytes, downloadTotalBytes, uploadMode)
+                VALUES ('b1', '/e', 'Book.epub', 'Book', 1, 1, 0, 0, 0, 0, 'NONE', 0, 0, 'LIVE_OFFLINE')
+                """.trimIndent()
+            )
+        }
+
+        val db = openMigrated()
+        try {
+            val book = db.books().get("b1")!!
+            assertFalse(book.preferLiveReading)
+        } finally {
+            db.close()
+        }
+    }
+
+    @Test
+    fun `MIGRATION_14_15 splits the live voice out with nothing to backfill`() = runTest {
+        createVersion(14).use { old ->
+            old.execSQL(
+                """
+                INSERT INTO books (id, epubPath, originalFilename, title, sizeBytes, addedAt,
+                                   jobProgress, jobChaptersDone, jobMissing, uploadedBytes,
+                                   downloadState, downloadedBytes, downloadTotalBytes, voice)
+                VALUES ('b1', '/e', 'Book.epub', 'Book', 1, 1, 0, 0, 0, 0, 'NONE', 0, 0, 'alba')
+                """.trimIndent()
+            )
+        }
+
+        val db = openMigrated()
+        try {
+            val book = db.books().get("b1")!!
+            // The offline conversion voice survives untouched...
+            assertEquals("alba", book.voice)
+            // ...but nobody has ever picked a *separate* live voice yet, so
+            // there is nothing truthful to backfill it with.
+            assertNull(book.liveVoice)
+        } finally {
+            db.close()
+        }
+    }
+
+    @Test
+    fun `MIGRATION_15_16 defaults an existing book to nothing pending cleanup`() = runTest {
+        createVersion(15).use { old ->
+            old.execSQL(
+                """
+                INSERT INTO books (id, epubPath, originalFilename, title, sizeBytes, addedAt,
+                                   jobProgress, jobChaptersDone, jobMissing, uploadedBytes,
+                                   downloadState, downloadedBytes, downloadTotalBytes)
+                VALUES ('b1', '/e', 'Book.epub', 'Book', 1, 1, 0, 0, 0, 0, 'NONE', 0, 0)
+                """.trimIndent()
+            )
+        }
+
+        val db = openMigrated()
+        try {
+            assertNull(db.books().get("b1")!!.previousJobId)
+        } finally {
+            db.close()
+        }
+    }
+
+    @Test
+    fun `MIGRATION_13_14 keeps an existing note intact`() = runTest {
+        createVersion(13).use { old ->
+            old.execSQL(
+                """
+                INSERT INTO books (id, epubPath, originalFilename, title, sizeBytes, addedAt,
+                                   jobProgress, jobChaptersDone, jobMissing, uploadedBytes,
+                                   downloadState, downloadedBytes, downloadTotalBytes)
+                VALUES ('b1', '/e', 'Book.epub', 'Book', 1, 1, 0, 0, 0, 0, 'NONE', 0, 0)
+                """.trimIndent()
+            )
+            old.execSQL(
+                """
+                INSERT INTO notes (bookId, noteText, quotedText, locatorJson, resourceHref, spineIndex, progression, createdAt, type)
+                VALUES ('b1', 'worth remembering', 'a passage', '{"href":"c1.xhtml"}', 'c1.xhtml', 0, 0.2, 1000, 'DEFAULT')
+                """.trimIndent()
+            )
+        }
+
+        val db = openMigrated()
+        try {
+            val note = db.notes().observe("b1").first().single()
+            assertEquals("worth remembering", note.noteText)
+            assertEquals("a passage", note.quotedText)
+            assertEquals("c1.xhtml", note.resourceHref)
+            assertEquals(0.2, note.progression!!, 0.0001)
+        } finally {
+            db.close()
+        }
+    }
+
+    @Test
+    fun `MIGRATION_13_14 lets a note survive its book being deleted`() = runTest {
+        // The whole point of dropping notes' foreign key: an ordinary
+        // "Delete from device" (BookRepository.deleteBook) used to cascade-
+        // destroy every note the reader had written, even though that
+        // action is described as safe/reversible. See NoteEntity's own doc.
+        createVersion(13).use { old ->
+            old.execSQL(
+                """
+                INSERT INTO books (id, epubPath, originalFilename, title, sizeBytes, addedAt,
+                                   jobProgress, jobChaptersDone, jobMissing, uploadedBytes,
+                                   downloadState, downloadedBytes, downloadTotalBytes)
+                VALUES ('b1', '/e', 'Book.epub', 'Book', 1, 1, 0, 0, 0, 0, 'NONE', 0, 0)
+                """.trimIndent()
+            )
+            old.execSQL(
+                """
+                INSERT INTO notes (bookId, noteText, quotedText, locatorJson, resourceHref, spineIndex, progression, createdAt, type)
+                VALUES ('b1', 'worth remembering', 'a passage', '{"href":"c1.xhtml"}', 'c1.xhtml', 0, 0.2, 1000, 'DEFAULT')
+                """.trimIndent()
+            )
+        }
+
+        val db = openMigrated()
+        try {
+            db.books().delete("b1")
+            val notes = db.notes().observe("b1").first()
+            assertEquals(1, notes.size)
+            assertEquals("worth remembering", notes.single().noteText)
+        } finally {
+            db.close()
+        }
+    }
+
+    @Test
+    fun `MIGRATION_10_11 defaults an existing book to OFFLINE upload mode`() = runTest {
+        // 'Live'/'Live + Offline' did not exist as a choice before this --
+        // every book already in the library really was uploaded the plain
+        // 'offline' way, so this is a correct backfill, not a placeholder.
+        createVersion().use { old ->
+            old.execSQL(
+                """
+                INSERT INTO books (id, epubPath, originalFilename, title, sizeBytes, addedAt,
+                                   jobProgress, jobChaptersDone, jobMissing, uploadedBytes,
+                                   downloadState, downloadedBytes, downloadTotalBytes)
+                VALUES ('b1', '/e', 'Book.epub', 'Book', 1, 1, 0, 0, 0, 0, 'NONE', 0, 0)
+                """.trimIndent()
+            )
+        }
+
+        val db = openMigrated()
+        try {
+            val book = db.books().get("b1")!!
+            assertEquals(UploadMode.OFFLINE, book.uploadMode)
+            assertFalse(book.canReadLive)
         } finally {
             db.close()
         }

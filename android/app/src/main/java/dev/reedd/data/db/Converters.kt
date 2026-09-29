@@ -2,6 +2,7 @@ package dev.reedd.data.db
 
 import androidx.room.TypeConverter
 import dev.reedd.data.remote.JobStatus
+import dev.reedd.data.remote.UploadMode
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -18,6 +19,13 @@ class Converters {
     @TypeConverter
     fun stringToJobStatus(value: String?): JobStatus? =
         value?.let { runCatching { JobStatus.valueOf(it) }.getOrDefault(JobStatus.UNKNOWN) }
+
+    @TypeConverter
+    fun uploadModeToString(mode: UploadMode): String = mode.name
+
+    @TypeConverter
+    fun stringToUploadMode(value: String): UploadMode =
+        runCatching { UploadMode.valueOf(value) }.getOrDefault(UploadMode.OFFLINE)
 
     @TypeConverter
     fun downloadStateToString(state: DownloadState): String = state.name

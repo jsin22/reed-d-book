@@ -2,7 +2,6 @@ package dev.reedd.data.db
 
 import androidx.room.ColumnInfo
 import androidx.room.Entity
-import androidx.room.ForeignKey
 import androidx.room.Index
 import androidx.room.PrimaryKey
 
@@ -20,17 +19,20 @@ import androidx.room.PrimaryKey
  * `ORDER BY` instead of re-resolving a `Locator` against a live `Publication`
  * for every row, the same convention [SyncChunkEntity] already uses for its
  * own `resourceHref`/`progression` columns.
+ *
+ * Deliberately **no** foreign key to [BookEntity] ([MIGRATION_13_14] dropped
+ * it) -- a `ForeignKey(..., onDelete = CASCADE)` used to sit here, and it
+ * meant every ordinary "Delete from device" (`BookRepository.deleteBook`,
+ * non-admin: the server job survives, and the book is described as coming
+ * back via re-adoption) silently, permanently destroyed every note the
+ * reader had written for that book the instant the row went, even though
+ * the book itself was never really gone. Confirmed live as a real, reported
+ * loss of a reader's own notes. [bookId] is now a plain, unenforced column
+ * (an `Index` for lookup speed only) -- a note can outlive its book row,
+ * which is exactly the point.
  */
 @Entity(
     tableName = "notes",
-    foreignKeys = [
-        ForeignKey(
-            entity = BookEntity::class,
-            parentColumns = ["id"],
-            childColumns = ["bookId"],
-            onDelete = ForeignKey.CASCADE,
-        )
-    ],
     indices = [Index(value = ["bookId", "spineIndex", "progression"])],
 )
 data class NoteEntity(

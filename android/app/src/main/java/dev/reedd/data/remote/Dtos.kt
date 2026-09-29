@@ -46,6 +46,11 @@ data class JobDto(
     val cover: FileRefDto? = null,
     /** Absent on a job from before per-user accounts existed; treat as private. */
     val public: Boolean = false,
+    /** 'offline' (default), 'live', or 'live_offline' -- see server/app/main.py's
+     *  UPLOAD_MODES. Absent on a job created before this field existed; treat as
+     *  'offline', the only behavior that existed then. Purely descriptive of what
+     *  the uploader chose; never changes after creation, unlike [status]. */
+    val mode: String? = null,
     /** Only ever present from `GET /api/admin/jobs` -- null everywhere else. */
     @SerialName("owner_email") val ownerEmail: String? = null,
     /**
@@ -67,6 +72,77 @@ data class FileRefDto(
 
 @Serializable
 data class JobListDto(val jobs: List<JobDto>)
+
+// -- live reading (CPU_LIVE_READING_PLAN Phase 4) ----------------------------
+
+@Serializable
+data class LiveStartBody(
+    /** The epub-internal resource path, e.g. "OEBPS/xhtml/chapter1.xhtml"
+     *  -- resolved server-side by bare filename, not exact path (see
+     *  server/app/live_reading.py's own doc on why). */
+    @SerialName("resource_href") val resourceHref: String,
+    @SerialName("from_sentence_index") val fromSentenceIndex: Int = 0,
+    /** 0..1, "how far into this resource" -- tried only when [anchorText]
+     *  finds nothing. Overrides [fromSentenceIndex] server-side when
+     *  present: only the server can turn a proportion into a real sentence
+     *  index, since it has the real sentence list (see live_reading.start's
+     *  own doc). */
+    @SerialName("from_fraction") val fromFraction: Double? = null,
+    /** A window of text (this device's own epub extraction) centered on
+     *  the actual tap point -- tried before [fromFraction], since it is an
+     *  exact match immune to the server's sentence count disagreeing with
+     *  this device's own (see `LiveChunkSource.startFromTap`'s own doc). */
+    @SerialName("anchor_text") val anchorText: String? = null,
+    /** Where the tap actually landed within [anchorText] (0-based char
+     *  offset), when known -- the window is not always centered on the tap
+     *  (clamped at either edge of the resource's own text), so the server
+     *  must not assume the tap sits at the window's midpoint. See
+     *  `LiveChunkSource.preciseLocation`'s own doc for the real, confirmed-
+     *  live bug this fixes: a tap on the very first line landed the anchor
+     *  window at [0, tap+300), whose midpoint sits well past the actual
+     *  tap, resolving to a later sentence than the one tapped. */
+    @SerialName("anchor_offset") val anchorOffset: Int? = null,
+    val voice: String,
+)
+
+@Serializable
+data class LiveSessionDto(
+    @SerialName("session_id") val sessionId: String,
+    /** The sentence index the server actually started from -- exact when
+     *  [LiveStartBody.fromSentenceIndex] was given, resolved from
+     *  [LiveStartBody.fromFraction] otherwise. The caller needs this back
+     *  (not just what it originally asked for) to keep its own chunk-
+     *  ordinal bookkeeping correct. */
+    @SerialName("from_sentence_index") val fromSentenceIndex: Int = 0,
+)
+
+@Serializable
+data class LiveAdvanceBody(@SerialName("now_at_sentence_index") val nowAtSentenceIndex: Int)
+
+@Serializable
+data class LiveChunkInfoDto(
+    val index: Int,
+    @SerialName("duration_s") val durationS: Double,
+    val chars: Int,
+    val text: String,
+)
+
+@Serializable
+data class LiveStatusDto(
+    /** "running" | "done" | "error" | "stopped" -- plain String, not an
+     *  enum: this is polled every few hundred ms and only ever compared
+     *  against a couple of literal values, not branched on exhaustively
+     *  the way [JobStatus] is. */
+    val status: String,
+    val error: String? = null,
+    @SerialName("resource_href") val resourceHref: String,
+    val cursor: Int,
+    @SerialName("total_sentences") val totalSentences: Int,
+    val chunks: List<LiveChunkInfoDto>,
+)
+
+@Serializable
+data class StoppedDto(val stopped: Boolean)
 
 @Serializable
 data class VoicesDto(
@@ -192,9 +268,13 @@ data class PushApkResultDto(
 
 /** The server's status strings, plus a bucket for anything newer than this app. */
 enum class JobStatus {
-    QUEUED, RUNNING, DONE, ERROR, UNKNOWN;
+    QUEUED, RUNNING, DONE, ERROR,
+    /** A `mode=live` upload's own terminal status -- see UploadMode. Never
+     *  transitions to RUNNING/DONE: no Celery task exists for it at all. */
+    LIVE_ONLY,
+    UNKNOWN;
 
-    val isTerminal: Boolean get() = this == DONE || this == ERROR
+    val isTerminal: Boolean get() = this == DONE || this == ERROR || this == LIVE_ONLY
 
     companion object {
         fun fromWire(value: String?): JobStatus = when (value?.lowercase()) {
@@ -202,7 +282,31 @@ enum class JobStatus {
             "running" -> RUNNING
             "done" -> DONE
             "error" -> ERROR
+            "live_only" -> LIVE_ONLY
             else -> UNKNOWN
+        }
+    }
+}
+
+/**
+ * What POST /api/jobs' `mode` field accepts (see server/app/main.py's
+ * UPLOAD_MODES) -- chosen once at upload time (ImportSheet.kt) and never
+ * changed after, unlike [JobStatus]. `OFFLINE` is what every upload meant
+ * before this existed, so it is both the default and the fallback for a
+ * job created before the server tracked this at all.
+ */
+enum class UploadMode {
+    OFFLINE, LIVE, LIVE_OFFLINE;
+
+    /** Whether a book in this mode can be read live at all, regardless of
+     *  whether a background conversion has also finished. */
+    val canReadLive: Boolean get() = this == LIVE || this == LIVE_OFFLINE
+
+    companion object {
+        fun fromWire(value: String?): UploadMode = when (value?.lowercase()) {
+            "live" -> LIVE
+            "live_offline" -> LIVE_OFFLINE
+            else -> OFFLINE
         }
     }
 }

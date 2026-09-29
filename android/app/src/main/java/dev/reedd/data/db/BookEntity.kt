@@ -6,6 +6,7 @@ import androidx.room.Index
 import androidx.room.PrimaryKey
 import dev.reedd.data.align.ChunkAligner
 import dev.reedd.data.remote.JobStatus
+import dev.reedd.data.remote.UploadMode
 
 /**
  * One imported book, and everything known about its conversion.
@@ -58,10 +59,39 @@ data class BookEntity(
     val jobError: String? = null,
     val jobStartedAt: String? = null,
     val jobFinishedAt: String? = null,
-    /** Voice, speed and engine the job was submitted with, so a retry can reuse them. */
+    /** Voice, speed and engine the job was submitted with, so a retry (or a
+     *  deliberate "change voice and convert again," see [MIGRATION_14_15]'s
+     *  own doc) can reuse or override them. This is the *offline*
+     *  conversion's own voice -- what live reading uses instead is
+     *  [liveVoice], a separate column ([MIGRATION_14_15]) after the two used
+     *  to share this one and silently clobber each other: picking a live
+     *  voice from the reader's settings sheet used to also change what a
+     *  future "Send again" would submit for the next *offline* conversion,
+     *  which nobody asking for either feature actually wanted. */
     val voice: String? = null,
     val speed: Double? = null,
     val engine: String? = null,
+    /** The live-reading voice -- see [voice]'s own doc for why this is a
+     *  separate column. Null until the reader picks one explicitly; falls
+     *  back to [voice] (a reasonable starting guess) and then a hardcoded
+     *  default, never the other way around -- see `ReadAlongViewModel.
+     *  buildLiveChunkSource`'s own fallback chain. */
+    val liveVoice: String? = null,
+    /**
+     * The job [ConversionActions.changeVoiceAndReconvert] just replaced --
+     * kept around only long enough for [ConversionWatcher] to delete it
+     * server-side once the *new* job (this book's current [jobId]) reaches
+     * `DONE`, then cleared (one-shot, same convention as [autoDownload]).
+     * Without this, "convert again with a different voice" would leave the
+     * old audiobook's job orphaned on the server forever -- nothing else
+     * ever tells the server it can forget a superseded job.
+     */
+    val previousJobId: String? = null,
+    /** Chosen once at import time (ImportSheet.kt) and sent with the upload;
+     *  see [UploadMode] and CPU_LIVE_READING_PLAN. Kept even though the job
+     *  itself also reports it (JobDto.mode), since it must already be known
+     *  before the upload -- and by extension the job -- exists at all. */
+    @ColumnInfo(defaultValue = "'OFFLINE'") val uploadMode: UploadMode = UploadMode.OFFLINE,
     /**
      * The server no longer holds this job.
      *
@@ -126,6 +156,29 @@ data class BookEntity(
     /** Where the audiobook resumes, in milliseconds. */
     @ColumnInfo(defaultValue = "0") val playbackPositionMs: Long = 0,
     /**
+     * Where a `canReadLive` book resumes -- a resource + sentence index,
+     * not a millisecond position: a live session's own audio does not
+     * persist (see CPU_LIVE_READING_PLAN Phase 4), only the two of these
+     * needed to ask the server to synthesize from the same spot again.
+     * Book-local by design, unlike [playbackPositionMs]/[readingLocator] --
+     * no cross-device resume for a live-only book, per the plan.
+     */
+    val liveResourceHref: String? = null,
+    @ColumnInfo(defaultValue = "0") val liveSentenceIndex: Int = 0,
+    /**
+     * For a `LIVE_OFFLINE` book once its background conversion has also
+     * finished (so both [canReadLive] and [isPlayable] are true): which one
+     * the reader actually opens as, set from the reader's own settings
+     * sheet. False (prefer the finished, downloaded audiobook) is the
+     * default -- the same precedence [dev.reedd.ui.reader.
+     * ReadAlongViewModel.start] already used before this existed
+     * (`isPlayable` checked before `canReadLive`), so a book with no
+     * explicit preference behaves exactly as it always has. Meaningless
+     * (never read) for a plain `LIVE`-only or `OFFLINE`-only book, since
+     * there is nothing to choose between for either.
+     */
+    @ColumnInfo(defaultValue = "0") val preferLiveReading: Boolean = false,
+    /**
      * Added to the player's position before looking up a sentence.
      *
      * `audiblez/SYNC.md` notes the `.m4b` carries roughly 40-90 ms of AAC priming
@@ -168,6 +221,33 @@ data class BookEntity(
     /** Both deliverables are on disk, so the book can be read along with. */
     val isPlayable: Boolean
         get() = audiobookPath != null && syncPath != null && downloadState == DownloadState.DONE
+
+    /**
+     * Readable live (on-demand server-side synthesis, no download) at all,
+     * regardless of whether a background conversion has also finished --
+     * see CPU_LIVE_READING_PLAN. **Not** gated on [uploadMode]: the
+     * server's own live-reading routes only ever need the job's epub, which
+     * every job has regardless of what was requested at upload time (a
+     * plain `OFFLINE` upload stores the epub exactly the same way) -- there
+     * is nothing for a background conversion to provide that live reading
+     * also needs. Gated instead on there being an actual server job to
+     * address those routes by ([jobId]) that is not known to be gone
+     * ([jobMissing]) -- a book still local-only ([jobId] null, never
+     * uploaded) or whose job vanished server-side has nothing live reading
+     * could possibly reach.
+     *
+     * Used to be `uploadMode.canReadLive` (true only for `LIVE`/
+     * `LIVE_OFFLINE`), which meant a book uploaded before this feature
+     * existed -- every book already in a library, since `OFFLINE` was the
+     * only choice then -- could never read live even though nothing about
+     * it actually prevents that. Confirmed live as a real, reported gap:
+     * "since conversion isn't needed to have live reading, it should work
+     * for all existing books." A plain `LIVE` book is only ever this; a
+     * `LIVE_OFFLINE` (or, now, an `OFFLINE`) book is both this and,
+     * eventually, [isPlayable].
+     */
+    val canReadLive: Boolean
+        get() = jobId != null && !jobMissing
 
     /** The server still owes us something, so it is worth polling. */
     val needsPolling: Boolean

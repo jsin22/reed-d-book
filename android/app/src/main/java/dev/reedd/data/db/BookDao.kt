@@ -5,6 +5,7 @@ import androidx.room.Insert
 import androidx.room.Query
 import androidx.room.Update
 import dev.reedd.data.remote.JobStatus
+import dev.reedd.data.remote.UploadMode
 import kotlinx.coroutines.flow.Flow
 
 /**
@@ -90,6 +91,7 @@ interface BookDao {
             voice = :voice,
             speed = :speed,
             engine = :engine,
+            uploadMode = :mode,
             jobProgress = 0,
             jobEta = NULL,
             jobChaptersDone = 0,
@@ -100,7 +102,10 @@ interface BookDao {
         WHERE id = :id
         """
     )
-    suspend fun attachJob(id: String, jobId: String, status: JobStatus, voice: String?, speed: Double?, engine: String?)
+    suspend fun attachJob(
+        id: String, jobId: String, status: JobStatus, voice: String?, speed: Double?, engine: String?,
+        mode: UploadMode,
+    )
 
     /** Everything a poll learns, written in one statement. */
     @Query(
@@ -117,7 +122,10 @@ interface BookDao {
             audiobookRemoteName = COALESCE(:audiobookRemoteName, audiobookRemoteName),
             syncRemoteName = COALESCE(:syncRemoteName, syncRemoteName),
             category = COALESCE(:category, category),
-            genres = COALESCE(:genres, genres)
+            genres = COALESCE(:genres, genres),
+            voice = :voice,
+            speed = :speed,
+            engine = COALESCE(:engine, engine)
         WHERE id = :id
         """
     )
@@ -148,6 +156,23 @@ interface BookDao {
         // updateJobState(..., genres = listOf("Horror"))` read back as `[]`).
         // The caller (BookRepository.applyJobState) does the JSON encoding.
         genres: String?,
+        // Plain assignment, not COALESCE: the server's own job manifest never
+        // changes these after creation (see `BookEntity.voice`'s own doc), so
+        // re-syncing them from every poll's own JobDto is always correct and
+        // self-healing -- confirmed live as a real, reported bug: an older
+        // build let ReadAlongViewModel.setVoice (the *live*-reading picker)
+        // write into this same column before the two were split into
+        // separate columns, silently overwriting what the offline job was
+        // actually converted with. The very next poll after this fix now
+        // quietly repairs any book already corrupted that way, since the
+        // server's own record was never touched by that bug in the first
+        // place. `engine` alone stays COALESCE: absent on a job the server
+        // itself created before it tracked engine at all (see JobDto.engine's
+        // own doc), so a null here must not erase a value a previous poll
+        // (or attachJob) already learned.
+        voice: String,
+        speed: Double,
+        engine: String?,
     )
 
     /**
@@ -163,6 +188,27 @@ interface BookDao {
      *  [dev.reedd.domain.ConversionWatcher] call) does not enqueue it again. */
     @Query("UPDATE books SET autoDownload = 0 WHERE id = :id")
     suspend fun clearAutoDownload(id: String)
+
+    /** The counterpart re-arming it -- e.g. a deliberate "change voice and
+     *  convert again" on a book that already consumed its original
+     *  one-shot autoDownload: without setting this again, the freshly
+     *  finished job would just sit there with nothing to fetch it, exactly
+     *  the same "the user is sitting here waiting for this one" case
+     *  [BookEntity.autoDownload]'s own doc already describes for a brand
+     *  new upload. */
+    @Query("UPDATE books SET autoDownload = 1 WHERE id = :id")
+    suspend fun setAutoDownload(id: String)
+
+    /** Marks [jobId] as the job a reconvert just superseded -- see
+     *  [BookEntity.previousJobId]'s own doc. */
+    @Query("UPDATE books SET previousJobId = :jobId WHERE id = :id")
+    suspend fun setPreviousJobId(id: String, jobId: String)
+
+    /** [BookEntity.previousJobId] consumed -- its own server-side job has
+     *  been deleted (or was already gone), so a later poll does not try
+     *  again. */
+    @Query("UPDATE books SET previousJobId = NULL WHERE id = :id")
+    suspend fun clearPreviousJobId(id: String)
 
     /** Forget the server side entirely, e.g. after a `DELETE` or before a retry. */
     @Query(
@@ -220,8 +266,36 @@ interface BookDao {
     @Query("UPDATE books SET playbackPositionMs = :positionMs WHERE id = :id")
     suspend fun updatePlaybackPosition(id: String, positionMs: Long)
 
+    /** [updatePlaybackPosition]'s live-mode counterpart -- see
+     *  `BookEntity.liveResourceHref`/`liveSentenceIndex`'s own doc. */
+    @Query("UPDATE books SET liveResourceHref = :resourceHref, liveSentenceIndex = :sentenceIndex WHERE id = :id")
+    suspend fun updateLivePosition(id: String, resourceHref: String, sentenceIndex: Int)
+
     @Query("UPDATE books SET syncOffsetMs = :offsetMs WHERE id = :id")
     suspend fun updateSyncOffset(id: String, offsetMs: Long)
+
+    /** The *offline* conversion's own requested voice -- read by
+     *  `UploadWorker` the next time this book is (re-)uploaded, e.g. a
+     *  deliberate "change voice and convert again" (`ConversionActions.
+     *  changeVoiceAndReconvert`). See [BookEntity.voice]'s own doc for why
+     *  this is a separate column/query from [updateLiveVoice] now. */
+    @Query("UPDATE books SET voice = :voice WHERE id = :id")
+    suspend fun updateVoice(id: String, voice: String)
+
+    /** A live-only/live+offline book's own voice for future live sessions --
+     *  `ReadAlongViewModel.buildLiveChunkSource` reads this fresh every time
+     *  the reader opens, so a change here takes effect on the *next* open,
+     *  not retroactively for a session already in progress. Never touches
+     *  an offline conversion's own voice ([updateVoice]), which is fixed at
+     *  conversion time. */
+    @Query("UPDATE books SET liveVoice = :voice WHERE id = :id")
+    suspend fun updateLiveVoice(id: String, voice: String)
+
+    /** See [dev.reedd.data.db.BookEntity.preferLiveReading]'s own doc --
+     *  takes effect the next time this book's reader opens, not for a
+     *  session already in progress. */
+    @Query("UPDATE books SET preferLiveReading = :preferLive WHERE id = :id")
+    suspend fun updatePreferLiveReading(id: String, preferLive: Boolean)
 
     @Query("UPDATE books SET alignedChunks = :aligned, totalChunks = :total, alignmentVersion = :version WHERE id = :id")
     suspend fun updateAlignment(id: String, aligned: Int, total: Int, version: Int)

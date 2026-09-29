@@ -139,6 +139,47 @@ class ChunkAlignerTest {
         assertEquals(parsed.chunks.map { it.ordinal }, result.chunks.map { it.ordinal })
     }
 
+    // -- CPU_LIVE_READING_PLAN Phase 4: live-shaped input --------------------
+
+    @Test
+    fun `chunks with freshly-computed cumulative timing align identically to the real ones`() {
+        // This is the whole architectural bet Phase 4 rests on: a live
+        // chapter's chunks carry only text and a duration -- LiveChunkSource
+        // computes startMs/endMs from scratch (cumulative from 0), never
+        // reusing a real conversion's own timings. Rebuilding chapter 1's
+        // real chunks the same way and re-aligning proves that reshaping
+        // changes nothing the aligner (or ChunkIndex downstream of it)
+        // actually depends on.
+        val chapterOneChunks = parsed.chunks.filter { it.chapter == 1 }
+        var cursor = 0L
+        val liveShaped = chapterOneChunks.map { original ->
+            val duration = original.endMs - original.startMs
+            val rebuilt = original.copy(startMs = cursor, endMs = cursor + duration)
+            cursor += duration
+            rebuilt
+        }
+        val chapterOne = parsed.chapters.filter { it.chapterIndex == 1 }
+
+        val real = aligner.align(chapterOneChunks, chapterOne, resources)
+        val live = aligner.align(liveShaped, chapterOne, resources)
+
+        assertEquals(real.aligned, live.aligned)
+        assertEquals(real.total, live.total)
+        real.chunks.zip(live.chunks).forEach { (r, l) ->
+            assertEquals(r.isAligned, l.isAligned)
+            assertEquals(r.resourceHref, l.resourceHref)
+            assertEquals(r.textHighlight, l.textHighlight)
+        }
+
+        // And the reshaped timings themselves are exactly what
+        // LiveChunkSource's own bookkeeping expects: contiguous from 0,
+        // each chunk's end matching the next one's start.
+        assertEquals(0L, live.chunks.first().startMs)
+        for (i in 1 until live.chunks.size) {
+            assertEquals(live.chunks[i - 1].endMs, live.chunks[i].startMs)
+        }
+    }
+
     // -- behaviour, on constructed input -------------------------------------
 
     private fun chunk(ordinal: Int, text: String, chapter: Int = 1, rowId: Long = ordinal.toLong() + 1) =

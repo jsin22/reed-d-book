@@ -57,6 +57,11 @@ class ChunkAligner(private val contextChars: Int = DEFAULT_CONTEXT) {
         chunks: List<SyncChunkEntity>,
         chapters: List<SyncChapterEntity>,
         resources: List<ResourceText>,
+        // False for live reading: ordinal 0 there is the book's real first
+        // spoken sentence (LiveChunkSource extracts straight from the epub
+        // resource, no injected title line), not audiblez' synthetic
+        // "<title> - <author>." that a real conversion's chunk 0 always is.
+        skipFirstOrdinal: Boolean = true,
     ): AlignmentResult {
         val sourceByChapter = chapters.associate { it.chapterIndex to it.source }
         // Results are collected by position in the input list, deliberately not by
@@ -69,7 +74,7 @@ class ChunkAligner(private val contextChars: Int = DEFAULT_CONTEXT) {
             .forEach { (chapterIndex, indexed) ->
                 val resource = resolveResource(sourceByChapter[chapterIndex], resources)
                     ?: return@forEach
-                val aligned = alignChapter(indexed.map { it.value }, resource)
+                val aligned = alignChapter(indexed.map { it.value }, resource, skipFirstOrdinal)
                 indexed.forEachIndexed { position, (originalIndex, _) ->
                     result[originalIndex] = aligned[position]
                 }
@@ -95,7 +100,11 @@ class ChunkAligner(private val contextChars: Int = DEFAULT_CONTEXT) {
         return resources.firstOrNull { it.href.substringAfterLast('/') == name }
     }
 
-    private fun alignChapter(chunks: List<SyncChunkEntity>, resource: ResourceText): List<SyncChunkEntity> {
+    private fun alignChapter(
+        chunks: List<SyncChunkEntity>,
+        resource: ResourceText,
+        skipFirstOrdinal: Boolean,
+    ): List<SyncChunkEntity> {
         val haystack = TextNormalizer.normalize(resource.text)
         var cursor = 0
 
@@ -109,7 +118,7 @@ class ChunkAligner(private val contextChars: Int = DEFAULT_CONTEXT) {
             // that alignment the instant playback started, jumping the page
             // to the heading for an instant before the real first sentence
             // took over a moment later.
-            if (chunk.ordinal == 0) return@map chunk
+            if (skipFirstOrdinal && chunk.ordinal == 0) return@map chunk
             val match = findNext(haystack, chunk.text, cursor)
             if (match == null) {
                 chunk

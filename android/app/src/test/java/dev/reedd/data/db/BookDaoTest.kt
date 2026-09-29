@@ -2,6 +2,7 @@ package dev.reedd.data.db
 
 import android.database.sqlite.SQLiteConstraintException
 import dev.reedd.data.remote.JobStatus
+import dev.reedd.data.remote.UploadMode
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.After
@@ -73,16 +74,21 @@ class BookDaoTest {
             error = "ffmpeg exploded", startedAt = "t0", finishedAt = "t1", audiobookBytes = null,
             audiobookRemoteName = null, syncRemoteName = null,
             category = null, genres = null,
+            voice = "alba", speed = 1.0, engine = null,
         )
         dao.markJobMissing("b1")
 
-        dao.attachJob("b1", jobId = "job-2", status = JobStatus.QUEUED, voice = "giovanni", speed = 1.25, engine = "pocket_tts")
+        dao.attachJob(
+            "b1", jobId = "job-2", status = JobStatus.QUEUED, voice = "giovanni", speed = 1.25,
+            engine = "pocket_tts", mode = UploadMode.LIVE_OFFLINE,
+        )
 
         val book = dao.get("b1")!!
         assertEquals("job-2", book.jobId)
         assertEquals(JobStatus.QUEUED, book.jobStatus)
         assertEquals("giovanni", book.voice)
         assertEquals(1.25, book.speed!!, 0.0)
+        assertEquals(UploadMode.LIVE_OFFLINE, book.uploadMode)
         // A retry must not inherit the old failure, or the UI would show an
         // error banner over a job that is running fine.
         assertNull(book.jobError)
@@ -100,6 +106,7 @@ class BookDaoTest {
             finishedAt = null, audiobookBytes = 543210987,
             audiobookRemoteName = null, syncRemoteName = null,
             category = null, genres = null,
+            voice = "alba", speed = 1.0, engine = null,
         )
 
         val book = dao.get("b1")!!
@@ -108,6 +115,56 @@ class BookDaoTest {
         assertEquals("00d 00h 00m 11s", book.jobEta)
         assertEquals(2, book.jobChaptersDone)
         assertEquals(543210987L, book.audiobookBytes)
+    }
+
+    @Test
+    fun `a poll re-syncs voice and speed from the server, self-healing a locally corrupted value`() = runTest {
+        // Real, reported bug: an older build let the live-reading voice
+        // picker write into this same book's `voice` column before it was
+        // split out into its own -- this is what silently repairs that
+        // corruption the next time the job is polled, since the server's
+        // own manifest was never touched by that bug and stays the source
+        // of truth.
+        dao.insert(book("b1", jobId = "job-1", voice = "eponine"))
+
+        dao.updateJobState(
+            id = "b1", status = JobStatus.DONE, progress = 100, eta = null, chaptersDone = 1,
+            error = null, startedAt = "t0", finishedAt = "t1", audiobookBytes = null,
+            audiobookRemoteName = null, syncRemoteName = null,
+            category = null, genres = null,
+            voice = "anna", speed = 1.1, engine = "pocket_tts",
+        )
+
+        val book = dao.get("b1")!!
+        assertEquals("anna", book.voice)
+        assertEquals(1.1, book.speed!!, 0.0)
+        assertEquals("pocket_tts", book.engine)
+    }
+
+    @Test
+    fun `a poll with no engine reported keeps whatever an earlier one already learned`() = runTest {
+        // JobDto.engine is absent on a job the server itself created before
+        // it tracked engine at all -- a later poll's own null here must not
+        // erase a value already known, unlike voice/speed which the server
+        // always reports.
+        dao.insert(book("b1", jobId = "job-1"))
+        dao.updateJobState(
+            id = "b1", status = JobStatus.RUNNING, progress = 10, eta = null, chaptersDone = 0,
+            error = null, startedAt = "t0", finishedAt = null, audiobookBytes = null,
+            audiobookRemoteName = null, syncRemoteName = null,
+            category = null, genres = null,
+            voice = "alba", speed = 1.0, engine = "pocket_tts",
+        )
+
+        dao.updateJobState(
+            id = "b1", status = JobStatus.DONE, progress = 100, eta = null, chaptersDone = 1,
+            error = null, startedAt = "t0", finishedAt = "t1", audiobookBytes = null,
+            audiobookRemoteName = null, syncRemoteName = null,
+            category = null, genres = null,
+            voice = "alba", speed = 1.0, engine = null,
+        )
+
+        assertEquals("pocket_tts", dao.get("b1")!!.engine)
     }
 
     @Test
@@ -123,6 +180,7 @@ class BookDaoTest {
             error = null, startedAt = "t0", finishedAt = "t1", audiobookBytes = 4096,
             audiobookRemoteName = "Book.m4b", syncRemoteName = "Book.json",
             category = null, genres = null,
+            voice = "alba", speed = 1.0, engine = null,
         )
 
         val book = dao.get("b1")!!
@@ -140,6 +198,7 @@ class BookDaoTest {
             error = null, startedAt = "t0", finishedAt = "t1", audiobookBytes = 4096,
             audiobookRemoteName = "Book.m4b", syncRemoteName = "Book.json",
             category = null, genres = null,
+            voice = "alba", speed = 1.0, engine = null,
         )
 
         // A poll of a running job carries no filenames. Without COALESCE this
@@ -149,6 +208,7 @@ class BookDaoTest {
             error = null, startedAt = "t0", finishedAt = null, audiobookBytes = null,
             audiobookRemoteName = null, syncRemoteName = null,
             category = null, genres = null,
+            voice = "alba", speed = 1.0, engine = null,
         )
 
         val book = dao.get("b1")!!
@@ -250,6 +310,49 @@ class BookDaoTest {
     }
 
     @Test
+    fun `updateVoice and updateLiveVoice write independent columns`() = runTest {
+        // The real bug this guards against: these two used to share one
+        // column, so picking a live voice silently changed what a future
+        // offline conversion would request, and vice versa.
+        dao.insert(book("b1", voice = "alba"))
+
+        dao.updateLiveVoice("b1", "selene")
+        var current = dao.get("b1")!!
+        assertEquals("alba", current.voice)
+        assertEquals("selene", current.liveVoice)
+
+        dao.updateVoice("b1", "giovanni")
+        current = dao.get("b1")!!
+        assertEquals("giovanni", current.voice)
+        assertEquals("selene", current.liveVoice)
+    }
+
+    @Test
+    fun `setAutoDownload re-arms the one-shot flag clearAutoDownload consumed`() = runTest {
+        dao.insert(book("b1"))
+        dao.setAutoDownload("b1")
+        assertTrue(dao.get("b1")!!.autoDownload)
+
+        dao.clearAutoDownload("b1")
+        assertFalse(dao.get("b1")!!.autoDownload)
+
+        dao.setAutoDownload("b1")
+        assertTrue(dao.get("b1")!!.autoDownload)
+    }
+
+    @Test
+    fun `setPreviousJobId and clearPreviousJobId`() = runTest {
+        dao.insert(book("b1"))
+        assertNull(dao.get("b1")!!.previousJobId)
+
+        dao.setPreviousJobId("b1", "old-job")
+        assertEquals("old-job", dao.get("b1")!!.previousJobId)
+
+        dao.clearPreviousJobId("b1")
+        assertNull(dao.get("b1")!!.previousJobId)
+    }
+
+    @Test
     fun `a job id maps back to its book`() = runTest {
         dao.insert(book("b1", jobId = "job-abc"))
         assertEquals("b1", dao.findByJobId("job-abc")?.id)
@@ -303,6 +406,7 @@ class BookDaoTest {
             error = null, startedAt = "t0", finishedAt = "t1", audiobookBytes = null,
             audiobookRemoteName = null, syncRemoteName = null,
             category = "Fiction", genres = """["Horror","Mystery"]""",
+            voice = "alba", speed = 1.0, engine = null,
         )
         val book = dao.get("b1")!!
         assertEquals("Fiction", book.category)

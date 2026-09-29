@@ -40,6 +40,55 @@ class ConversionActions(
     }
 
     /**
+     * A deliberate re-conversion of an already-finished book, with a
+     * different voice -- "update the offline voice for a book." Voices and
+     * engines are immutable on a job once created server-side (confirmed:
+     * no route updates them, and the Celery task only ever reads them at
+     * its own start), so this is really just [retry] with two things done
+     * first:
+     *
+     *  * the new voice is persisted ([BookRepository.updateVoice]) *before*
+     *    [retry] re-uploads, since [dev.reedd.work.UploadWorker] reads
+     *    `book.voice` fresh at submission time -- no change needed there;
+     *  * this device's own old audiobook/sync/playback state is wiped
+     *    ([BookRepository.resetAudioForReconversion], not the more
+     *    thorough [BookRepository.deleteLocalContent] -- that one also
+     *    deletes the local epub file [retry] needs to re-upload), and
+     *    `autoDownload` is re-armed so the freshly finished job's `.m4b`
+     *    fetches itself the moment it's ready, the same one-shot guarantee
+     *    a brand-new upload gets -- otherwise it would already have been
+     *    consumed by the *original* conversion, and this device would just
+     *    sit on a finished job nobody downloads.
+     *
+     * Deliberately does nothing about any other device that already
+     * downloaded the old audiobook -- there is no mechanism (yet) for one
+     * to learn this book's audio changed at all; it keeps its old copy
+     * until it deletes and re-downloads it. Accepted for now rather than
+     * building a cross-device staleness signal.
+     *
+     * The *old* job itself (its own audiobook file included) is not
+     * deleted here, immediately -- deleting it before the new one is
+     * confirmed working would risk losing the only good copy over a
+     * conversion that could still fail. Instead its id is stashed in
+     * [BookEntity.previousJobId], and `ConversionWatcher` deletes it
+     * server-side once the *new* job actually reaches `DONE`.
+     */
+    suspend fun changeVoiceAndReconvert(bookId: String, voice: String) {
+        val book = repository.get(bookId)
+        val oldJobId = book?.jobId
+        // An earlier reconvert's own cleanup may not have finished yet (the
+        // reader changed voice again before that one even finished) --
+        // best-effort clean it up now too, rather than losing track of it
+        // by overwriting previousJobId below.
+        book?.previousJobId?.let { stillPending -> runCatching { repository.releaseStaleJob(bookId, stillPending) } }
+        repository.updateVoice(bookId, voice)
+        repository.resetAudioForReconversion(bookId)
+        repository.setAutoDownload(bookId)
+        if (oldJobId != null) repository.setPreviousJobId(bookId, oldJobId)
+        retry(bookId)
+    }
+
+    /**
      * Stop the conversion: cancels both workers, asks the server to drop
      * the job if it has one, and clears this book's local job state -- the
      * epub and the row both stay, so [retry] can pick the card back up

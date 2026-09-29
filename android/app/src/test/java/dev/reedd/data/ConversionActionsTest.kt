@@ -78,6 +78,58 @@ class ConversionActionsTest {
         assertTrue(workEnqueued("upload-b1"))
     }
 
+    // -- changeVoiceAndReconvert --------------------------------------------------
+
+    @Test
+    fun `changeVoiceAndReconvert persists the new voice, wipes the old audio, and re-arms autoDownload`() = runTest {
+        db.books().insert(
+            book(
+                "b1", jobId = "job-1", downloadState = dev.reedd.data.db.DownloadState.DONE,
+                audiobookPath = "/data/b1/book.m4b", syncPath = "/data/b1/book.json", voice = "alba",
+            )
+        )
+
+        actions.changeVoiceAndReconvert("b1", "giovanni")
+
+        val book = repository.get("b1")!!
+        assertEquals("giovanni", book.voice)
+        // The old job is gone -- retry re-sends the epub as a fresh one.
+        assertNull(book.jobId)
+        assertTrue(workEnqueued("upload-b1"))
+        // This device's own stale copy of the old voice is cleared out...
+        assertEquals(dev.reedd.data.db.DownloadState.NONE, book.downloadState)
+        assertNull(book.audiobookPath)
+        assertNull(book.syncPath)
+        // ...and the new one will fetch itself the moment it's ready.
+        assertTrue(book.autoDownload)
+        // The old job is stashed, not deleted yet -- ConversionWatcher
+        // deletes it only once the *new* job is confirmed done.
+        assertEquals("job-1", book.previousJobId)
+    }
+
+    @Test
+    fun `changeVoiceAndReconvert best-effort cleans up an earlier reconvert's own still-pending old job`() = runTest {
+        // The reader changed voice twice before the first reconvert's own
+        // new job ever finished -- previousJobId from the first change
+        // would otherwise be silently overwritten and never cleaned up.
+        db.books().insert(book("b1", jobId = "job-2", voice = "giovanni", previousJobId = "job-1"))
+        server.enqueue(MockResponse.Builder().code(200)
+            .setHeader("Content-Type", "application/json")
+            .body("""{"job_id":"job-1","deleted":true}""").build())
+
+        actions.changeVoiceAndReconvert("b1", "eponine")
+
+        val book = repository.get("b1")!!
+        assertEquals("eponine", book.voice)
+        // job-2 (this book's own current job when the call started) is now
+        // the one waiting for its own eventual cleanup.
+        assertEquals("job-2", book.previousJobId)
+        assertEquals(1, server.requestCount)
+        val request = server.takeRequest()
+        assertEquals("DELETE", request.method)
+        assertEquals("/api/jobs/job-1", request.url.encodedPath)
+    }
+
     // -- cancel ------------------------------------------------------------------
 
     @Test

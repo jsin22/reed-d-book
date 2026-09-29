@@ -50,6 +50,7 @@ interface ReeddService {
         @Part("engine") engine: RequestBody?,
         @Part("title") title: RequestBody?,
         @Part("author") author: RequestBody?,
+        @Part("mode") mode: RequestBody?,
     ): JobDto
 
     @GET("api/jobs")
@@ -75,6 +76,15 @@ interface ReeddService {
      */
     @POST("api/diagnostics/crash")
     suspend fun reportCrash(@Body report: RequestBody): ResponseBody
+
+    /**
+     * A bug report or feature request, written by the reader on purpose --
+     * a separate endpoint from [reportCrash], since this is deliberate
+     * feedback, not something left behind by a crash. The server writes it
+     * to `data/feedback/`, admin-only to list.
+     */
+    @POST("api/feedback")
+    suspend fun submitFeedback(@Query("feedback_type") feedbackType: String, @Body body: RequestBody): ResponseBody
 
     /** Who the current token belongs to -- used to show "logged in as" and to
      *  decide whether to offer the Admin screen. */
@@ -117,4 +127,42 @@ interface ReeddService {
      *  `server/app/main.py`'s `push_apk` for why. */
     @POST("api/admin/push-apk")
     suspend fun pushApk(): PushApkResultDto
+
+    // -- live reading (CPU_LIVE_READING_PLAN Phase 4) --
+
+    /** Starts (or restarts) synthesizing one chapter live, sentence by
+     *  sentence -- see [LiveStartBody]. 503 if the server's fixed
+     *  concurrency cap is full; 400 if `resourceHref` matches no chapter. */
+    @POST("api/books/{bookId}/live/start")
+    suspend fun startLive(@Path("bookId") bookId: String, @Body body: LiveStartBody): LiveSessionDto
+
+    /** Tells the server where the reader actually is now, so it can prune
+     *  consumed chunks and top its read-ahead buffer back up. Returns the
+     *  same shape as [liveStatus]. */
+    @POST("api/books/{bookId}/live/{sessionId}/advance")
+    suspend fun advanceLive(
+        @Path("bookId") bookId: String,
+        @Path("sessionId") sessionId: String,
+        @Body body: LiveAdvanceBody,
+    ): LiveStatusDto
+
+    /** Chunks synthesized so far, for polling. */
+    @GET("api/books/{bookId}/live/{sessionId}/status")
+    suspend fun liveStatus(@Path("bookId") bookId: String, @Path("sessionId") sessionId: String): LiveStatusDto
+
+    /** One synthesized sentence's audio, as a WAV. Small enough (one
+     *  sentence) that a plain buffered Retrofit call is fine -- unlike the
+     *  audiobook/sync downloads, no Range/resume support is needed. */
+    @GET("api/books/{bookId}/live/{sessionId}/chunk/{index}")
+    suspend fun liveChunk(
+        @Path("bookId") bookId: String,
+        @Path("sessionId") sessionId: String,
+        @Path("index") index: Int,
+    ): ResponseBody
+
+    /** Releases the session's engine slot early -- called when the reader
+     *  leaves a live-only book, so the next listener does not wait out the
+     *  idle timeout for no reason. */
+    @POST("api/books/{bookId}/live/{sessionId}/stop")
+    suspend fun stopLive(@Path("bookId") bookId: String, @Path("sessionId") sessionId: String): StoppedDto
 }

@@ -10,8 +10,10 @@ import dev.reedd.data.remote.ApiException
 import dev.reedd.data.remote.ApiProvider
 import dev.reedd.data.remote.JobDto
 import dev.reedd.data.remote.JobStatus
+import dev.reedd.data.remote.UploadMode
 import kotlinx.coroutines.flow.Flow
 import java.io.File
+import java.io.IOException
 
 /**
  * The one place that writes a book's row.
@@ -52,6 +54,7 @@ class BookRepository(
             voice = job.voice,
             speed = job.speed,
             engine = job.engine,
+            mode = UploadMode.fromWire(job.mode),
         )
     }
 
@@ -93,6 +96,9 @@ class BookRepository(
             syncRemoteName = job.sync?.file,
             category = job.category,
             genres = job.genres.takeIf { it.isNotEmpty() }?.let { converters.genresToString(it) },
+            voice = job.voice,
+            speed = job.speed,
+            engine = job.engine,
         )
     }
 
@@ -126,8 +132,22 @@ class BookRepository(
     suspend fun updatePlaybackPosition(bookId: String, positionMs: Long) =
         bookDao.updatePlaybackPosition(bookId, positionMs)
 
+    suspend fun updateLivePosition(bookId: String, resourceHref: String, sentenceIndex: Int) =
+        bookDao.updateLivePosition(bookId, resourceHref, sentenceIndex)
+
     suspend fun updateSyncOffset(bookId: String, offsetMs: Long) =
         bookDao.updateSyncOffset(bookId, offsetMs)
+
+    suspend fun updateVoice(bookId: String, voice: String) = bookDao.updateVoice(bookId, voice)
+
+    suspend fun updateLiveVoice(bookId: String, voice: String) = bookDao.updateLiveVoice(bookId, voice)
+
+    suspend fun setAutoDownload(bookId: String) = bookDao.setAutoDownload(bookId)
+
+    suspend fun setPreviousJobId(bookId: String, jobId: String) = bookDao.setPreviousJobId(bookId, jobId)
+
+    suspend fun updatePreferLiveReading(bookId: String, preferLive: Boolean) =
+        bookDao.updatePreferLiveReading(bookId, preferLive)
 
     /** The read-along mapping, in playback order. */
     suspend fun syncChunks(bookId: String): List<dev.reedd.data.db.SyncChunkEntity> =
@@ -156,7 +176,12 @@ class BookRepository(
         }
         listOfNotNull(book.epubPath, book.coverPath, book.audiobookPath, book.syncPath)
             .forEach { runCatching { File(it).delete() } }
-        // sync_chunks and sync_chapters cascade with the row.
+        // sync_chunks and sync_chapters cascade with the row. Notes do not
+        // -- see NoteEntity's own doc -- since this path (deleteServerJob =
+        // false: the ordinary "Delete from device" action, and
+        // ConversionWatcher.handleJobGone's automatic cleanup) is described
+        // as safe/reversible, and a reader's own notes are not something
+        // either of those should be able to destroy as a side effect.
         bookDao.delete(bookId)
     }
 
@@ -208,6 +233,33 @@ class BookRepository(
     }
 
     /**
+     * [deleteLocalContent]'s narrower sibling, for a deliberate re-conversion
+     * with a different voice (`ConversionActions.changeVoiceAndReconvert`):
+     * this device's own downloaded audiobook/sync file and playback state
+     * are wiped -- they are about to become the *wrong* voice the moment
+     * the new job finishes -- but, unlike [deleteLocalContent], the epub
+     * and cover are left alone. [retry] needs the local epub file to
+     * re-upload; deleting it here would leave nothing for that next step
+     * to send (deleteLocalContent's own "DownloadWorker re-fetches a
+     * missing epub" fallback is that worker's job, not the upload path's,
+     * and re-fetching the very file about to be re-uploaded unchanged
+     * would just be a wasted round trip).
+     */
+    suspend fun resetAudioForReconversion(bookId: String) {
+        val book = bookDao.get(bookId) ?: return
+        listOfNotNull(book.audiobookPath, book.syncPath).forEach { runCatching { File(it).delete() } }
+        updateDownload(bookId, DownloadState.NONE, downloadedBytes = 0, totalBytes = 0, error = null)
+        setAudiobook(bookId, null)
+        setSync(bookId, null, null)
+        updateReadingPosition(bookId, null)
+        bookDao.updatePlaybackPosition(bookId, 0)
+        bookDao.updateSyncOffset(bookId, 0)
+        syncDao.clearChunks(bookId)
+        syncDao.clearChapters(bookId)
+        setAlignment(bookId, aligned = 0, total = 0, version = 0)
+    }
+
+    /**
      * Ask the server to forget a finished job, once both files are local.
      *
      * The server has no cleanup policy of its own -- `server/README.md` says the
@@ -224,5 +276,34 @@ class BookRepository(
             if (!e.isNotFound) throw e
         }
         bookDao.markJobMissing(bookId)
+    }
+
+    /**
+     * [releaseServerJob]'s sibling for [BookEntity.previousJobId]: an old
+     * job a deliberate "convert again with a new voice"
+     * ([ConversionActions.changeVoiceAndReconvert]) already superseded,
+     * once the new one it was replaced with has actually finished
+     * (`ConversionWatcher`'s own doc on where this is called from). Unlike
+     * [releaseServerJob], [staleJobId] is not this book's *current* job --
+     * there is nothing to mark missing here, since the book's own
+     * [BookEntity.jobId] already moved on to the new one.
+     *
+     * @return true once [staleJobId] is confirmed gone server-side
+     *   (deleted just now, or already gone) -- [previousJobId] is cleared
+     *   only then. False on any other failure (a network error, say)
+     *   leaves it set, so the next poll simply tries again -- there is no
+     *   separate retry mechanism needed beyond that.
+     */
+    suspend fun releaseStaleJob(bookId: String, staleJobId: String): Boolean {
+        val deleted = try {
+            api.service().deleteJob(staleJobId)
+            true
+        } catch (e: ApiException) {
+            e.isNotFound
+        } catch (e: IOException) {
+            false
+        }
+        if (deleted) bookDao.clearPreviousJobId(bookId)
+        return deleted
     }
 }

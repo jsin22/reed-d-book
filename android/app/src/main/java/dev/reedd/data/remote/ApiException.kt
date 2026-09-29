@@ -40,6 +40,9 @@ class ApiException(
     val isNotReady: Boolean get() = code == 409
     /** Job finished, but the output files are gone. */
     val isGone: Boolean get() = code == 410
+    /** The live-reading engine pool is fully occupied right now
+     *  (`app.live_reading.Busy` server-side) -- see CPU_LIVE_READING_PLAN. */
+    val isBusy: Boolean get() = code == 503
 
     companion object {
         private val lenient = Json { ignoreUnknownKeys = true; isLenient = true }

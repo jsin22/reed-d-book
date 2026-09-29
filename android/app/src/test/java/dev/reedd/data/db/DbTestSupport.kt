@@ -24,6 +24,8 @@ fun book(
     category: String? = null,
     genres: List<String> = emptyList(),
     autoDownload: Boolean = false,
+    voice: String? = null,
+    previousJobId: String? = null,
 ): BookEntity = BookEntity(
     id = id,
     epubPath = "/data/books/$id/book.epub",
@@ -39,6 +41,8 @@ fun book(
     category = category,
     genres = genres,
     autoDownload = autoDownload,
+    voice = voice,
+    previousJobId = previousJobId,
 )
 
 fun chunk(bookId: String, ordinal: Int, startMs: Long, endMs: Long, text: String = "s$ordinal", chapter: Int = 1) =

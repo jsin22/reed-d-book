@@ -23,6 +23,7 @@ import java.io.File
 class BookFiles(context: Context) {
 
     private val root: File = context.filesDir
+    private val cacheRoot: File = context.cacheDir
 
     fun bookDir(bookId: String): File = File(root, "books/$bookId").apply { mkdirs() }
 
@@ -42,9 +43,20 @@ class BookFiles(context: Context) {
     /** The partial file a resumable download appends to. */
     fun partial(target: File): File = File(target.parentFile, "${target.name}.part")
 
+    /**
+     * One sentence's synthesized audio, for `LiveChunkSource`
+     * (CPU_LIVE_READING_PLAN Phase 4) -- the system cache, not [bookDir]:
+     * this is never meant to persist (a restart, or the OS reclaiming
+     * cache space under pressure, both just mean resynthesizing), unlike
+     * a real downloaded audiobook.
+     */
+    fun liveChunk(bookId: String, sessionId: String, index: Int): File =
+        File(File(cacheRoot, "live/$bookId").apply { mkdirs() }, "$sessionId-$index.wav")
+
     fun deleteAll(bookId: String) {
         bookDir(bookId).deleteRecursively()
         audiobookDir(bookId).deleteRecursively()
+        File(cacheRoot, "live/$bookId").deleteRecursively()
     }
 
     fun bytesOnDisk(bookId: String): Long =

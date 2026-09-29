@@ -118,4 +118,53 @@ class BookRepositoryTest {
         // unrecoverable, so this is the one thing left untouched.
         assertEquals(1, db.notes().observe("b1").first().size)
     }
+
+    @Test
+    fun `resetAudioForReconversion clears the old audio but keeps the epub and cover, unlike deleteLocalContent`() = runTest {
+        val epub = file("book.epub")
+        val cover = file("cover.jpg")
+        val audiobook = file("book.m4b")
+        val sync = file("book.json")
+
+        db.books().insert(
+            book("b1", jobId = "job-1", downloadState = dev.reedd.data.db.DownloadState.DONE)
+                .copy(
+                    epubPath = epub.path,
+                    coverPath = cover.path,
+                    audiobookPath = audiobook.path,
+                    syncPath = sync.path,
+                    readingLocator = """{"href":"c3.xhtml"}""",
+                    playbackPositionMs = 45_000,
+                    syncOffsetMs = 60,
+                    alignedChunks = 10,
+                    totalChunks = 12,
+                    alignmentVersion = 2,
+                )
+        )
+        db.sync().insertChunks(listOf(chunk("b1", 0, 0, 100), chunk("b1", 1, 100, 200)))
+
+        repository.resetAudioForReconversion("b1")
+
+        // Unlike deleteLocalContent: the local epub and cover are needed to
+        // re-upload and are left alone.
+        assertTrue(epub.exists())
+        assertTrue(cover.exists())
+        // The old voice's audio is gone -- it is about to be wrong.
+        assertFalse(audiobook.exists())
+        assertFalse(sync.exists())
+
+        val book = repository.get("b1")!!
+        assertEquals(epub.path, book.epubPath)
+        assertEquals(cover.path, book.coverPath)
+        assertNull(book.audiobookPath)
+        assertNull(book.syncPath)
+        assertEquals(dev.reedd.data.db.DownloadState.NONE, book.downloadState)
+        assertNull(book.readingLocator)
+        assertEquals(0L, book.playbackPositionMs)
+        assertEquals(0L, book.syncOffsetMs)
+        assertEquals(0, book.alignedChunks)
+        assertEquals(0, book.totalChunks)
+        assertEquals(0, book.alignmentVersion)
+        assertTrue("sync_chunks must be cleared too", db.sync().chunks("b1").isEmpty())
+    }
 }

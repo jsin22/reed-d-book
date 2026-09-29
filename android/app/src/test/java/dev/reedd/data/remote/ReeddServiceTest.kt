@@ -170,6 +170,7 @@ class ReeddServiceTest {
             engine = null,
             title = "My Book".toRequestBody("text/plain".toMediaType()),
             author = null,
+            mode = "live_offline".toRequestBody("text/plain".toMediaType()),
         )
 
         val request = server.takeRequest()
@@ -184,6 +185,7 @@ class ReeddServiceTest {
         assertTrue("voice is a bare form value", body.contains("\r\n\r\naf_heart\r\n"))
         assertTrue("speed is a bare form value", body.contains("\r\n\r\n1.0\r\n"))
         assertTrue("title is sent for the server's background metadata lookup", body.contains("\r\n\r\nMy Book\r\n"))
+        assertTrue("mode is a bare form value", body.contains("\r\n\r\nlive_offline\r\n"))
         assertEquals(JobStatus.QUEUED, JobStatus.fromWire(job.status))
         epub.delete()
         Unit

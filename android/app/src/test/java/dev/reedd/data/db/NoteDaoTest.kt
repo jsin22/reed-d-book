@@ -73,14 +73,18 @@ class NoteDaoTest {
     }
 
     @Test
-    fun `deleting a book cascades to its notes`() = runTest {
+    fun `deleting a book leaves its notes intact`() = runTest {
+        // notes.bookId has no foreign key any more (see NoteEntity's own
+        // doc, MIGRATION_13_14) -- an ordinary "Delete from device" used to
+        // cascade-destroy every note the reader had written for that book,
+        // which is exactly the loss this test now guards against.
         books.insert(book("b1"))
         notes.insert(note("b1"))
         assertEquals(1, notes.observe("b1").first().size)
 
         books.delete("b1")
 
-        assertTrue(notes.observe("b1").first().isEmpty())
+        assertEquals(1, notes.observe("b1").first().size)
     }
 
     @Test
@@ -110,5 +114,21 @@ class NoteDaoTest {
         notes.insert(note("b1"))
 
         assertEquals(BookmarkType.DEFAULT, notes.observe("b1").first().single().type)
+    }
+
+    @Test
+    fun `update changes only the text and color, not what the note quotes or points at`() = runTest {
+        books.insert(book("b1"))
+        val id = notes.insert(note("b1", noteText = "first draft", type = BookmarkType.DEFAULT))
+
+        notes.update(id, noteText = "revised", type = BookmarkType.NEEDS_REVIEW)
+
+        val updated = notes.observe("b1").first().single()
+        assertEquals("revised", updated.noteText)
+        assertEquals(BookmarkType.NEEDS_REVIEW, updated.type)
+        // Everything else about when/where this note was taken is fixed.
+        assertEquals("a word", updated.quotedText)
+        assertEquals("c1.xhtml", updated.resourceHref)
+        assertEquals(1_000L, updated.createdAt)
     }
 }

@@ -8,7 +8,7 @@ import androidx.room.TypeConverters
 
 @Database(
     entities = [BookEntity::class, SyncChunkEntity::class, SyncChapterEntity::class, NoteEntity::class],
-    version = 10,
+    version = 16,
     exportSchema = true,
 )
 @TypeConverters(Converters::class)
@@ -29,7 +29,8 @@ abstract class ReeddDatabase : RoomDatabase() {
             Room.databaseBuilder(context, ReeddDatabase::class.java, "reedd.db")
                 .addMigrations(
                     MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7,
-                    MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10,
+                    MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12,
+                    MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16,
                 )
                 .build()
     }

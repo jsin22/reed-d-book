@@ -230,3 +230,104 @@ val MIGRATION_9_10 = object : Migration(9, 10) {
         db.execSQL("DROP TABLE bookmarks")
     }
 }
+
+/**
+ * 10 -> 11: upload mode (CPU_LIVE_READING_PLAN, Phase 3).
+ *
+ * `OFFLINE` for every existing row is the correct backfill, not just a
+ * placeholder: 'Live'/'Live + Offline' did not exist as an upload choice
+ * before this, so every book already in the library really was uploaded
+ * the plain 'offline' way.
+ */
+val MIGRATION_10_11 = object : Migration(10, 11) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE books ADD COLUMN uploadMode TEXT NOT NULL DEFAULT 'OFFLINE'")
+    }
+}
+
+/**
+ * 11 -> 12: live reading's own resume position (CPU_LIVE_READING_PLAN
+ * Phase 4) -- a resource href + sentence index, not a millisecond
+ * position, since a live session's audio is never persisted. NULL/0 for
+ * every existing book is correct as-is: nothing before this had ever
+ * been read live, so there is no real position to backfill.
+ */
+val MIGRATION_11_12 = object : Migration(11, 12) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE books ADD COLUMN liveResourceHref TEXT")
+        db.execSQL("ALTER TABLE books ADD COLUMN liveSentenceIndex INTEGER NOT NULL DEFAULT 0")
+    }
+}
+
+val MIGRATION_12_13 = object : Migration(12, 13) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE books ADD COLUMN preferLiveReading INTEGER NOT NULL DEFAULT 0")
+    }
+}
+
+/**
+ * Drops `notes`' own foreign key to `books` -- see [NoteEntity]'s own doc
+ * for why (an ordinary "Delete from device" cascade-destroyed the reader's
+ * own notes, even though that action is supposed to be safe/reversible).
+ * SQLite has no `ALTER TABLE ... DROP CONSTRAINT`, so this is the standard
+ * rebuild-the-table dance: a fresh `notes` table with the identical columns
+ * but no `FOREIGN KEY` clause, the old rows copied over verbatim (nothing
+ * about existing notes changes, only what future book-row deletions can do
+ * to them), then the old table and its own index are replaced.
+ */
+val MIGRATION_13_14 = object : Migration(13, 14) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE notes RENAME TO notes_old")
+        db.execSQL(
+            """
+            CREATE TABLE notes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                bookId TEXT NOT NULL,
+                noteText TEXT NOT NULL,
+                quotedText TEXT NOT NULL,
+                locatorJson TEXT NOT NULL,
+                resourceHref TEXT NOT NULL,
+                spineIndex INTEGER NOT NULL,
+                progression REAL,
+                createdAt INTEGER NOT NULL,
+                type TEXT NOT NULL DEFAULT 'DEFAULT'
+            )
+            """.trimIndent()
+        )
+        db.execSQL(
+            "INSERT INTO notes (id, bookId, noteText, quotedText, locatorJson, resourceHref, spineIndex, progression, createdAt, type) " +
+                "SELECT id, bookId, noteText, quotedText, locatorJson, resourceHref, spineIndex, progression, createdAt, type FROM notes_old"
+        )
+        db.execSQL("DROP TABLE notes_old")
+        db.execSQL("CREATE INDEX IF NOT EXISTS index_notes_bookId_spineIndex_progression ON notes(bookId, spineIndex, progression)")
+    }
+}
+
+/**
+ * Splits the live-reading voice out of `voice` -- see [BookEntity.voice]'s
+ * own doc: the two used to share one column, so picking a voice in the
+ * reader's live-mode settings silently changed what a future offline
+ * "Send again" would submit too. An existing book's `liveVoice` starts
+ * null (falls back to its own `voice`, then a hardcoded default, per
+ * `ReadAlongViewModel.buildLiveChunkSource`) -- nothing to actually
+ * backfill, since nobody has picked a *separate* live voice yet.
+ */
+val MIGRATION_14_15 = object : Migration(14, 15) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE books ADD COLUMN liveVoice TEXT")
+    }
+}
+
+/**
+ * `previousJobId`: the job a deliberate "convert again with a new voice"
+ * replaced, kept only until the new one finishes and its old server-side
+ * counterpart -- job directory, audiobook file included -- can be deleted.
+ * See [BookEntity.previousJobId]'s own doc. Nothing to backfill for an
+ * existing book: this only ever gets set going forward, by a reconvert
+ * that has not happened yet.
+ */
+val MIGRATION_15_16 = object : Migration(15, 16) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE books ADD COLUMN previousJobId TEXT")
+    }
+}
