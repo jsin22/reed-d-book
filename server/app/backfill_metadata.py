@@ -71,8 +71,14 @@ def backfill(dry_run: bool = False, recheck: bool = False) -> None:
                 print(f'{job_id}: {title!r} -- lookup unavailable, try again later ({e})')
                 unavailable += 1
                 continue
-            cache.put(title, author, result)
-            cached = cache.get(title, author)
+            if dry_run:
+                # Report the lookup without caching it: a cached answer is
+                # permanent, and a dry run is for checking it first.
+                cached = {'category': (result or {}).get('category'),
+                          'genres': (result or {}).get('genres', [])}
+            else:
+                cache.put(title, author, result)
+                cached = cache.get(title, author)
 
         print(f'{job_id}: {title!r} by {author!r} -> {cached["category"]}, {cached["genres"]}')
         if not dry_run:

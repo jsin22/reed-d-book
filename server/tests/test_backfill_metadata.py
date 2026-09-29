@@ -3,6 +3,7 @@ import io
 from unittest import mock
 
 from app.backfill_metadata import backfill
+from app.book_metadata_store import BookMetadataStore
 from app.store import JobStore
 
 from .support import TempDataDirTestCase, epub_with_metadata
@@ -41,6 +42,9 @@ class BackfillMetadataTest(TempDataDirTestCase):
         self.assertIsNone(manifest['title'])
         self.assertIsNone(manifest['category'])
         self.assertEqual(manifest['genres'], [])
+        # Nor the metadata cache: a cached answer is permanent, so a dry run
+        # must not commit one before it has been checked.
+        self.assertIsNone(BookMetadataStore(self.settings.data_dir).get('Dune', 'Frank Herbert'))
 
     def test_a_job_already_resolved_is_skipped_without_looking_up_again(self):
         jobs = JobStore(self.settings.jobs_dir)
