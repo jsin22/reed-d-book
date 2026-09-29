@@ -19,7 +19,7 @@ Android app ──POST /api/jobs──▶ FastAPI ──▶ Redis ──▶ Cele
 
 | | |
 |---|---|
-| `POST /api/jobs` | multipart: `file` (the .epub), optional `engine`, `voice`, `speed`, `title`, `author`. `202` with the job. |
+| `POST /api/jobs` | multipart: `file` (the .epub), optional `engine`, `voice`, `speed`, `title`, `author`, `mode` (`offline` default, `live`, or `live_offline` — see "Live reading" below). `202` with the job. |
 | `GET /api/jobs/{id}` | poll: `status`, `progress` (0-100), `eta`, `chapters_done`, `error`, `category`, `genres`. |
 | `GET /api/jobs/{id}/audiobook` | the `.m4b`. Supports `Range`, so an interrupted download resumes. |
 | `GET /api/jobs/{id}/sync` | the timing `.json`. |
@@ -32,6 +32,12 @@ Android app ──POST /api/jobs──▶ FastAPI ──▶ Redis ──▶ Cele
 | `GET /api/voices/{voice}/sample` | a short fixed-text clip of one voice (`?engine=`), generated once and cached. |
 | `GET /api/me` | the caller's own `{user_id, email, is_admin}`. |
 | `GET /api/health` | liveness; never requires a token, so the app can find the server. |
+| `POST /api/books/{id}/live/start` | starts an on-demand TTS session for one resource of a book, reading forward from a sentence index or a fraction/anchor-text position — see "Live reading" below. |
+| `POST /api/books/{id}/live/{session}/advance` | tells the session where playback actually is, releasing consumed chunks and topping up the read-ahead buffer. |
+| `GET /api/books/{id}/live/{session}/status` | which chunks are ready so far. |
+| `GET /api/books/{id}/live/{session}/chunk/{n}` | one synthesized sentence's audio. |
+| `POST /api/books/{id}/live/{session}/stop` | releases the session's pool slot immediately. |
+| `POST /api/feedback` | `feedback_type` (`bug`/`feature`/`other`) + a plain-text body — stored to disk, `202`. |
 
 Admin-only (see "Sharing with others" below):
 
@@ -43,9 +49,14 @@ Admin-only (see "Sharing with others" below):
 | `POST /api/admin/users` | `{"email": str}` — invites a user and emails them a token. |
 | `DELETE /api/admin/users/{user_id}` | revokes a user's access; refuses to delete your own account. |
 | `GET /api/admin/metadata-health` | `{ok, last_error, last_error_at, last_success_at}` for the category/genre lookup — see below. |
+| `GET /api/admin/feedback` | the newest reports submitted via `POST /api/feedback`, for triage. |
+| `GET /api/admin/apk` | the live (`/download/app`) and pending (`REEDD_APK_BUILD_DIR`) APK's size/mtime. |
+| `POST /api/admin/push-apk` | copies the newest build in `REEDD_APK_BUILD_DIR` over `REEDD_APK_PATH` — the Admin screen's "Push Update" button. |
 | `GET /download/app` | unauthenticated: serves the APK, for an invitee who has no token yet. |
 
-`status` is one of `queued`, `running`, `done`, `error`. Interactive docs are at
+`status` is one of `queued`, `running`, `done`, `error`, or `live_only` (a
+`mode='live'` upload — see below — that never gets queued to Celery at all).
+Interactive docs are at
 `/docs`. Every route above except `/api/health`, `/api/voices`, `/api/engines`
 and `/download/app` needs `Authorization: Bearer <token>` — there is no
 auth-optional mode any more, see "Sharing with others".
@@ -342,6 +353,31 @@ epub_meta.py`) and runs the same lookup. Safe to re-run — a job that
 already has a category/genres is skipped unless `--recheck` is passed,
 which re-resolves everything (bypassing the cache too) — useful after a
 prompt/vocabulary change like the Open-Library-to-Gemini switch itself.
+
+**Live reading (`app/live_reading.py`).** An alternative to waiting through
+a full conversion: a fixed-size pool of warm, CPU-only `PocketTTSEngine`
+instances (`REEDD_LIVE_READING_MAX_SESSIONS`, keyed by voice) synthesizes a
+chapter forward from wherever the reader is, a bounded read-ahead buffer at
+a time, and releases already-consumed chunks as the reader advances. One
+session = one listener on one book; `start` rejects with a "busy" error once
+every engine in the pool is claimed. A resource is resolved from a client-
+sent `resource_href` by comparing bare filenames against the epub's own
+chapters (server and client parse the spine with two different libraries,
+so resolving by raw integer index is not safe to assume lines up) — an
+`anchor_text`/`anchor_offset` pair (an exact substring of the resource's
+text, wherever the reader tapped) resolves a "read from here" onto
+not-yet-synthesized text more precisely than the fraction alone. An idle
+session (no `advance` call for a while) self-releases, since a killed app or
+dropped connection never calls `stop` cleanly. Upload's `mode` field governs
+whether a job also gets a normal conversion (`live_offline`) or skips it
+entirely (`live`, terminal status `LIVE_ONLY` — see the CPU-live-reading
+design note kept in this session's memory/plan history for the full
+four-phase rollout, not otherwise duplicated in this repo).
+
+Known, unresolved: under some session start/stop patterns the process can
+abort at interpreter exit (PyTorch's native CPU threading runtime, not a
+catchable Python exception) — mitigated by `Restart=on-failure` in the
+systemd unit (see below), not fixed at the source.
 
 ## Known gaps
 

@@ -192,6 +192,99 @@ Kept rather than deleted: each one records *why* it happened, which is the part 
 having when something similar shows up later.
 
 
+### BUG-27 — "Go to this spot" (notes/search) sometimes landed one page off
+
+**Reported** 2026-09-23 — "Going to a location from search doesn't bring me to the
+right page. It brings to the page next to it." **Fixed** 2026-09-23. **Severity**
+medium — the passage was always findable, just sometimes on the adjacent page.
+
+**Cause — confirmed by decompiling Readium's own bundled navigator/JS, not
+guessed.** `fragment.go(locator)`'s own text-quote-anchor resolution correctly
+finds the exact DOM range, but the pixel math that turns its bounding rect into
+a paginated-column scroll position has a boundary case for text sitting right at
+a page break, landing the pager one page short or one page past the passage.
+
+**Fix applied** `TapTextResolver.highlightPassage` (which independently finds the
+same exact range via its own text search, to paint the highlight) now checks
+whether the range it just painted is actually inside the current viewport; if
+not, it reports which direction it's off, and the caller (`ReaderScreen.kt`,
+shared by both Notes' "go to this spot" and the new in-book Search's "Go here")
+nudges exactly one page with `goForward()`/`goBackward()` to correct it.
+
+---
+
+### BUG-26 — Every page's chapter label read "Contents", regardless of chapter
+
+**Reported** 2026-09-23 — "The chapter name at the lower left corner on each page
+is incorrect. It just says contents on the book I'm reading. It's the same on
+every page." **Fixed** 2026-09-23. **Severity** medium — cosmetic (the page
+indicator), no effect on reading or audio.
+
+**Cause — confirmed against the actual epub.** This book's own nav document
+links every real chapter with a fragment (`Chapter01.xhtml#ch1`, `#ch2`, ...),
+while the reading order's own resources are whole-file hrefs with no fragment.
+`PublicationHrefs.bareResourceName` compared hrefs without stripping the
+fragment first, so every real chapter's table-of-contents entry failed to match
+any reading-order resource — except the one front-matter "Contents" entry,
+which happened to carry no fragment of its own, and so won on every page.
+
+**Fix applied** `bareResourceName` now strips a `#fragment` before comparing,
+alongside the URL-decoding it already did for the same class of mismatch on a
+differently-encoded href.
+
+---
+
+### BUG-25 — Offline audio sounded muffled/distorted, worse on longer books
+
+**Reported** 2026-09-23 — "the offline version sounds a muffled, like there is
+an echo or its a little distorted. the live version with the same voice sounds
+good." Reconverting did not fix it on the first attempt. **Fixed** 2026-09-23
+(two separate, compounding causes). **Severity** high — affected every offline
+conversion's audio quality, worst on long books.
+
+**Cause 1.** `create_m4b` ran ffmpeg's `loudnorm` filter in single-pass/dynamic
+mode, which continuously re-estimates and applies gain in real time as it
+streams through the audio — audible as gain-riding around every pause/sentence
+boundary. Confirmed by measuring actual LUFS output before/after switching to
+two-pass (`measure_loudness` first, then one fixed linear correction), which
+ffmpeg's own docs recommend whenever a second pass is affordable (true here —
+an offline batch job, not a live stream).
+
+**Cause 2, found only once cause 1's fix didn't fully resolve it.** Past a
+10-hour book, `bitrate_for_duration` drops the AAC bitrate to 48k to control
+file size — and ffmpeg's native `aac` encoder, given no explicit sample rate at
+that lower bitrate, silently mislabeled a true 24kHz-mono source as 96kHz.
+Confirmed by reproducing directly: the identical input encodes at its real rate
+at 64k, but comes out tagged 96000 Hz at 48k. The encoder then spent part of an
+already-tiny bit budget describing frequency bands that were never real.
+
+**Fix applied** Two-pass `loudnorm` (see cause 1), plus `create_m4b` now pins
+`-ar` to the engine's actual sample rate explicitly rather than letting ffmpeg
+guess it.
+
+---
+
+### BUG-24 — A curly apostrophe/quote made Pocket TTS drop part of the word
+
+**Reported** 2026-09-23 — "it does a poor job of reading words like can't, it
+pronounces the word as can. seems like anything with an apostrophe doesn't read
+well." **Fixed** 2026-09-23. **Severity** medium — affected any book using
+typographic ("smart") punctuation, which is most published epubs.
+
+**Cause — confirmed by inspecting Pocket TTS's actual SentencePiece tokenizer
+directly.** A curly apostrophe (`’`, U+2019) has no vocabulary entry and falls
+back to three raw UTF-8 byte-tokens the acoustic model was never meaningfully
+trained on — the model just drops the sound. Also confirmed for curly double
+quotes and the Unicode ellipsis (`…`); a plain ASCII apostrophe/quote/`...`
+tokenizes as a single clean token and reads correctly.
+
+**Fix applied** `quote_split.split_into_spans` now folds curly quotes,
+apostrophes, the ellipsis, non-breaking spaces, and soft hyphens to their
+plain-ASCII equivalents before any sentence-splitting, so both the offline
+converter and live reading (which share this function) get the fix.
+
+---
+
 ### BUG-23 — A pasted API token containing a newline crashed the app on every launch
 
 **Reported** 2026-08-24 -- "i added the api token, tried uploading a book and

@@ -125,6 +125,45 @@ once the book is on the device.
   correcting AAC container priming offset if a particular conversion's
   highlight drifts from the audio.
 
+## Live reading
+
+An alternative to waiting through a full conversion: at upload time, choose
+**Live** (no conversion job at all — the book is only ever readable via
+on-demand server-side synthesis while it's open) or **Live + Offline**
+(queues a normal background conversion *and* lets you start reading live
+immediately, without waiting for it to finish). The server synthesizes a
+few sentences ahead of wherever you are, one chapter at a time, from a
+small fixed pool of TTS sessions — read-along highlighting, follow mode,
+tap-to-play, and "Read from here" all work the same as on a converted book,
+including onto text that hasn't been synthesized yet. A live-only book's
+reading position is saved locally (which sentence of which chapter), since
+there's no fixed audio file to save a millisecond offset into.
+
+Capacity is a small fixed concurrency cap — reading live is "busy" past it,
+with a plain message rather than a queue. See `server/README.md`'s "Live
+reading" section for how the session pool and chapter-resolution actually
+work.
+
+## In-book search
+
+A magnifying-glass icon in the reader's toolbar opens a search sheet:
+type a query, get a scrollable list of matches (chapter + a snippet with
+the hit bolded) as you type. Each result offers **Go to this spot**
+(jumps the page there and highlights the passage in yellow) and, for any
+book with audio at all, **Play from here** — resolving the match to a
+sentence and starting playback there, the same way "Read from here" does
+from a word tap. Built on Readium's own bundled full-text search rather
+than a custom index.
+
+## Feedback
+
+From Settings, or from the reader's own settings sheet (cog icon) while a
+book is open: report a bug, request a feature, or leave general feedback.
+Opened from inside a book, the report automatically attaches which book
+and mode (live/offline) you were reading, plus a short trail of recent
+in-app events, so a report can be lined up against server logs from around
+the same time. Reports post to the server and are listed for the admin.
+
 ## Word interaction: tap, select, define, note
 
 - **Tap a word** to highlight it and open a small menu at the bottom of
@@ -136,19 +175,27 @@ once the book is on the device.
   the other is a no-op (the selection just doesn't invert), and the
   selection can span multiple lines.
 - The menu offers, depending on what's selected: **Read from here**
-  (hidden if the passage has no audio mapped to it), **Definition**
-  (hidden for a multi-word selection), **Notes**, and **Copy**.
+  (hidden if the passage has no audio mapped to it — for a live book,
+  shown whenever the tap landed inside the book's own text at all, even
+  where nothing has been synthesized yet), **Definition** (hidden for a
+  multi-word selection), **Bookmark**, and **Copy**.
 
-## Notes
+## Notes and bookmarks
 
-- From the word menu's **Notes** option: type a note about the tapped
-  word or selected passage; it's saved together with the quoted text and
-  its location in the book.
-- A **Notes** list, reachable from the reader's toolbar, shows every note
-  in reading order. Each entry expands to show the full note text, and
-  has a button to jump straight back to that spot in the book — which
-  also re-highlights the original passage in yellow (no handles, no
-  menu — just showing you what was noted).
+One merged concept, not two: a bookmark is a colored marker with an
+optional note attached, rather than a separate kind of entry.
+
+- From the word menu's **Bookmark** option: pick a color (with an optional
+  custom label per color, set once on the Bookmark colors settings
+  screen), optionally type a note; it's saved together with the quoted
+  text and its location in the book.
+- A list, reachable from the reader's toolbar, shows every bookmark/note
+  in reading order, each with its color swatch. Tapping a row reopens the
+  same editor prefilled, so a bookmark's color or note text can be
+  changed later, not just created once. A dedicated button jumps straight
+  back to that spot in the book — which also re-highlights the original
+  passage in the entry's own color (no handles, no menu — just showing
+  you what was marked).
 
 ## Offline dictionary
 
@@ -200,20 +247,29 @@ once the book is on the device.
 - **A worker killed mid-conversion** leaves that job showing as
   "converting" forever on the server side; cancel and re-upload. See
   `server/README.md`'s "Known gaps".
-- **The first line of a book never highlights** — audiblez injects a
-  `"<title> – <author>."` line into chapter 1's audio that appears
-  nowhere in the actual EPUB text, so it has nothing to match against. By
-  design, not a bug.
+- **The first line of an offline-converted book never highlights** —
+  audiblez injects a `"<title> – <author>."` line into chapter 1's audio
+  that appears nowhere in the actual EPUB text, so it has nothing to match
+  against. By design, not a bug. (A live-read book has no such injected
+  line, so its own first sentence highlights normally.)
 - **Conversion is slow on CPU** (roughly 5× realtime before the parallel-
   chapter-synthesis work landed) — a 10-hour audiobook is a some-tens-of-
-  minutes-to-an-hour-plus wait even now, not an instant turnaround.
+  minutes-to-an-hour-plus wait even now, not an instant turnaround. Live
+  reading (see above) sidesteps this for a reader willing to listen
+  without a downloadable file, or without waiting for one.
+- **Live reading's transport scrub bar has no live-aware seek** — only
+  sentence-level navigation (play/pause, next/previous sentence, tap a
+  word) is guaranteed correct for a live book; dragging the seek bar just
+  moves the page.
 - **Release builds are unminified** — R8 rules for Readium's reflection-
   heavy resource loading haven't been written, and nothing here ships
   through the Play Store.
-- Two feature designs are scoped but **not started**: PDF support
-  ([`PDF_SUPPORT.md`](PDF_SUPPORT.md)) and chapter-by-chapter progressive
-  playback, converting and listening to one chapter while the rest is
-  still processing ([`PROGRESSIVE_PLAYBACK.md`](PROGRESSIVE_PLAYBACK.md)).
+- PDF support is scoped but **not started** — see
+  [`PDF_SUPPORT.md`](PDF_SUPPORT.md). Chapter-by-chapter progressive
+  playback, the alternative design sketched in
+  [`PROGRESSIVE_PLAYBACK.md`](PROGRESSIVE_PLAYBACK.md), was effectively
+  superseded by live reading (above), which solves the same "listen
+  before conversion finishes" problem a different way.
 
 ## Where to look next
 
@@ -222,8 +278,9 @@ once the book is on the device.
   read-along timing and page-following are implemented, storage layout,
   test suite.
 - [`server/README.md`](server/README.md) — the server's architecture:
-  the job lifecycle, the three-TTS-engine abstraction, parallel chapter
-  synthesis, the sharing/invite system, configuration reference.
+  the job lifecycle, the TTS engine abstraction (Pocket TTS today, built to
+  support more), parallel chapter synthesis, live reading, the
+  sharing/invite system, configuration reference.
 - `en.md` — the enhancement log, in the order features actually landed,
   with the reasoning behind each one.
 - `BUGS.md` — defects found and fixed (or knowingly not), with root

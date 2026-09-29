@@ -191,6 +191,58 @@ metadata, so it may well be unnecessary — worth measuring before compensating.
 offset shifts the *lookup* only; it is subtracted back out when seeking, or tapping
 a sentence would drift by it every time.
 
+## Live reading
+
+A live-only or live+offline book has no sync file to load `ChunkIndex` from
+up front — [`LiveChunkSource`](app/src/main/java/dev/reedd/domain/LiveChunkSource.kt)
+owns one book's session end to end instead: calls the server's `/live/start`
+for the current resource, polls `/live/status` for newly-synthesized chunks,
+downloads each one to `cacheDir`, and runs them through the *same*
+`ChunkAligner` real conversions use — in batches, extending a running
+`ChunkIndex` with cumulative `startMs`/`endMs` that continue across chapter
+boundaries, rather than resetting to 0 per chapter. It drives chapter-to-
+chapter continuation itself once one chapter's chunks are exhausted.
+
+The one piece this needed that `ChunkAligner` didn't already have:
+`skipFirstOrdinal` (default `true`, unchanged for offline conversion).
+Offline chunk 0 is always audiblez' injected `"<title> — <author>."` line —
+absent from the real epub text by design — but a live session's chunk 0 is
+the book's real first sentence, and would otherwise permanently fail to
+align.
+
+`PlayerConnection` gained a live queue mode: every live chunk is appended as
+its own `MediaItem` sharing one `mediaId` (the book id, keeping the existing
+bookId-equality checks unmodified), and a "global position" —
+`currentMediaItemIndex`'s own recorded cumulative start + Media3's window-
+relative `currentPosition` — is what lets `ChunkIndex`'s existing ms-based
+lookups, `FollowController`, and sentence navigation keep working completely
+unmodified against a queue that is still growing.
+
+Resolving *which* chapter a live session is reading uses `resource_href`
+(bare filename), not an integer chapter index — the server (ebooklib) and
+Readium parse the same epub's spine independently, and nothing guarantees
+they enumerate resources identically.
+
+"Read from here" onto text not yet synthesized (the common case for a live
+book — most of it has never been visited) falls back to an anchor-text +
+fraction restart (`LiveChunkSource.startFromFraction`/`startFromTap`) rather
+than requiring an aligned sentence index the way an offline book's word-tap
+menu does — see `WordMenuTarget.canReadFromHere`'s own doc.
+
+## In-book search
+
+[`SearchSheet`](app/src/main/java/dev/reedd/ui/reader/SearchSheet.kt) is a
+thin UI over Readium's own bundled `StringSearchService`, attached to every
+publication this app opens via `onCreatePublication` in
+[`ReadiumComponents`](app/src/main/java/dev/reedd/data/readium/ReadiumComponents.kt)
+— no custom index. `ReaderViewModel.search` drains its `SearchIterator` (one
+resource's matches per `next()` call, not a fixed page) into a capped list of
+`Locator`s, which already carry everything a result row needs: the
+containing chapter (`Locator.title`), a snippet (`Locator.Text.before`/
+`highlight`/`after`), and enough to resolve "Play from here" the same way a
+word-tap's "Read from here" does (`ChunkIndex.indexOfSelection` for an
+offline book, `LiveChunkSource.startFromFraction` for a live one).
+
 ## Screens
 
 | | |
