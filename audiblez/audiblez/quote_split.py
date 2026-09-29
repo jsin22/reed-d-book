@@ -23,6 +23,23 @@ from audiblez.text_split import split_sentences as _split_sentences_plain
 # rapid dialogue ("A" "B" "C") split into three spans, not one.
 _QUOTE_RE = re.compile(r'“([^”]*)”|"([^"]*)"')
 
+# Typographic ("smart") punctuation Pocket TTS's SentencePiece vocabulary has
+# no token for -- confirmed by direct tokenizer inspection, each falls back to
+# three raw UTF-8 byte-tokens the acoustic model was never meaningfully
+# trained on, and in practice it just drops the sound: a contraction typed
+# with a curly apostrophe ("can’t") is read aloud as "can". The ASCII forms
+# all tokenize as a single clean token. Mirrors the equivalence classes
+# TextNormalizer.kt (Android) already treats curly and ASCII punctuation as
+# interchangeable for, so normalizing here introduces no new mismatch for
+# read-along alignment.
+_TTS_PUNCTUATION_NORMALIZE = str.maketrans({
+    '‘': "'", '’': "'",    # ‘ ’
+    '“': '"', '”': '"',    # “ ”
+    '…': '...',                 # …
+    ' ': ' ',                   # non-breaking space
+    '­': '',                    # soft hyphen (invisible; never spoken)
+})
+
 
 def split_into_spans(text):
     """Returns [(kind, sentence), ...] covering all of `text` in order,
@@ -31,6 +48,7 @@ def split_into_spans(text):
     a multi-sentence quoted monologue yields one (kind, sentence) pair per
     sentence, not one pair for the whole monologue.
     """
+    text = text.translate(_TTS_PUNCTUATION_NORMALIZE)
     spans = []
     pos = 0
     for m in _QUOTE_RE.finditer(text):
