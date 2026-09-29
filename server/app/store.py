@@ -37,8 +37,12 @@ QUEUED = 'queued'
 RUNNING = 'running'
 DONE = 'done'
 ERROR = 'error'
+#: A `mode='live'` upload (see app.main.create_job) never gets queued to
+#: Celery at all -- this is its terminal status from the moment it's
+#: created, not something a worker ever transitions it into or out of.
+LIVE_ONLY = 'live_only'
 
-TERMINAL_STATUSES = (DONE, ERROR)
+TERMINAL_STATUSES = (DONE, ERROR, LIVE_ONLY)
 
 MANIFEST_NAME = 'job.json'
 OUTPUT_DIRNAME = 'out'
@@ -109,7 +113,7 @@ class JobStore:
 
     # -- lifecycle -----------------------------------------------------------
 
-    def create(self, filename, voice, speed, engine, owner=None, title=None, author=None) -> dict:
+    def create(self, filename, voice, speed, engine, owner=None, title=None, author=None, mode='offline') -> dict:
         """Register a job and return its manifest. The epub is written separately.
 
         `owner` is a user_id (see app.users.UserStore) or None for a job
@@ -123,12 +127,24 @@ class JobStore:
         used for the category/genre lookup, not stored anywhere else. A job
         created without them (an older client, or a direct call from a
         test/script) simply never gets a category/genre.
+
+        `mode` -- 'offline' (default), 'live', or 'live_offline' -- is
+        purely descriptive of what the uploader chose (see
+        CPU_LIVE_READING_PLAN); it never changes after creation and does
+        not by itself affect `status` here. `app.main.create_job` is what
+        actually skips the Celery enqueue and sets `status=LIVE_ONLY` for
+        `mode='live'` -- both 'offline' and 'live_offline' start at
+        `QUEUED` exactly as before, since live reading (app.live_reading)
+        works against any book's epub regardless of job status, and
+        'live_offline' differs from plain 'offline' only in what the app
+        chooses to offer the reader, not in anything stored here.
         """
         job_id = str(uuid.uuid4())
         (self.jobs_dir / job_id / OUTPUT_DIRNAME).mkdir(parents=True, exist_ok=True)
         manifest = {
             'job_id': job_id,
             'status': QUEUED,
+            'mode': mode,
             'filename': safe_filename(filename),
             'engine': engine,
             'voice': voice,

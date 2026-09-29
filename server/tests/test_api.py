@@ -13,7 +13,7 @@ from unittest import mock
 
 from fastapi.testclient import TestClient
 
-from app import config
+from app import config, live_reading
 from app.book_metadata import LookupUnavailable
 from app.main import app
 from app.store import JobStore
@@ -108,6 +108,40 @@ class UploadTest(ApiTestCase):
         self.assertEqual(response.status_code, 503)
         # A job nothing will ever pick up is worse than no job at all.
         self.assertEqual(self.store.list(), [])
+
+    def test_default_mode_is_offline_and_behaves_exactly_as_before(self):
+        body = self.upload().json()
+        self.assertEqual(body['mode'], 'offline')
+        self.assertEqual(body['status'], 'queued')
+        self.enqueue.assert_called_once()
+
+    def test_live_offline_mode_queues_exactly_like_offline(self):
+        body = self.upload(mode='live_offline').json()
+        self.assertEqual(body['mode'], 'live_offline')
+        self.assertEqual(body['status'], 'queued')
+        self.enqueue.assert_called_once()
+
+    def test_live_mode_skips_the_queue_and_is_immediately_live_only(self):
+        body = self.upload(mode='live').json()
+        self.assertEqual(body['mode'], 'live')
+        self.assertEqual(body['status'], 'live_only')
+        self.assertIsNone(body['celery_task_id'])
+        self.enqueue.assert_not_called()
+        # The epub still lands on disk exactly as for any other mode --
+        # app.live_reading works against it regardless of job status.
+        self.assertTrue((self.store.job_dir(body['job_id']) / body['filename']).is_file())
+
+    def test_rejects_an_unknown_mode(self):
+        response = self.upload(mode='sometimes')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('mode', response.json()['detail'])
+
+    def test_a_live_only_job_is_deletable_without_touching_celery(self):
+        job_id = self.upload(mode='live').json()['job_id']
+        with mock.patch('app.main.revoke') as revoke:
+            response = self.client.delete(f'/api/jobs/{job_id}')
+            revoke.assert_not_called()
+        self.assertEqual(response.status_code, 200)
 
 
 class BookMetadataOnUploadTest(ApiTestCase):
@@ -443,11 +477,16 @@ class CoverTest(ApiTestCase):
             fetch_cover.assert_not_called()
         self.assertEqual(self.store.read(job_id)['cover']['bytes'], len(b'lazily fetched'))
 
-    def test_no_cover_anywhere_is_410_not_500(self):
+    def test_falls_back_to_a_generated_cover_once_open_library_has_nothing(self):
         job_id = self.upload().json()['job_id']
         self.finish(job_id)
-        with mock.patch('app.main.fetch_cover', return_value=None):
-            self.assertEqual(self.client.get(f'/api/jobs/{job_id}/cover').status_code, 410)
+        with mock.patch('app.main.fetch_cover', return_value=None), \
+                mock.patch('app.main.generate_placeholder_cover', return_value=b'generated png') as generate:
+            response = self.client.get(f'/api/jobs/{job_id}/cover')
+            generate.assert_called_once()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b'generated png')
 
     def test_cover_before_the_job_finishes_is_409(self):
         job_id = self.upload().json()['job_id']
@@ -856,3 +895,236 @@ class CrashReportTest(ApiTestCase):
         response = self.client.post('/api/diagnostics/crash', content=b'trace \xff\xfe ends')
         self.assertEqual(202, response.status_code)
         self.assertIn('trace', self.client.get('/api/diagnostics/crashes').text)
+
+
+class FeedbackTest(ApiTestCase):
+    """Bug reports and feature requests -- same shape as CrashReportTest,
+    deliberately: this is the same kind of low-volume, admin-reads-it-
+    directly data, just submitted on purpose rather than after a crash."""
+
+    MESSAGE = ('Type: Bug\nBook: Five Survive (b1)\nMode: live\n\n'
+               'The seek bar jumps back to the start every time.\n\n'
+               '--- breadcrumbs ---\n01:02:03 reader opened\n')
+
+    def test_report_is_stored_and_listed_for_an_admin(self):
+        response = self.client.post('/api/feedback?feedback_type=bug', content=self.MESSAGE.encode())
+
+        self.assertEqual(202, response.status_code)
+        body = response.json()
+        self.assertTrue(body['stored'].startswith('feedback-bug-'))
+        self.assertEqual(len(self.MESSAGE), body['bytes'])
+
+        stored = list(self.settings.feedback_dir.glob('feedback-bug-*.txt'))
+        self.assertEqual(1, len(stored))
+        self.assertIn('seek bar jumps back', stored[0].read_text())
+
+        _, admin_token = self.make_user('admin@example.com', is_admin=True)
+        self.client.headers['Authorization'] = f'Bearer {admin_token}'
+        listing = self.client.get('/api/admin/feedback')
+        self.assertEqual(200, listing.status_code)
+        self.assertIn('seek bar jumps back', listing.text)
+
+    def test_an_unrecognized_type_falls_back_to_other_rather_than_failing(self):
+        response = self.client.post('/api/feedback?feedback_type=not-a-real-type', content=b'something')
+
+        self.assertEqual(202, response.status_code)
+        self.assertTrue(response.json()['stored'].startswith('feedback-other-'))
+
+    def test_a_non_admin_cannot_list_feedback(self):
+        self.client.post('/api/feedback?feedback_type=other', content=b'a message')
+        response = self.client.get('/api/admin/feedback')
+        self.assertEqual(403, response.status_code)
+
+    def test_empty_feedback_is_rejected(self):
+        response = self.client.post('/api/feedback', content=b'')
+        self.assertEqual(400, response.status_code)
+
+    def test_listing_is_empty_before_any_feedback(self):
+        _, admin_token = self.make_user('admin@example.com', is_admin=True)
+        self.client.headers['Authorization'] = f'Bearer {admin_token}'
+        self.assertIn('no feedback yet', self.client.get('/api/admin/feedback').text)
+
+    def test_newest_submission_comes_first(self):
+        self.client.post('/api/feedback?feedback_type=other', content=b'the older one')
+        self.client.post('/api/feedback?feedback_type=other', content=b'the newer one')
+
+        _, admin_token = self.make_user('admin@example.com', is_admin=True)
+        self.client.headers['Authorization'] = f'Bearer {admin_token}'
+        text = self.client.get('/api/admin/feedback').text
+
+        self.assertLess(text.index('the newer one'), text.index('the older one'))
+
+    def test_a_submission_loop_cannot_fill_the_disk(self):
+        from app import main
+        with mock.patch.object(main, 'MAX_FEEDBACK_FILES', 3):
+            for i in range(6):
+                self.client.post('/api/feedback?feedback_type=other', content=f'feedback {i}'.encode())
+
+        kept = sorted(self.settings.feedback_dir.glob('feedback-*.txt'))
+        self.assertEqual(3, len(kept))
+        self.assertIn('feedback 5', ''.join(f.read_text() for f in kept))
+
+
+class LiveReadingRoutesTest(ApiTestCase):
+    """Request/response wiring only -- app.live_reading's own session/pool
+    logic is covered by test_live_reading.py."""
+
+    def setUp(self):
+        super().setUp()
+        self.job_id = self.upload().json()['job_id']
+
+    def test_start_passes_the_body_through_and_returns_the_session_id(self):
+        with mock.patch('app.main.live_reading.start', return_value=('session-1', 5)) as start:
+            response = self.client.post(
+                f'/api/books/{self.job_id}/live/start',
+                json={'resource_href': 'OEBPS/chap2.xhtml', 'from_sentence_index': 5, 'voice': 'alba'},
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {'session_id': 'session-1', 'from_sentence_index': 5})
+        book_id, epub_path, resource_href, from_sentence_index, voice = start.call_args[0]
+        self.assertEqual(
+            (book_id, resource_href, from_sentence_index, voice),
+            (self.job_id, 'OEBPS/chap2.xhtml', 5, 'alba'),
+        )
+
+    def test_start_defaults_from_sentence_index_to_zero(self):
+        with mock.patch('app.main.live_reading.start', return_value=('session-1', 0)) as start:
+            self.client.post(f'/api/books/{self.job_id}/live/start', json={'resource_href': 'c1.xhtml', 'voice': 'alba'})
+        self.assertEqual(start.call_args[0][3], 0)
+
+    def test_start_passes_from_fraction_through(self):
+        with mock.patch('app.main.live_reading.start', return_value=('session-1', 12)) as start:
+            response = self.client.post(
+                f'/api/books/{self.job_id}/live/start',
+                json={'resource_href': 'c1.xhtml', 'voice': 'alba', 'from_fraction': 0.4},
+            )
+        self.assertEqual(response.json(), {'session_id': 'session-1', 'from_sentence_index': 12})
+        self.assertEqual(start.call_args.kwargs['from_fraction'], 0.4)
+
+    def test_start_passes_anchor_text_through(self):
+        with mock.patch('app.main.live_reading.start', return_value=('session-1', 7)) as start:
+            response = self.client.post(
+                f'/api/books/{self.job_id}/live/start',
+                json={'resource_href': 'c1.xhtml', 'voice': 'alba', 'anchor_text': 'a window of tapped text'},
+            )
+        self.assertEqual(response.json(), {'session_id': 'session-1', 'from_sentence_index': 7})
+        self.assertEqual(start.call_args.kwargs['anchor_text'], 'a window of tapped text')
+
+    def test_start_passes_anchor_offset_through(self):
+        with mock.patch('app.main.live_reading.start', return_value=('session-1', 7)) as start:
+            self.client.post(
+                f'/api/books/{self.job_id}/live/start',
+                json={
+                    'resource_href': 'c1.xhtml', 'voice': 'alba',
+                    'anchor_text': 'a window of tapped text', 'anchor_offset': 0,
+                },
+            )
+        self.assertEqual(start.call_args.kwargs['anchor_offset'], 0)
+
+    def test_start_is_404_for_an_unknown_or_invisible_book(self):
+        with mock.patch('app.main.live_reading.start', return_value=('session-1', 0)):
+            response = self.client.post('/api/books/does-not-exist/live/start',
+                                         json={'resource_href': 'c1.xhtml', 'voice': 'alba'})
+        self.assertEqual(response.status_code, 404)
+
+        _, other_token = self.make_user()
+        with mock.patch('app.main.live_reading.start', return_value=('session-1', 0)):
+            response = self.client.post(
+                f'/api/books/{self.job_id}/live/start', json={'resource_href': 'c1.xhtml', 'voice': 'alba'},
+                headers={'Authorization': f'Bearer {other_token}'},
+            )
+        self.assertEqual(response.status_code, 404)
+
+    def test_start_is_503_when_the_pool_is_busy(self):
+        with mock.patch('app.main.live_reading.start', side_effect=live_reading.Busy()):
+            response = self.client.post(f'/api/books/{self.job_id}/live/start',
+                                         json={'resource_href': 'c1.xhtml', 'voice': 'alba'})
+        self.assertEqual(response.status_code, 503)
+
+    def test_start_is_400_for_an_unknown_chapter(self):
+        with mock.patch('app.main.live_reading.start', side_effect=live_reading.UnknownChapter('nope')):
+            response = self.client.post(f'/api/books/{self.job_id}/live/start',
+                                         json={'resource_href': 'does-not-exist.xhtml', 'voice': 'alba'})
+        self.assertEqual(response.status_code, 400)
+
+    def test_advance_passes_through_and_404s_for_an_unknown_session(self):
+        with mock.patch('app.main.live_reading.advance', return_value={'status': 'running'}) as advance:
+            response = self.client.post(f'/api/books/{self.job_id}/live/session-1/advance',
+                                         json={'now_at_sentence_index': 3})
+            advance.assert_called_once_with('session-1', 3)
+        self.assertEqual(response.status_code, 200)
+
+        with mock.patch('app.main.live_reading.advance', return_value=None):
+            response = self.client.post(f'/api/books/{self.job_id}/live/session-1/advance',
+                                         json={'now_at_sentence_index': 3})
+        self.assertEqual(response.status_code, 404)
+
+    def test_status_404s_for_an_unknown_session(self):
+        with mock.patch('app.main.live_reading.status', return_value=None):
+            response = self.client.get(f'/api/books/{self.job_id}/live/session-1/status')
+        self.assertEqual(response.status_code, 404)
+
+    def test_chunk_is_served_as_wav_or_404_if_missing(self):
+        with mock.patch('app.main.live_reading.chunk_audio', return_value=b'RIFF...fake wav'):
+            response = self.client.get(f'/api/books/{self.job_id}/live/session-1/chunk/0')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers['content-type'], 'audio/wav')
+
+        with mock.patch('app.main.live_reading.chunk_audio', return_value=None):
+            response = self.client.get(f'/api/books/{self.job_id}/live/session-1/chunk/99')
+        self.assertEqual(response.status_code, 404)
+
+    def test_stop_calls_through(self):
+        with mock.patch('app.main.live_reading.stop') as stop:
+            response = self.client.post(f'/api/books/{self.job_id}/live/session-1/stop')
+            stop.assert_called_once_with('session-1')
+        self.assertEqual(response.status_code, 200)
+
+
+class LiveTtsExperimentRoutesTest(ApiTestCase):
+    """Request/response wiring only -- app.live_tts_experiment's own
+    synthesis logic is covered by test_live_tts_experiment.py."""
+
+    def test_start_rejects_empty_text(self):
+        response = self.client.post('/admin/live-tts/start', json={'text': '   ', 'voice': 'alba'})
+        self.assertEqual(response.status_code, 400)
+
+    def test_start_rejects_an_invalid_device(self):
+        response = self.client.post('/admin/live-tts/start', json={'text': 'Hi.', 'voice': 'alba', 'device': 'tpu'})
+        self.assertEqual(response.status_code, 400)
+
+    def test_start_accepts_an_explicit_cpu_device(self):
+        with mock.patch('app.main.live_tts_experiment.start', return_value='session-1') as start:
+            response = self.client.post('/admin/live-tts/start', json={'text': 'Hi.', 'voice': 'alba', 'device': 'cpu'})
+            start.assert_called_once_with('Hi.', 'alba', 'cpu')
+        self.assertEqual(response.status_code, 200)
+
+    def test_start_returns_a_session_id_status_can_be_polled_with(self):
+        with mock.patch('app.main.live_tts_experiment.start', return_value='session-1') as start:
+            response = self.client.post('/admin/live-tts/start', json={'text': 'Hello.', 'voice': 'alba'})
+            start.assert_called_once_with('Hello.', 'alba', 'auto')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {'session_id': 'session-1'})
+
+        fake_status = {'status': 'done', 'error': None, 'device': 'auto',
+                        'chunks': [{'index': 0, 'ready_at_s': 0.1, 'duration_s': 1.0, 'chars': 6}]}
+        with mock.patch('app.main.live_tts_experiment.status', return_value=fake_status):
+            response = self.client.get('/admin/live-tts/status/session-1')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), fake_status)
+
+    def test_status_of_an_unknown_session_is_404(self):
+        with mock.patch('app.main.live_tts_experiment.status', return_value=None):
+            response = self.client.get('/admin/live-tts/status/does-not-exist')
+        self.assertEqual(response.status_code, 404)
+
+    def test_chunk_is_served_as_wav_or_404_if_missing(self):
+        with mock.patch('app.main.live_tts_experiment.chunk_audio', return_value=b'RIFF...fake wav'):
+            response = self.client.get('/admin/live-tts/chunk/session-1/0')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b'RIFF...fake wav')
+        self.assertEqual(response.headers['content-type'], 'audio/wav')
+
+        with mock.patch('app.main.live_tts_experiment.chunk_audio', return_value=None):
+            response = self.client.get('/admin/live-tts/chunk/session-1/99')
+        self.assertEqual(response.status_code, 404)

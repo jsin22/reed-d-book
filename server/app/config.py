@@ -48,6 +48,7 @@ class Settings:
     apk_build_dir: Path
     gemini_api_key: str
     gemini_model: str
+    live_reading_max_sessions: int
 
     @property
     def jobs_dir(self) -> Path:
@@ -62,6 +63,16 @@ class Settings:
         convenient place for a phone to leave one.
         """
         return self.data_dir / 'crashes'
+
+    @property
+    def feedback_dir(self) -> Path:
+        """Bug reports and feature requests posted by the app -- see
+        `POST /api/feedback` in app/main.py. Same shape as [crashes_dir]
+        (plain-text files, one per submission) deliberately: this is the
+        same kind of low-volume, admin-reads-it-directly data, just
+        submitted on purpose rather than after a crash.
+        """
+        return self.data_dir / 'feedback'
 
     @property
     def voice_samples_dir(self) -> Path:
@@ -128,6 +139,14 @@ def load_settings() -> Settings:
         # LookupUnavailable rather than silently doing nothing.
         gemini_api_key=_env('GEMINI_API_KEY', ''),
         gemini_model=_env('GEMINI_MODEL', 'gemini-3.1-flash-lite'),
+        # CPU-only always (see app.live_reading) -- a live session never
+        # touches the GPU, so this is unrelated to conversion_workers above
+        # and just caps how many PocketTTSEngine instances (each a real
+        # process-wide CPU/RAM cost) can be loaded and synthesizing for live
+        # readers at once. Small on purpose; raise once real usage on this
+        # machine (free -h, load average while a few people read live at
+        # once) shows there is room.
+        live_reading_max_sessions=int(_env('LIVE_READING_MAX_SESSIONS', '3')),
     )
 
 

@@ -16,6 +16,7 @@ from pathlib import Path
 
 from .celery_app import CONVERT_TASK, celery_app
 from .config import get_settings
+from .cover_generator import generate_placeholder_cover
 from .cover_lookup import fetch_cover
 from .store import DONE, ERROR, RUNNING, JobNotFound, JobStore, utcnow
 
@@ -201,9 +202,14 @@ def convert_epub(self, job_id):
     # (core.py's find_cover, muxed into the .m4b by create_m4b); this is
     # only reached for the epub-had-none case. Best-effort and never
     # allowed to fail the job -- see cover_lookup.fetch_cover's own doc.
+    # A generated placeholder (cover_generator) is the last resort, once
+    # Open Library also has nothing -- always succeeds, so every finished
+    # job ends up with *some* cover.
     cover_path = output_dir / 'cover'
     if not cover_path.is_file():
         fetched = fetch_cover(manifest.get('title'), manifest.get('author'))
+        if not fetched:
+            fetched = generate_placeholder_cover(manifest.get('title') or manifest['filename'])
         if fetched:
             cover_path.write_bytes(fetched)
 

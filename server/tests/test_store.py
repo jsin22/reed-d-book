@@ -68,6 +68,18 @@ class JobStoreTest(TempDataDirTestCase):
         manifest = self.store.create('Book One.epub', 'alba', 1.0, 'pocket_tts')
         self.assertIsNone(manifest['owner'])
 
+    def test_mode_defaults_to_offline_and_does_not_affect_status(self):
+        manifest = self.store.create('Book One.epub', 'alba', 1.0, 'pocket_tts')
+        self.assertEqual(manifest['mode'], 'offline')
+        self.assertEqual(manifest['status'], 'queued')
+
+    def test_an_explicit_mode_is_stored_verbatim(self):
+        manifest = self.store.create('Book One.epub', 'alba', 1.0, 'pocket_tts', mode='live')
+        self.assertEqual(manifest['mode'], 'live')
+        # store.create alone never touches status for any mode -- app.main.
+        # create_job is what moves a 'live' job to LIVE_ONLY afterward.
+        self.assertEqual(manifest['status'], 'queued')
+
     def test_unknown_and_malformed_ids_both_raise(self):
         self.assertRaises(JobNotFound, self.store.read, '9d0b6c4f-5e2a-4b3c-8a1b-000000000000')
         self.assertRaises(JobNotFound, self.store.read, '../../../etc')

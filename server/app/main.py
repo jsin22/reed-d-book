@@ -6,20 +6,38 @@ The contract the Android app codes against:
     POST   /api/jobs                    upload an .epub  -> 202 {job_id, status}
                                          (optional title/author form fields feed
                                          a background category/genre lookup --
-                                         see SORT_GROUP_LIBRARY.md)
+                                         see SORT_GROUP_LIBRARY.md; optional `mode`
+                                         -- offline/live/live_offline, see
+                                         UPLOAD_MODES -- offline unless given)
     GET    /api/jobs/{job_id}           poll             -> {status, progress, eta,
                                          category, genres, ...}
     GET    /api/jobs/{job_id}/audiobook the .m4b         (Range-resumable)
     GET    /api/jobs/{job_id}/sync      the timing .json
     GET    /api/jobs/{job_id}/epub      the original upload (Range-resumable)
-    GET    /api/jobs/{job_id}/cover     cover art -- from the epub, or fetched
-                                         from Open Library on first request if
-                                         it had none; see app.cover_lookup
+    GET    /api/jobs/{job_id}/cover     cover art -- from the epub, fetched
+                                         from Open Library, or a generated
+                                         placeholder, on first request if it
+                                         had none; see app.cover_lookup and
+                                         app.cover_generator
     GET    /api/jobs/{job_id}/log       audiblez' output for this job
     DELETE /api/jobs/{job_id}           cancel and/or reclaim the disk (owner or admin only)
     GET    /api/jobs                    every job you own, plus every public job,
                                          newest first -- doubles as the library
                                          listing; see README.md
+    POST   /api/books/{id}/live/start   synthesize a chapter live, sentence by
+                                         sentence, CPU-only, instead of converting
+                                         the whole book first -> {session_id}; see
+                                         app.live_reading. 503 if the (small, fixed)
+                                         concurrency cap is already full.
+    POST   /api/books/{id}/live/{session_id}/advance
+                                         tell it where the reader actually is now
+                                         -> the same shape as .../status
+    GET    /api/books/{id}/live/{session_id}/status
+                                         chunks synthesized so far, for polling
+    GET    /api/books/{id}/live/{session_id}/chunk/{n}
+                                         one synthesized sentence's audio (WAV)
+    POST   /api/books/{id}/live/{session_id}/stop
+                                         release the session's engine slot early
     GET    /api/voices                  voices for one engine (default pocket_tts), for a picker
     GET    /api/engines                 every engine and its voices, for a two-level picker
     GET    /api/voices/{voice}/sample   a short fixed-text clip of one voice, generated
@@ -41,8 +59,22 @@ Admin-only (see app.users.UserStore):
                                           invitee who has no token yet -- see push_apk above for
                                           why a rebuild does not reach this on its own
 
+Local diagnostics (unauthenticated, meant for Tailscale only -- see its own
+section further down for why):
+
+    GET    /admin/dashboard              a page to open directly in a browser: job
+                                          storage, plus Flower and Netdata embedded,
+                                          and a Live TTS tab (see below)
+    GET    /admin/dashboard/storage      the storage table's own data, as JSON
+    POST   /admin/live-tts/start         starts the live-TTS experiment (see
+                                          app.live_tts_experiment) -> {session_id}
+    GET    /admin/live-tts/status/{id}   chunks synthesized so far, for polling
+    GET    /admin/live-tts/chunk/{id}/{n} one synthesized sentence's audio (WAV)
+
 Upload returns as soon as the file is on disk; the conversion happens in a
-Celery worker.  This process never imports torch or pocket_tts.
+Celery worker. This process never imports torch or pocket_tts during normal
+operation -- the one deliberate exception is the Live TTS experiment above,
+which does so lazily and only when someone actually uses that dashboard tab.
 """
 
 import logging
@@ -52,8 +84,8 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, Header, HTTPException, Request, Response, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from pydantic import BaseModel
 
 from .audiblez_meta import (DEFAULT_VOICE_BY_ENGINE, ENGINES, MAX_SPEED, MIN_SPEED,
@@ -62,10 +94,12 @@ from .book_metadata import LookupUnavailable, lookup as lookup_book_metadata
 from .book_metadata_store import BookMetadataStore
 from .celery_app import enqueue, revoke
 from .config import get_settings
+from . import live_reading, live_tts_experiment
+from .cover_generator import generate_placeholder_cover
 from .cover_lookup import fetch_cover
 from .mailer import invite_configured, send_invite
 from .metadata_health import MetadataHealth
-from .store import (DONE, TERMINAL_STATUSES, JobNotFound, JobStore, UploadTooLarge,
+from .store import (DONE, LIVE_ONLY, TERMINAL_STATUSES, JobNotFound, JobStore, UploadTooLarge,
                     looks_like_epub)
 from .users import UserNotFound, UserStore
 
@@ -74,6 +108,19 @@ app = FastAPI(
     description='Converts .epub to .m4b + read-along timing metadata.',
     version='1.0.0',
 )
+
+
+@app.on_event('shutdown')
+def _stop_live_reading_sessions():
+    """A live-reading worker killed mid-synthesis (a blocking native torch
+    call) when the process exits aborts the whole interpreter, not a
+    catchable Python exception -- confirmed live while testing app.
+    live_reading. This makes `systemctl restart reedd-uvicorn` (or any
+    graceful shutdown) safe while someone is reading live, by stopping and
+    joining every session's worker first. See live_reading.shutdown's own
+    doc.
+    """
+    live_reading.shutdown()
 
 
 class _MaxUploadSizeMiddleware:
@@ -112,6 +159,22 @@ app.add_middleware(_MaxUploadSizeMiddleware)
 
 invite_log = logging.getLogger('reedd.mail')
 book_metadata_log = logging.getLogger('reedd.book_metadata')
+live_reading_log = logging.getLogger('reedd.live_reading')
+# Explicit handler + level: nothing configures the root logger in this
+# process (uvicorn's own default config only sets up its own 'uvicorn*'
+# loggers), so an ordinary `logging.getLogger(...).info(...)` call here
+# would silently vanish -- Python's logging falls back to a WARNING-level
+# "last resort" handler when no handler is configured anywhere in a
+# logger's chain, which drops INFO records before they reach it. Confirmed
+# empirically: existing `.info()` calls elsewhere in this file (e.g.
+# book_metadata_log) never actually appear in `journalctl`. Scoped to just
+# this one logger rather than reconfiguring the root, to avoid changing
+# any other module's existing (if quietly broken) logging behavior.
+live_reading_log.setLevel(logging.INFO)
+if not live_reading_log.handlers:
+    _live_reading_handler = logging.StreamHandler()
+    _live_reading_handler.setFormatter(logging.Formatter('%(asctime)s %(name)s %(levelname)s %(message)s'))
+    live_reading_log.addHandler(_live_reading_handler)
 
 
 def store() -> JobStore:
@@ -334,6 +397,11 @@ def _resolve_book_metadata(job_id: str, title: str | None, author: str | None) -
         pass  # deleted or cancelled before the lookup finished
 
 
+#: What POST /api/jobs' `mode` form field accepts -- see store.JobStore.
+#: create's own doc and CPU_LIVE_READING_PLAN for what each one means.
+UPLOAD_MODES = ('offline', 'live', 'live_offline')
+
+
 @app.post('/api/jobs', status_code=202)
 def create_job(background_tasks: BackgroundTasks,
                file: UploadFile = File(...),
@@ -342,6 +410,7 @@ def create_job(background_tasks: BackgroundTasks,
                engine: str = Form(default=None),
                title: str = Form(default=None),
                author: str = Form(default=None),
+               mode: str = Form(default='offline'),
                user: dict = Depends(require_user)):
     """Accept an .epub and queue it. Returns immediately with the job's id.
 
@@ -353,6 +422,12 @@ def create_job(background_tasks: BackgroundTasks,
     extracted at import time -- used only to kick off a best-effort
     category/genre lookup in the background (see SORT_GROUP_LIBRARY.md),
     not stored or validated beyond that.
+
+    `mode` -- 'offline' (default), 'live', or 'live_offline' -- only
+    'live' actually changes what happens here: it skips the Celery enqueue
+    entirely and leaves the job at `LIVE_ONLY` rather than `QUEUED`, since
+    that book is never meant to produce a downloadable audiobook on its
+    own. See UPLOAD_MODES and store.JobStore.create's own doc.
     """
     settings = get_settings()
     engine = engine or settings.default_engine
@@ -361,6 +436,8 @@ def create_job(background_tasks: BackgroundTasks,
     if voice is None:
         voice = DEFAULT_VOICE_BY_ENGINE.get(engine)
     speed = settings.default_speed if speed is None else speed
+    if mode not in UPLOAD_MODES:
+        raise HTTPException(status_code=400, detail=f'unknown mode: {mode}')
 
     valid = known_voices(engine)
     if valid and voice not in valid:
@@ -373,7 +450,7 @@ def create_job(background_tasks: BackgroundTasks,
 
     jobs = store()
     manifest = jobs.create(file.filename, voice, speed, engine, owner=user['user_id'],
-                           title=title, author=author)
+                           title=title, author=author, mode=mode)
     job_id = manifest['job_id']
     background_tasks.add_task(_resolve_book_metadata, job_id, title, author)
     try:
@@ -385,6 +462,12 @@ def create_job(background_tasks: BackgroundTasks,
     if not looks_like_epub(jobs.job_dir(job_id) / manifest['filename']):
         jobs.delete(job_id)
         raise HTTPException(status_code=400, detail='file is not a valid epub (not a zip archive)')
+
+    if mode == 'live':
+        # No Celery task at all -- this book is only ever read live
+        # (app.live_reading), which works against the epub on disk
+        # regardless of job status.
+        return jobs.update(job_id, status=LIVE_ONLY)
 
     try:
         celery_task_id = enqueue(job_id)
@@ -484,10 +567,12 @@ def _sniff_image_media_type(path: Path) -> str:
 @app.get('/api/jobs/{job_id}/cover')
 def download_cover(job_id: str, user: dict = Depends(require_user)):
     """The cover image, if one exists -- extracted from the epub itself by
-    audiblez, or (see app.cover_lookup) fetched from Open Library as a
-    fallback once conversion finished with none (app.tasks.convert_epub).
+    audiblez, fetched from Open Library as a fallback once conversion
+    finished with none (app.cover_lookup), or a generated placeholder if
+    even Open Library has nothing (app.cover_generator). The last of those
+    always succeeds, so every done job serves *some* cover.
 
-    A job that finished *before* that fallback existed gets one lazily,
+    A job that finished *before* these fallbacks existed gets one lazily,
     right here, the first time anything actually asks for it -- "backfill
     the covers of everything already converted" this way, on demand as each
     book is next downloaded, rather than a separate one-time pass over the
@@ -504,7 +589,7 @@ def download_cover(job_id: str, user: dict = Depends(require_user)):
     if not entry.get('file') or not cover_path.is_file():
         fetched = fetch_cover(manifest.get('title'), manifest.get('author'))
         if not fetched:
-            raise HTTPException(status_code=410, detail='no cover available for this book')
+            fetched = generate_placeholder_cover(manifest.get('title') or manifest['filename'])
         cover_path = output_dir / 'cover'
         cover_path.write_bytes(fetched)
         try:
@@ -512,6 +597,112 @@ def download_cover(job_id: str, user: dict = Depends(require_user)):
         except JobNotFound:
             pass  # deleted between the check above and now; still serve this one response
     return FileResponse(cover_path, media_type=_sniff_image_media_type(cover_path), filename='cover.jpg')
+
+
+# -- live reading -------------------------------------------------------------
+#
+# Phase 1 of the live-reading plan (see PURRFECT_HOPPING_UNICORN, saved
+# 2026-09-07): synthesize a chapter sentence by sentence, on demand, CPU-only,
+# instead of converting the whole book first. See app.live_reading's own
+# module doc for the session/pool design. Upload-mode wiring (an actual
+# "Live" book with no conversion job) and the Android player are later
+# phases -- these routes work against any book whose epub is on disk today,
+# converted or not.
+
+
+class LiveReadingStartBody(BaseModel):
+    #: The epub-internal resource path/filename of the chapter to read,
+    #: e.g. "OEBPS/xhtml/chapter1.xhtml" -- resolved by bare filename, not
+    #: numeric position (see live_reading._extract_sentences's own doc).
+    resource_href: str
+    from_sentence_index: int = 0
+    #: 0..1, "how far into this resource" -- overrides from_sentence_index
+    #: when given and anchor_text finds nothing (see live_reading.start's
+    #: own doc). Android only knows a proportion, since its own text
+    #: extraction does not exactly match this server's.
+    from_fraction: float | None = None
+    #: A window of text (Android's own epub extraction) centered on the
+    #: actual tap point -- tried before from_fraction, an exact match
+    #: immune to the two extractions counting sentences differently.
+    anchor_text: str | None = None
+    #: The tap's own raw offset within anchor_text -- not generally its
+    #: midpoint, since the window is clamped at either edge of the
+    #: resource's own text (see live_reading._resolve_anchor's own doc).
+    anchor_offset: int | None = None
+    voice: str
+
+
+class LiveReadingAdvanceBody(BaseModel):
+    now_at_sentence_index: int
+
+
+@app.post('/api/books/{book_id}/live/start')
+def live_reading_start(book_id: str, body: LiveReadingStartBody, user: dict = Depends(require_user)):
+    get_job(book_id, user)  # 404s on an unknown or invisible id
+    epub_path = store().epub_path(book_id)
+    if not epub_path.is_file():
+        raise HTTPException(status_code=410, detail='epub is no longer on disk')
+    # Added to trace two real, reported bugs with no visible server-side
+    # error: live/offline mode switching "doesn't seem to work," and
+    # picking a new live voice not actually changing it. This is the one
+    # place that can confirm whether the client ever sent the new voice at
+    # all, and what the pool actually did with the request.
+    live_reading_log.info(
+        'live/start book_id=%s voice=%s resource_href=%s from_sentence_index=%s from_fraction=%s '
+        'anchor_text=%s anchor_offset=%s',
+        book_id, body.voice, body.resource_href, body.from_sentence_index, body.from_fraction,
+        'yes' if body.anchor_text else None, body.anchor_offset,
+    )
+    try:
+        session_id, resolved_index = live_reading.start(
+            book_id, epub_path, body.resource_href, body.from_sentence_index, body.voice,
+            from_fraction=body.from_fraction, anchor_text=body.anchor_text, anchor_offset=body.anchor_offset,
+        )
+    except live_reading.Busy:
+        live_reading_log.warning('live/start book_id=%s voice=%s -- pool busy', book_id, body.voice)
+        raise HTTPException(status_code=503, detail='reading live is busy right now -- try again shortly')
+    except live_reading.UnknownChapter as e:
+        live_reading_log.warning('live/start book_id=%s voice=%s -- unknown chapter: %s', book_id, body.voice, e)
+        raise HTTPException(status_code=400, detail=str(e))
+    live_reading_log.info(
+        'live/start book_id=%s voice=%s -- session=%s resolved_from_sentence_index=%s',
+        book_id, body.voice, session_id, resolved_index,
+    )
+    return {'session_id': session_id, 'from_sentence_index': resolved_index}
+
+
+@app.post('/api/books/{book_id}/live/{session_id}/advance')
+def live_reading_advance(book_id: str, session_id: str, body: LiveReadingAdvanceBody, user: dict = Depends(require_user)):
+    get_job(book_id, user)
+    result = live_reading.advance(session_id, body.now_at_sentence_index)
+    if result is None:
+        raise HTTPException(status_code=404, detail='unknown or expired live session')
+    return result
+
+
+@app.get('/api/books/{book_id}/live/{session_id}/status')
+def live_reading_status(book_id: str, session_id: str, user: dict = Depends(require_user)):
+    get_job(book_id, user)
+    result = live_reading.status(session_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail='unknown or expired live session')
+    return result
+
+
+@app.get('/api/books/{book_id}/live/{session_id}/chunk/{index}')
+def live_reading_chunk(book_id: str, session_id: str, index: int, user: dict = Depends(require_user)):
+    get_job(book_id, user)
+    audio = live_reading.chunk_audio(session_id, index)
+    if audio is None:
+        raise HTTPException(status_code=404, detail='chunk not found')
+    return Response(content=audio, media_type='audio/wav')
+
+
+@app.post('/api/books/{book_id}/live/{session_id}/stop')
+def live_reading_stop(book_id: str, session_id: str, user: dict = Depends(require_user)):
+    get_job(book_id, user)
+    live_reading.stop(session_id)
+    return {'stopped': True}
 
 
 # -- app diagnostics --------------------------------------------------------
@@ -575,6 +766,72 @@ def _prune_crashes(directory: Path) -> None:
     """Keep the newest MAX_CRASH_FILES; a crash loop must not fill the disk."""
     files = sorted(directory.glob('crash-*.txt'), reverse=True)
     for stale in files[MAX_CRASH_FILES:]:
+        stale.unlink(missing_ok=True)
+
+
+feedback_log = logging.getLogger('reedd.feedback')
+
+MAX_FEEDBACK_BYTES = 256 * 1024
+MAX_FEEDBACK_FILES = 200
+FEEDBACK_TYPES = {'bug', 'feature', 'other'}
+
+
+@app.post('/api/feedback', status_code=202, dependencies=[Depends(require_user)])
+async def submit_feedback(request: Request, feedback_type: str = 'other'):
+    """Accept a bug report or feature request as plain text from the app --
+    the same shape as `report_crash` above, deliberately: this is the same
+    kind of low-volume, admin-reads-it-directly data, just submitted on
+    purpose rather than left behind by a crash. The app builds the whole
+    formatted body itself (the reader's own message, which book if any,
+    the `Breadcrumbs` trail) and posts it verbatim, same as `CrashReporter`
+    already does for crashes.
+
+    `feedback_type` names the file (see `submit_feedback`'s own filename
+    below) so an admin can `ls`/grep by type without opening anything --
+    an unrecognized value falls back to "other" rather than rejecting the
+    submission over it, same "never lose the report" stance `report_crash`
+    already takes with a body that fails to decode.
+    """
+    body = await request.body()
+    if not body:
+        raise HTTPException(status_code=400, detail='empty feedback')
+    text = body[:MAX_FEEDBACK_BYTES].decode('utf-8', errors='replace')
+    kind = feedback_type if feedback_type in FEEDBACK_TYPES else 'other'
+
+    settings = get_settings()
+    settings.feedback_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%f')
+    path = settings.feedback_dir / f'feedback-{kind}-{stamp}.txt'
+    path.write_text(text, encoding='utf-8')
+
+    first_line = next((ln for ln in text.splitlines() if ln.strip()), '(no detail)')
+    feedback_log.error('feedback reported (%s): %s', path.name, first_line)
+
+    _prune_feedback(settings.feedback_dir)
+    return {'stored': path.name, 'bytes': len(text)}
+
+
+@app.get('/api/admin/feedback', response_class=PlainTextResponse,
+         dependencies=[Depends(require_admin)])
+def list_feedback(limit: int = 20):
+    """The most recent feedback submissions, newest first, as one plain-text
+    blob -- admin-only, unlike crash listing: this is meant for triage, not
+    general diagnostics."""
+    settings = get_settings()
+    if not settings.feedback_dir.is_dir():
+        return 'no feedback yet'
+    files = sorted(settings.feedback_dir.glob('feedback-*.txt'), reverse=True)[:max(1, min(limit, 100))]
+    if not files:
+        return 'no feedback yet'
+    return '\n\n'.join(
+        f'===== {f.name} =====\n{f.read_text(encoding="utf-8", errors="replace")}' for f in files
+    )
+
+
+def _prune_feedback(directory: Path) -> None:
+    """Keep the newest MAX_FEEDBACK_FILES; a submission loop must not fill the disk."""
+    files = sorted(directory.glob('feedback-*.txt'), reverse=True)
+    for stale in files[MAX_FEEDBACK_FILES:]:
         stale.unlink(missing_ok=True)
 
 
@@ -736,3 +993,341 @@ def push_apk():
     Path(settings.apk_path).parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, settings.apk_path)
     return {'pushed': _apk_info(settings.apk_path)}
+
+
+# -- local diagnostics dashboard ---------------------------------------------
+#
+# Not the Android app's own admin API: this is a plain page meant to be typed
+# into a browser directly (phone, Chromebook) once on the Tailscale network,
+# so it deliberately carries none of the app's own Bearer-token auth -- a
+# browser navigating here has no way to attach one. Tailscale's own network
+# boundary is the only access control, same trust model already accepted for
+# Flower and Netdata themselves, both left at their own unauthenticated
+# defaults for the same reason.
+
+FLOWER_PORT = 5555
+NETDATA_PORT = 19999
+
+
+def _file_bytes(path: Path) -> int | None:
+    return path.stat().st_size if path.is_file() else None
+
+
+def _job_storage_info(job: dict) -> dict:
+    """One row for the dashboard's storage table -- real, on-disk sizes, not
+    just whatever a job's manifest happens to cache. The epub's own size is
+    never one of the fields job.json tracks (unlike the audiobook/sync/cover,
+    which _describe() writes there on success), so it's stat'd fresh here.
+    """
+    job_id = job['job_id']
+    job_dir = store().job_dir(job_id)
+    epub_bytes = _file_bytes(job_dir / job['filename']) if job.get('filename') else None
+    audiobook = job.get('audiobook') or {}
+    sync = job.get('sync') or {}
+    cover = job.get('cover') or {}
+    sizes = (epub_bytes, audiobook.get('bytes'), sync.get('bytes'), cover.get('bytes'))
+    return {
+        'job_id': job_id,
+        'title': job.get('title') or job['filename'],
+        'author': job.get('author'),
+        'status': job['status'],
+        'epub_bytes': epub_bytes,
+        'audiobook_bytes': audiobook.get('bytes'),
+        'sync_bytes': sync.get('bytes'),
+        'cover_bytes': cover.get('bytes'),
+        'total_bytes': sum(b for b in sizes if b),
+    }
+
+
+@app.get('/admin/dashboard/storage')
+def dashboard_storage():
+    jobs = store().list(limit=10_000)
+    rows = [_job_storage_info(j) for j in jobs]
+    return {'jobs': rows, 'total_bytes': sum(r['total_bytes'] for r in rows)}
+
+
+@app.get('/admin/dashboard', response_class=HTMLResponse)
+def dashboard_page():
+    return _DASHBOARD_HTML
+
+
+class LiveTtsStartBody(BaseModel):
+    text: str
+    voice: str
+    device: str = 'auto'  # 'auto' (GPU if visible) or 'cpu' (forced)
+
+
+@app.post('/admin/live-tts/start')
+def live_tts_start(body: LiveTtsStartBody):
+    """Kicks off the live-TTS experiment (see app.live_tts_experiment) and
+    returns a session id immediately; the dashboard polls
+    /admin/live-tts/status/{id} for chunks as they're synthesized.
+
+    Unauthenticated like the rest of this dashboard section -- triggered
+    from a plain browser page with no way to attach a Bearer token; the
+    Tailscale network boundary is the access control (see this section's
+    own header comment).
+    """
+    if not body.text.strip():
+        raise HTTPException(status_code=400, detail='text is empty')
+    if body.device not in ('auto', 'cpu'):
+        raise HTTPException(status_code=400, detail="device must be 'auto' or 'cpu'")
+    return {'session_id': live_tts_experiment.start(body.text, body.voice, body.device)}
+
+
+@app.get('/admin/live-tts/status/{session_id}')
+def live_tts_status(session_id: str):
+    result = live_tts_experiment.status(session_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail='unknown session')
+    return result
+
+
+@app.get('/admin/live-tts/chunk/{session_id}/{index}')
+def live_tts_chunk(session_id: str, index: int):
+    audio = live_tts_experiment.chunk_audio(session_id, index)
+    if audio is None:
+        raise HTTPException(status_code=404, detail='chunk not found')
+    return Response(content=audio, media_type='audio/wav')
+
+
+_DASHBOARD_HTML = f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>reed-d-book diagnostics</title>
+<style>
+  :root {{
+    --bg: #14161a; --surface: #1c1f25; --border: #2b2f37;
+    --ink: #e7e9ec; --ink-soft: #9aa1ab; --accent: #5b9df5;
+  }}
+  * {{ box-sizing: border-box; }}
+  body {{
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }}
+  header {{
+    padding: 14px 16px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  }}
+  header h1 {{ font-size: 1.05rem; margin: 0; font-weight: 600; }}
+  nav {{ display: flex; gap: 6px; margin-left: auto; }}
+  nav button {{
+    background: none; border: 1px solid var(--border); color: var(--ink-soft);
+    padding: 6px 14px; border-radius: 999px; font-size: 0.85rem; cursor: pointer;
+  }}
+  nav button.active {{ background: var(--accent); border-color: var(--accent); color: #08111f; font-weight: 600; }}
+  main {{ height: calc(100vh - 57px); }}
+  section {{ display: none; height: 100%; }}
+  section.active {{ display: block; }}
+  iframe {{ width: 100%; height: 100%; border: 0; }}
+  #storage {{ padding: 16px; overflow-y: auto; }}
+  table {{ width: 100%; border-collapse: collapse; font-size: 0.9rem; }}
+  th, td {{ text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }}
+  th {{ color: var(--ink-soft); font-weight: 600; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em; }}
+  td.num {{ text-align: right; font-variant-numeric: tabular-nums; }}
+  th.num {{ text-align: right; }}
+  .status {{ font-size: 0.78rem; padding: 2px 8px; border-radius: 999px; background: var(--surface); border: 1px solid var(--border); }}
+  .status.done {{ color: #6fce8f; }}
+  .status.running {{ color: var(--accent); }}
+  .status.error {{ color: #f27272; }}
+  .total-row td {{ font-weight: 600; border-top: 2px solid var(--border); border-bottom: none; }}
+  .loading, .empty {{ color: var(--ink-soft); padding: 24px 0; }}
+  #livetts {{ padding: 16px; overflow-y: auto; }}
+  #livetts textarea {{
+    width: 100%; background: var(--surface); color: var(--ink); border: 1px solid var(--border);
+    border-radius: 8px; padding: 10px; font: inherit; resize: vertical;
+  }}
+  .livetts-row {{ display: flex; align-items: center; gap: 10px; margin-top: 10px; }}
+  .livetts-row select, .livetts-row button {{
+    background: var(--surface); color: var(--ink); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 12px; font: inherit;
+  }}
+  .livetts-row button {{ background: var(--accent); color: #08111f; font-weight: 600; border-color: var(--accent); cursor: pointer; }}
+  .livetts-row button:disabled {{ opacity: 0.5; cursor: default; }}
+  #livetts-state {{ color: var(--ink-soft); font-size: 0.85rem; }}
+  #livetts table {{ margin-top: 16px; }}
+</style>
+</head>
+<body>
+<header>
+  <h1>reed-d-book diagnostics</h1>
+  <nav>
+    <button data-tab="storage" class="active">Storage</button>
+    <button data-tab="queue">Queue</button>
+    <button data-tab="system">System</button>
+    <button data-tab="livetts">Live TTS</button>
+  </nav>
+</header>
+<main>
+  <section id="storage" class="active">
+    <div id="storage-content" class="loading">Loading…</div>
+  </section>
+  <section id="queue"><iframe id="flower-frame"></iframe></section>
+  <section id="system"><iframe id="netdata-frame"></iframe></section>
+  <section id="livetts">
+    <textarea id="livetts-text" rows="6">The old house at the end of the lane had been empty for years, or so everyone in town believed. Sarah had heard the stories, of course; everyone had. But standing at the rusted gate on a gray October afternoon, she felt none of the dread she'd expected. Instead, there was only a quiet curiosity, the kind that pulls a person forward one step at a time.</textarea>
+    <div class="livetts-row">
+      <select id="livetts-voice"><option>loading voices…</option></select>
+      <select id="livetts-device">
+        <option value="auto">GPU (if available)</option>
+        <option value="cpu">CPU (forced)</option>
+      </select>
+      <button id="livetts-start">Start</button>
+      <span id="livetts-state"></span>
+    </div>
+    <audio id="livetts-audio"></audio>
+    <table>
+      <thead><tr>
+        <th class="num">#</th><th class="num">Chars</th><th class="num">Duration</th>
+        <th class="num">Ready at</th><th class="num">Lead</th>
+      </tr></thead>
+      <tbody id="livetts-rows"></tbody>
+    </table>
+  </section>
+</main>
+<script>
+  const host = location.hostname;
+  document.getElementById('flower-frame').src = `http://${{host}}:{FLOWER_PORT}/`;
+  document.getElementById('netdata-frame').src = `http://${{host}}:{NETDATA_PORT}/`;
+
+  for (const btn of document.querySelectorAll('nav button')) {{
+    btn.addEventListener('click', () => {{
+      for (const b of document.querySelectorAll('nav button')) b.classList.remove('active');
+      for (const s of document.querySelectorAll('main section')) s.classList.remove('active');
+      btn.classList.add('active');
+      document.getElementById(btn.dataset.tab).classList.add('active');
+    }});
+  }}
+
+  function fmtBytes(n) {{
+    if (n === null || n === undefined) return '—';
+    const units = ['B', 'KB', 'MB', 'GB'];
+    let i = 0;
+    while (n >= 1024 && i < units.length - 1) {{ n /= 1024; i++; }}
+    return `${{n.toFixed(i === 0 ? 0 : 1)}} ${{units[i]}}`;
+  }}
+
+  fetch('/admin/dashboard/storage')
+    .then(r => r.json())
+    .then(data => {{
+      const el = document.getElementById('storage-content');
+      if (!data.jobs.length) {{
+        el.innerHTML = '<div class="empty">No jobs yet.</div>';
+        return;
+      }}
+      const rows = data.jobs.map(j => `
+        <tr>
+          <td>${{j.title}}${{j.author ? ` <span style="color:var(--ink-soft)">— ${{j.author}}</span>` : ''}}</td>
+          <td><span class="status ${{j.status}}">${{j.status}}</span></td>
+          <td class="num">${{fmtBytes(j.epub_bytes)}}</td>
+          <td class="num">${{fmtBytes(j.audiobook_bytes)}}</td>
+          <td class="num">${{fmtBytes(j.sync_bytes)}}</td>
+          <td class="num">${{fmtBytes(j.total_bytes)}}</td>
+        </tr>`).join('');
+      el.innerHTML = `
+        <table>
+          <thead><tr>
+            <th>Book</th><th>Status</th><th class="num">Epub</th>
+            <th class="num">Audiobook</th><th class="num">Sync</th><th class="num">Total</th>
+          </tr></thead>
+          <tbody>${{rows}}
+            <tr class="total-row">
+              <td colspan="5">${{data.jobs.length}} jobs</td>
+              <td class="num">${{fmtBytes(data.total_bytes)}}</td>
+            </tr>
+          </tbody>
+        </table>`;
+    }})
+    .catch(() => {{
+      document.getElementById('storage-content').innerHTML =
+        '<div class="empty">Could not load job storage data.</div>';
+    }});
+
+  // -- Live TTS experiment -----------------------------------------------
+  // Whether Pocket TTS can stay ahead of playback synthesizing sentence by
+  // sentence, instead of converting a whole book upfront: Start kicks off
+  // /admin/live-tts/start, then polls /admin/live-tts/status for chunks as
+  // they're synthesized and queues each one to play in order as soon as it
+  // exists -- "Lead" is how far synthesis was ahead (positive) or behind
+  // (negative) of where continuous playback, started at t=0, would have
+  // already reached by the time that chunk was ready.
+  (function () {{
+    const audio = document.getElementById('livetts-audio');
+    const startBtn = document.getElementById('livetts-start');
+    const stateEl = document.getElementById('livetts-state');
+    const rowsEl = document.getElementById('livetts-rows');
+    let sessionId = null, pollTimer = null, seenChunks = 0, cumulativeDuration = 0;
+    let audioQueue = [], isPlaying = false;
+
+    fetch('/api/voices').then(r => r.json()).then(data => {{
+      const sel = document.getElementById('livetts-voice');
+      sel.innerHTML = data.voices.map(v =>
+        `<option value="${{v}}" ${{v === data.default ? 'selected' : ''}}>${{v}}</option>`).join('');
+    }}).catch(() => {{}});
+
+    function playNext() {{
+      if (isPlaying || audioQueue.length === 0) return;
+      isPlaying = true;
+      audio.src = `/admin/live-tts/chunk/${{sessionId}}/${{audioQueue.shift()}}`;
+      audio.play().catch(() => {{ isPlaying = false; }});
+    }}
+    audio.addEventListener('ended', () => {{ isPlaying = false; playNext(); }});
+
+    function poll() {{
+      fetch(`/admin/live-tts/status/${{sessionId}}`).then(r => r.json()).then(data => {{
+        for (let i = seenChunks; i < data.chunks.length; i++) {{
+          const c = data.chunks[i];
+          const lead = cumulativeDuration - c.ready_at_s;
+          const row = document.createElement('tr');
+          row.innerHTML = `<td class="num">${{c.index + 1}}</td><td class="num">${{c.chars}}</td>` +
+            `<td class="num">${{c.duration_s.toFixed(2)}}s</td><td class="num">${{c.ready_at_s.toFixed(2)}}s</td>` +
+            `<td class="num" style="color:${{lead >= 0 ? '#6fce8f' : '#f27272'}}">` +
+            `${{lead >= 0 ? '+' : ''}}${{lead.toFixed(2)}}s</td>`;
+          rowsEl.appendChild(row);
+          cumulativeDuration += c.duration_s;
+          audioQueue.push(c.index);
+        }}
+        seenChunks = data.chunks.length;
+        playNext();
+        const label = data.device === 'cpu' ? 'CPU' : 'GPU (auto)';
+        if (data.status !== 'running') {{
+          stateEl.textContent = data.status === 'error' ? `error: ${{data.error}}` : `done (${{label}})`;
+          clearInterval(pollTimer);
+          startBtn.disabled = false;
+        }} else {{
+          stateEl.textContent = `synthesizing on ${{label}}…`;
+        }}
+      }});
+    }}
+
+    startBtn.addEventListener('click', () => {{
+      const text = document.getElementById('livetts-text').value;
+      const voice = document.getElementById('livetts-voice').value;
+      const device = document.getElementById('livetts-device').value;
+      if (!text.trim()) return;
+      startBtn.disabled = true;
+      stateEl.textContent = 'starting…';
+      rowsEl.innerHTML = '';
+      seenChunks = 0;
+      cumulativeDuration = 0;
+      audioQueue = [];
+      isPlaying = false;
+      audio.pause();
+      clearInterval(pollTimer);
+      fetch('/admin/live-tts/start', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{text, voice, device}}),
+      }}).then(r => r.json()).then(data => {{
+        sessionId = data.session_id;
+        stateEl.textContent = 'synthesizing…';
+        pollTimer = setInterval(poll, 400);
+      }});
+    }});
+  }})();
+</script>
+</body>
+</html>
+"""

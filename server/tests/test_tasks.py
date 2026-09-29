@@ -160,16 +160,19 @@ class ConversionTest(TaskTestCase):
         self.assertEqual(manifest['cover']['bytes'], len(b'fetched bytes'))
         self.assertEqual((self.store.output_dir(job_id) / 'cover').read_bytes(), b'fetched bytes')
 
-    def test_a_lookup_miss_leaves_the_job_done_with_no_cover_at_all(self):
+    def test_a_lookup_miss_falls_back_to_a_generated_placeholder(self):
         job_id = self.make_job()
 
-        with mock.patch('app.tasks.fetch_cover', return_value=None):
+        with mock.patch('app.tasks.fetch_cover', return_value=None), \
+                mock.patch('app.tasks.generate_placeholder_cover', return_value=b'generated png') as generate:
             result = self.run_task(job_id)
+            generate.assert_called_once()
 
         self.assertTrue(result.successful(), result.traceback)
         manifest = self.store.read(job_id)
         self.assertEqual(manifest['status'], 'done')
-        self.assertIsNone(manifest['cover'])
+        self.assertEqual(manifest['cover']['bytes'], len(b'generated png'))
+        self.assertEqual((self.store.output_dir(job_id) / 'cover').read_bytes(), b'generated png')
 
     def test_repeated_percentages_do_not_rewrite_the_manifest(self):
         # CORE_PROGRESS fires per sentence; a novel would otherwise hammer the disk.
@@ -214,9 +217,14 @@ class ConversionTest(TaskTestCase):
 
     def test_intermediate_wavs_are_deleted_but_deliverables_are_kept(self):
         job_id = self.make_job()
-        self.run_task(job_id)
+        # A generated placeholder cover (cover_generator) always succeeds once
+        # Open Library (mocked out here, no real network in tests) has
+        # nothing -- itself now one of the deliverables this test checks are
+        # kept, not an intermediate.
+        with mock.patch('app.tasks.fetch_cover', return_value=None):
+            self.run_task(job_id)
         left = sorted(p.name for p in self.store.output_dir(job_id).iterdir())
-        self.assertEqual(left, ['Book_One.json', 'Book_One.m4b'])
+        self.assertEqual(left, ['Book_One.json', 'Book_One.m4b', 'cover'])
 
     def test_audiblez_output_is_captured_per_job(self):
         job_id = self.make_job()
