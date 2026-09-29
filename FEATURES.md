@@ -87,7 +87,7 @@ once the book is on the device.
 
 - EPUB rendering via Readium's `EpubNavigatorFragment`, hosted inside the
   app's Compose UI.
-- Paginated or continuous-scroll reading, adjustable text size, a table of
+- Paginated reading, adjustable text size, a table of
   contents, and reading position saved automatically per book.
 - Appearance controls including a **Paper** theme — a warm e-ink-style
   grey page with near-black text, which also switches off the publisher's

@@ -75,7 +75,6 @@ data class ServerSettings(
 data class ReaderSettings(
     val fontSize: Double = 0.75,
     val theme: String? = PAPER,
-    val scroll: Boolean = false,
 ) {
     companion object {
         const val MIN_FONT_SIZE = 0.5
@@ -184,7 +183,6 @@ class SettingsStore(context: Context, scope: CoroutineScope) {
                 SYSTEM_THEME_SENTINEL -> null
                 else -> stored
             },
-            scroll = prefs[KEY_READER_SCROLL] ?: false,
         )
     }
 
@@ -196,7 +194,8 @@ class SettingsStore(context: Context, scope: CoroutineScope) {
             // "the user picked System", not fall through to the app default
             // meant only for an install that has never saved a choice at all.
             prefs[KEY_READER_THEME] = settings.theme ?: SYSTEM_THEME_SENTINEL
-            prefs[KEY_READER_SCROLL] = settings.scroll
+            // Continuous-scroll mode was removed; clear the old preference.
+            prefs.remove(KEY_READER_SCROLL)
         }
     }
 

@@ -250,7 +250,7 @@ offline book, `LiveChunkSource.startFromFraction` for a live one).
 | **Library** | every book with a derived status badge: on device, uploading, queued, converting *n*% + ETA, downloading, ready, failed, lost; a book's badge becomes "Playing"/"Paused" while it is the one loaded in the player, and a mini-player bar at the bottom (play/pause, tap to reopen) is shown whenever anything is |
 | **Import** | SAF picker, then voice (from `GET /api/voices`) and speed, validated against the server's own 0.5–2.0 range |
 | **Book detail** | progress, the server's error text, the audiblez log via `GET /api/jobs/{id}/log`, and cancel / resend / resume-download / delete |
-| **Reader** | Readium's `EpubNavigatorFragment` hosted in Compose; paginated or continuous scroll, text size, theme, table of contents, position saved to Room. For a converted book: a transport bar with play/pause, previous/next **sentence**, speed, a follow-the-audio toggle and the highlight-timing nudge |
+| **Reader** | Readium's `EpubNavigatorFragment` hosted in Compose; paginated (continuous scroll was removed), text size, theme, table of contents, position saved to Room. For a converted book: a transport bar with play/pause, previous/next **sentence**, speed, a follow-the-audio toggle and the highlight-timing nudge |
 | **Settings** | server address and token with a `Test connection` that hits `/api/health` (the one endpoint that never needs the token, so a bad address is distinguishable from a bad token), plus storage use |
 
 ## Storage

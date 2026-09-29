@@ -386,7 +386,8 @@ class ReaderViewModel(
         val paper = settings.theme == ReaderSettings.PAPER
         return EpubPreferences(
             fontSize = settings.fontSize,
-            scroll = settings.scroll,
+            // Always paginated: continuous-scroll mode was removed.
+            scroll = false,
             // Left at Readium's own default (a 1.0 multiplier on the fixed pageGutter
             // set in ReaderScreen's RsProperties) -- no longer a user preference.
             theme = when {
@@ -406,7 +407,7 @@ class ReaderViewModel(
         val after = transform(before)
         if (after != before) {
             Breadcrumbs.leave(
-                "reader settings changed: scroll ${before.scroll}->${after.scroll} " +
+                "reader settings changed: " +
                     "fontSize ${before.fontSize}->${after.fontSize} theme ${before.theme}->${after.theme}",
             )
         }

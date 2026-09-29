@@ -122,9 +122,6 @@ private const val FRAGMENT_LOOKUP_DELAY_MS = 100L
  */
 private val PAGE_INDICATOR_RESERVED_HEIGHT = 24.dp
 
-/** How often continuous scroll checks whether it needs to catch up. See [ScrollFollower]. */
-private const val SCROLL_FOLLOW_CHECK_INTERVAL_MS = 400L
-
 /**
  * How long after the last drag/scroll signal to wait before deciding
  * whether it actually disengaged follow -- see the effect that uses this
@@ -1348,18 +1345,6 @@ private fun EpubNavigator(
 
     // Move the page to the current sentence when following. A one-shot event, not
     // derived state: replaying it would drag the page back under the reader.
-    //
-    // In continuous scroll this is skipped *except* when the sentence has moved
-    // into a new chapter. Scroll mode used to make this same jump on every
-    // sentence, which is what made it distracting -- see ScrollFollower for the
-    // effect that replaces it for in-chapter movement. But `go()` is not just a
-    // scroll position: crossing a chapter boundary means the target locator's
-    // href is a different resource than what is currently loaded, and only
-    // `go()` (not ScrollFollower, which can only scroll within whatever WebView
-    // is already on screen) knows how to page the underlying resource pager
-    // there. Skipping it unconditionally in scroll mode left the pager on the
-    // old chapter forever once playback reached its end -- audio kept going
-    // with nothing on screen tracking it.
     LaunchedEffect(navigator, navigateTo, hasSeenInitialPageChange) {
         val fragment = navigator ?: return@LaunchedEffect
         // Readium's pager only applies a locator to a resource whose fragment
@@ -1375,25 +1360,11 @@ private fun EpubNavigator(
         val target = navigateTo ?: return@LaunchedEffect
         val chunk = readAlongViewModel.chunkIndex().chunkAtIndex(target)
         val locator = chunk?.let { ReadAlongLocators.locator(state.publication, it) }
-        val chapterChanged = locator != null && locator.href != fragment.currentLocator.value.href
-        if (locator != null && (!settings.scroll || chapterChanged)) {
+        if (locator != null) {
             appNavigationUntilNs = System.nanoTime() + APP_NAVIGATION_SUPPRESS_WINDOW_NS
             fragment.go(locator, animated = false)
         }
         readAlongViewModel.onNavigationHandled(target)
-    }
-
-    // Continuous scroll's replacement for the jump above: see ScrollFollower for
-    // why. Polls rather than reacting to `navigateTo`, since what matters is the
-    // sentence's actual on-screen position, which drifts continuously as the
-    // reader scrolls -- not just the moments the sentence changes.
-    LaunchedEffect(navigator, settings.scroll) {
-        val fragment = navigator ?: return@LaunchedEffect
-        if (!settings.scroll) return@LaunchedEffect
-        while (isActive) {
-            delay(SCROLL_FOLLOW_CHECK_INTERVAL_MS)
-            if (readAlong.following) ScrollFollower.scrollToTopIfPastThreshold(fragment)
-        }
     }
 }
 
@@ -1452,20 +1423,6 @@ private fun AppearanceControls(
                     label = { Text(label) },
                 )
             }
-        }
-
-        Text("Layout", style = MaterialTheme.typography.titleSmall)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            FilterChip(
-                selected = !settings.scroll,
-                onClick = { onChange { it.copy(scroll = false) } },
-                label = { Text("Pages") },
-            )
-            FilterChip(
-                selected = settings.scroll,
-                onClick = { onChange { it.copy(scroll = true) } },
-                label = { Text("Continuous scroll") },
-            )
         }
 
         if (showReadingModeToggle) {
