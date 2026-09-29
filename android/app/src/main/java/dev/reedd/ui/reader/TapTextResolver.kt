@@ -20,6 +20,40 @@ data class TappedWord(
 )
 
 /**
+ * The outcome of [TapTextResolver.highlightPassage].
+ *
+ * Split out from a plain boolean because Readium's own paginated-locator
+ * scroll (`fragment.go(locator)`, called by every caller of
+ * `highlightPassage` beforehand) can land one page off from where the
+ * passage actually is -- confirmed by reading Readium's own bundled JS
+ * (`readium-reflowable.js`): the text-quote-anchor resolution
+ * (`M(locator)`) that finds the exact DOM range is correct, but the pixel
+ * math that turns its bounding rect into a page scroll
+ * (`R(x) = x +- 1, floored to a page-width multiple`) has a boundary
+ * case for a match sitting right at a page break. `highlightPassage`
+ * already resolves the *same* exact range independently (its own text
+ * search, not Readium's), so it is well placed to notice when that range
+ * ends up off-screen and say which direction to correct in, rather than
+ * silently painting a highlight nobody can see.
+ */
+enum class HighlightResult {
+    /** Neither `before + text + after` nor bare `text` was found anywhere
+     *  in this resource at all. */
+    NOT_FOUND,
+
+    /** Found, and on the page currently shown. */
+    VISIBLE,
+
+    /** Found, but the page Readium's `go()` landed on ends *before* the
+     *  passage -- `fragment.goForward()` once is expected to fix it. */
+    OFFSCREEN_FORWARD,
+
+    /** Found, but the page Readium's `go()` landed on starts *after* the
+     *  passage -- `fragment.goBackward()` once is expected to fix it. */
+    OFFSCREEN_BACKWARD,
+}
+
+/**
  * Asks the WebView which word is under a tap, and highlights just that word.
  *
  * `caretRangeFromPoint` is a Blink API and an Android WebView is Blink, so it is
@@ -62,10 +96,11 @@ object TapTextResolver {
 
     /**
      * Paints [HIGHLIGHT_NAME] over a passage found by its stored text --
-     * for jumping to a note from [NotesSheet] and showing what was actually
-     * highlighted, not just which page it's on. No handles, no menu: this
-     * is display-only, cleared the same way a tap's highlight already is
-     * (a plain tap elsewhere, or the next word tapped).
+     * for jumping to a note from [NotesSheet] (or a search hit from
+     * [SearchSheet]) and showing what was actually highlighted, not just
+     * which page it's on. No handles, no menu: this is display-only,
+     * cleared the same way a tap's highlight already is (a plain tap
+     * elsewhere, or the next word tapped).
      *
      * Finds the passage by searching the resource's own text for `before +
      * text + after` verbatim first (the same context a tap/drag-extended
@@ -76,11 +111,21 @@ object TapTextResolver {
      * out of a single block's `textContent`, so demanding an exact context
      * match is worth relaxing rather than silently failing to highlight
      * anything.
+     *
+     * @return whether the passage was found at all, and if so, whether the page the
+     *   navigator landed on (via `fragment.go(locator)`, called by the caller before
+     *   this) actually shows it -- see [HighlightResult]'s own doc for why that can
+     *   disagree with Readium's own page choice.
      */
-    suspend fun highlightPassage(fragment: EpubNavigatorFragment, text: String, before: String, after: String, color: Color): Boolean {
+    suspend fun highlightPassage(fragment: EpubNavigatorFragment, text: String, before: String, after: String, color: Color): HighlightResult {
         val raw = runCatching { fragment.evaluateJavascript(highlightScript(text, before, after, color)) }.getOrNull()
-            ?: return false
-        return raw.trim().trim('"') == "true"
+            ?: return HighlightResult.NOT_FOUND
+        return when (raw.trim().trim('"')) {
+            "true" -> HighlightResult.VISIBLE
+            "forward" -> HighlightResult.OFFSCREEN_FORWARD
+            "backward" -> HighlightResult.OFFSCREEN_BACKWARD
+            else -> HighlightResult.NOT_FOUND
+        }
     }
 
     private fun highlightScript(text: String, before: String, after: String, color: Color): String {
@@ -142,6 +187,23 @@ object TapTextResolver {
                 // bleed one entry's color onto a later, differently-colored one.
                 style.textContent = '::highlight($HIGHLIGHT_NAME) { background-color: $colorCss; }';
                 CSS.highlights.set('$HIGHLIGHT_NAME', new Highlight(range));
+
+                // Readium's own fragment.go(locator) -- already called by
+                // every caller of this script before it runs -- can land
+                // one page off for a passage sitting right at a page break
+                // (see HighlightResult's own doc). This range is already
+                // known-correct (it is what was just painted above), so
+                // checking whether it actually landed in the current
+                // viewport, on whichever axis this reading mode uses
+                // (horizontal columns for paginated, vertical for
+                // continuous scroll -- the other axis is always trivially
+                // in-range in that mode, since content fills the full
+                // width/height of it), tells the caller which direction
+                // (if any) to nudge one page to fix it.
+                var rect = range.getBoundingClientRect();
+                var vw = window.innerWidth, vh = window.innerHeight;
+                if (rect.right <= 0 || rect.bottom <= 0) { return 'backward'; }
+                if (rect.left >= vw || rect.top >= vh) { return 'forward'; }
                 return true;
               } catch (e) {
                 return false;

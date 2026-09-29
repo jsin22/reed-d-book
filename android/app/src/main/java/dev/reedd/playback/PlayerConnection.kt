@@ -54,6 +54,15 @@ class PlayerConnection(private val context: Context) {
 
     private var controller: MediaController? = null
 
+    // Metadata for a live queue's own MediaItems (see prepareLive/appendLiveChunk) --
+    // Media3 attaches metadata per item, not once for a whole queue, so every
+    // chunk appended after prepareLive needs the same title/author/cover
+    // reapplied for the "now playing" notification to stay correct no matter
+    // which sentence happens to be current.
+    private var liveTitle: String = ""
+    private var liveAuthor: String? = null
+    private var liveCoverUri: android.net.Uri? = null
+
     private val _state = MutableStateFlow(PlayerState())
     val state: StateFlow<PlayerState> = _state.asStateFlow()
 
@@ -109,6 +118,16 @@ class PlayerConnection(private val context: Context) {
      */
     fun prepare(bookId: String, audiobook: File, title: String, author: String?, coverPath: String?, startMs: Long) {
         val controller = controller ?: return
+        // Not a safe no-op check on its own while a *live* queue for this
+        // same book could be loaded: every one of its chunks shares this
+        // exact bookId as its own MediaItem.mediaId too (see prepareLive's
+        // own doc), which would make this wrongly believe the offline file
+        // is already playing and skip loading it entirely. Confirmed live
+        // as a real bug switching a book from live back to offline
+        // mid-session: nothing happened, the live audio just kept going.
+        // Anything switching away from a live queue calls [clearQueue]
+        // first (see ReadAlongViewModel.switchToOffline), which drops the
+        // current item and makes this check safe again.
         if (controller.currentMediaItem?.mediaId == bookId) return
         controller.pause()
 
@@ -131,6 +150,85 @@ class PlayerConnection(private val context: Context) {
         _state.value = _state.value.copy(bookId = bookId, error = null)
         refresh()
     }
+
+    /**
+     * Drops whatever is currently loaded/queued, with nothing queued to
+     * replace it -- the shared first step of [prepareLive] (a fresh live
+     * queue) and, on its own, what a caller needs before [prepare] when
+     * that call's own no-op check could otherwise be fooled by a live
+     * queue's shared `bookId` (see [prepare]'s own doc).
+     */
+    fun clearQueue() {
+        val controller = controller ?: return
+        controller.pause()
+        controller.stop()
+        controller.clearMediaItems()
+    }
+
+    /**
+     * Points the player at a live-only book's queue instead of one static
+     * file -- see CPU_LIVE_READING_PLAN Phase 4. Unlike [prepare], this
+     * always resets the queue rather than no-op'ing when the same book is
+     * already loaded: an in-flight live session's `ChunkIndex`-in-progress
+     * lives only in the `ReadAlongViewModel`/`LiveChunkSource` that built
+     * it, and is lost the moment that ViewModel is (the reader was left
+     * and reopened, say) -- reusing a queue that instance no longer has
+     * any bookkeeping for would desync position tracking. A deliberate,
+     * documented simplification for this phase, not an oversight: the
+     * caller (`ReadAlongViewModel.start`) always re-synthesizes from its
+     * last saved sentence position instead, accepting a brief restart
+     * rather than a seamless handoff.
+     *
+     * Every appended chunk shares `bookId` as its own `MediaItem.mediaId`
+     * (Media3 does not require unique ids within a playlist) specifically
+     * so [clear] and [refresh]'s existing "which book is this" comparisons
+     * keep working unmodified for live queues too.
+     */
+    fun prepareLive(bookId: String, title: String, author: String?, coverPath: String?) {
+        clearQueue()
+        val controller = controller ?: return
+        liveTitle = title
+        liveAuthor = author
+        liveCoverUri = coverPath?.let { File(it).toUri() }
+        controller.prepare()
+        _state.value = _state.value.copy(bookId = bookId, error = null, positionMs = 0, durationMs = 0)
+        refresh()
+    }
+
+    /**
+     * Appends one more sentence's audio to the live queue -- gapless
+     * continuation of whatever is already playing/queued, unlike
+     * [prepare]'s single `setMediaItem`. The caller (`LiveChunkSource`) is
+     * what tracks how this queue index maps back to a sentence index and
+     * a "global" cross-chapter ms position for `ChunkIndex`; this class
+     * only ever plays what it is handed.
+     */
+    fun appendLiveChunk(bookId: String, file: File) {
+        val controller = controller ?: return
+        val item = MediaItem.Builder()
+            .setMediaId(bookId)
+            .setUri(file.toUri())
+            .setMediaMetadata(
+                MediaMetadata.Builder()
+                    .setTitle(liveTitle)
+                    .setArtist(liveAuthor)
+                    .setArtworkUri(liveCoverUri)
+                    .setIsBrowsable(false)
+                    .setIsPlayable(true)
+                    .build()
+            )
+            .build()
+        controller.addMediaItem(item)
+        refresh()
+    }
+
+    /** Which queue item is current -- always 0 for a plain [prepare]d
+     *  single-file book. [currentPositionMs] is *within* this item for a
+     *  live queue (Media3's own per-item semantics), not summed across
+     *  the whole queue; combining the two into a "global" position is
+     *  `LiveChunkSource`'s job, since it is the one tracking each item's
+     *  own duration already (needed for `ChunkIndex` regardless). */
+    fun currentMediaItemIndex(): Int = controller?.currentMediaItemIndex ?: 0
 
     fun play() = controller?.play()
 
@@ -167,6 +265,15 @@ class PlayerConnection(private val context: Context) {
 
     fun seekTo(positionMs: Long) {
         controller?.seekTo(positionMs.coerceAtLeast(0))
+        refresh()
+    }
+
+    /** Jumps to a specific live-queue item's own start -- [seekTo]'s plain
+     *  ms seek only ever addresses the *current* item (Media3's own
+     *  window-relative semantics), which cannot reach anywhere else in a
+     *  multi-item live queue. */
+    fun seekToQueueItem(index: Int) {
+        controller?.seekTo(index, 0)
         refresh()
     }
 

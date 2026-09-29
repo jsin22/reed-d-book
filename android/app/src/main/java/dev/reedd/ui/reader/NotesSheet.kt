@@ -24,10 +24,7 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
@@ -55,13 +52,20 @@ import org.readium.r2.shared.publication.Locator
 fun NotesSheet(
     viewModel: NotesViewModel,
     readAlongViewModel: ReadAlongViewModel,
+    onEdit: (NoteEntity) -> Unit,
     onDismiss: () -> Unit,
 ) {
     val notes by viewModel.notes.collectAsStateWithLifecycle()
     val labels by viewModel.labels.collectAsStateWithLifecycle()
-    var expandedId by rememberSaveable { mutableStateOf<Long?>(null) }
     val context = LocalContext.current
     val activity = context as FragmentActivity
+
+    // Same pattern as goTo below: acting on a row closes the sheet, rather
+    // than leaving it open behind the editor dialog.
+    fun edit(note: NoteEntity) {
+        onEdit(note)
+        onDismiss()
+    }
 
     fun goTo(note: NoteEntity) {
         val locator = runCatching { Locator.fromJSON(JSONObject(note.locatorJson)) }.getOrNull()
@@ -110,8 +114,7 @@ fun NotesSheet(
                     NoteRow(
                         note = note,
                         label = labels[note.type].orEmpty(),
-                        expanded = expandedId == note.id,
-                        onToggleExpand = { expandedId = if (expandedId == note.id) null else note.id },
+                        onEdit = { edit(note) },
                         onGoTo = { goTo(note) },
                         onDelete = { viewModel.deleteNote(note.id) },
                     )
@@ -129,13 +132,20 @@ fun NotesSheet(
  * label (or "Bookmark") when there is no quoted passage -- a bookmark
  * carried over from before the merge (see [dev.reedd.data.db.NoteEntity]'s
  * own doc) never had one.
+ *
+ * Tapping the row itself reopens the same editor a new note is created in
+ * ([BookmarkEditorDialog], via [onEdit]) prefilled with this note's own
+ * text and color -- explicit request: "when I click on a note it should
+ * bring up the original screen... this will allow me to update or edit."
+ * That dialog already shows the full note text in an editable field, which
+ * is also what used to make an expand/collapse toggle here worth having --
+ * removed as redundant once editing does the same job better.
  */
 @Composable
 private fun NoteRow(
     note: NoteEntity,
     label: String,
-    expanded: Boolean,
-    onToggleExpand: () -> Unit,
+    onEdit: () -> Unit,
     onGoTo: () -> Unit,
     onDelete: () -> Unit,
 ) {
@@ -148,10 +158,7 @@ private fun NoteRow(
             Box(Modifier.size(20.dp).clip(CircleShape).background(note.type.color()))
         },
         headlineContent = {
-            Text(
-                if (note.quotedText.isBlank()) headline else "“$headline”",
-                maxLines = if (expanded) Int.MAX_VALUE else 1,
-            )
+            Text(if (note.quotedText.isBlank()) headline else "“$headline”", maxLines = 1)
         },
         supportingContent = {
             Column {
@@ -162,12 +169,7 @@ private fun NoteRow(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 if (note.noteText.isNotBlank()) {
-                    Text(
-                        note.noteText,
-                        modifier = Modifier.padding(top = if (expanded) 4.dp else 0.dp),
-                        maxLines = if (expanded) Int.MAX_VALUE else 1,
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
+                    Text(note.noteText, maxLines = 1, style = MaterialTheme.typography.bodyMedium)
                 }
             }
         },
@@ -181,6 +183,6 @@ private fun NoteRow(
                 }
             }
         },
-        modifier = Modifier.fillMaxWidth().clickable(onClick = onToggleExpand),
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onEdit),
     )
 }

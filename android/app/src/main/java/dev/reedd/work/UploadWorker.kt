@@ -96,6 +96,7 @@ class UploadWorker(
                 engine = engine?.toRequestBody(TEXT),
                 title = book.title.toRequestBody(TEXT),
                 author = book.author?.toRequestBody(TEXT),
+                mode = book.uploadMode.name.lowercase().toRequestBody(TEXT),
             )
 
             container.repository.updateUploadedBytes(bookId, epub.length())

@@ -2,6 +2,8 @@ package dev.reedd.data.readium
 
 import android.content.Context
 import org.readium.r2.shared.publication.Publication
+import org.readium.r2.shared.publication.services.search.StringSearchService
+import org.readium.r2.shared.publication.services.search.searchServiceFactory
 import org.readium.r2.shared.util.asset.Asset
 import org.readium.r2.shared.util.asset.AssetRetriever
 import org.readium.r2.shared.util.http.DefaultHttpClient
@@ -37,6 +39,15 @@ class ReadiumComponents(context: Context) {
             assetRetriever = assetRetriever,
             pdfFactory = null,
         ),
+        // Every publication this app opens gets in-book search for free --
+        // readium-shared already ships a full implementation
+        // (StringSearchService), it just isn't attached by anything in the
+        // default parser chain. Not customized further (ICU vs. the naive
+        // algorithm, snippet length): the defaults are exactly what
+        // Readium's own docs point to for "just want search to work".
+        onCreatePublication = {
+            servicesBuilder.searchServiceFactory = StringSearchService.createDefaultFactory()
+        },
     )
 
     /**

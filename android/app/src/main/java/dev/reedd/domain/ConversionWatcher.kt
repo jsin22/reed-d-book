@@ -84,9 +84,23 @@ class ConversionWatcher(
             // sitting here waiting for this specific one" -- see
             // awaitingDownload() in BookDao for the other case where a download
             // resumes itself: one already started that got interrupted or failed.
-            JobStatus.DONE -> if (book.autoDownload) {
-                DownloadWorker.enqueue(context, book.id)
-                repository.clearAutoDownload(book.id)
+            JobStatus.DONE -> {
+                if (book.autoDownload) {
+                    DownloadWorker.enqueue(context, book.id)
+                    repository.clearAutoDownload(book.id)
+                }
+                // The job a deliberate "convert again with a new voice"
+                // (ConversionActions.changeVoiceAndReconvert) replaced --
+                // only deleted server-side once *this* job (the new one)
+                // is actually done, never before: deleting the old,
+                // known-good audiobook ahead of that would risk leaving
+                // nothing playable if this conversion had failed instead.
+                // Best-effort: releaseStaleJob leaves previousJobId set on
+                // any failure other than "already gone," so a later poll
+                // just tries again -- no separate retry loop needed.
+                book.previousJobId?.let { staleJobId ->
+                    runCatching { repository.releaseStaleJob(book.id, staleJobId) }
+                }
             }
             JobStatus.ERROR -> {
                 // Only on the transition, so reopening the app does not re-notify

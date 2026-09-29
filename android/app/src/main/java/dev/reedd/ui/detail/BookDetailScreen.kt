@@ -4,9 +4,12 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -27,10 +30,12 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
@@ -38,7 +43,9 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.reedd.data.db.BookEntity
 import dev.reedd.data.db.DownloadState
+import dev.reedd.data.remote.UploadMode
 import dev.reedd.ui.library.BookStage
+import dev.reedd.ui.library.VoiceDropdown
 import dev.reedd.ui.library.humanEta
 import dev.reedd.ui.library.stage
 
@@ -60,7 +67,11 @@ fun BookDetailScreen(
     val log by viewModel.log.collectAsStateWithLifecycle()
     val loadingLog by viewModel.loadingLog.collectAsStateWithLifecycle()
     val isAdmin by viewModel.isAdmin.collectAsStateWithLifecycle()
+    val voiceOptions by viewModel.voiceOptions.collectAsStateWithLifecycle()
     var confirmingPermanentDelete by remember { mutableStateOf(false) }
+    var changingVoice by remember { mutableStateOf(false) }
+    var selectedVoice by remember(changingVoice) { mutableStateOf<String?>(null) }
+    LaunchedEffect(changingVoice) { if (changingVoice) viewModel.loadVoiceOptions() }
 
     Scaffold(
         topBar = {
@@ -95,6 +106,12 @@ fun BookDetailScreen(
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (current.isPlayable) {
                     Button(onClick = { onRead(current.id) }) { Text("Read along") }
+                } else if (current.canReadLive) {
+                    // No audio pipeline yet for a live-only book (Phase 4 of
+                    // CPU_LIVE_READING_PLAN) -- this opens the plain reader,
+                    // same as "Read along" does once isPlayable, just without
+                    // claiming there is anything to play yet.
+                    Button(onClick = { onRead(current.id) }) { Text("Read") }
                 }
                 when (current.stage()) {
                     BookStage.LOCAL, BookStage.FAILED, BookStage.LOST ->
@@ -108,7 +125,7 @@ fun BookDetailScreen(
                         if (current.downloadState == DownloadState.FAILED) {
                             Button(onClick = viewModel::retryDownload) { Text("Resume download") }
                         }
-                    BookStage.READY -> Unit
+                    BookStage.READY, BookStage.LIVE_READY -> Unit
                 }
                 TextButton(
                     onClick = {
@@ -126,7 +143,10 @@ fun BookDetailScreen(
                 ) { Text(if (isAdmin) "Delete permanently from server" else "Delete from device") }
             }
 
-            Details(current)
+            Details(
+                current,
+                onChangeVoice = { changingVoice = true }.takeIf { current.canChangeOfflineVoice() },
+            )
 
             HorizontalDivider()
 
@@ -176,6 +196,51 @@ fun BookDetailScreen(
             },
             dismissButton = {
                 TextButton(onClick = { confirmingPermanentDelete = false }) { Text("Cancel") }
+            },
+        )
+    }
+
+    if (changingVoice) {
+        val current = book
+        AlertDialog(
+            onDismissRequest = { changingVoice = false },
+            title = { Text("Change voice") },
+            text = {
+                Column {
+                    Text(
+                        "The book will be converted again with the new voice. This device " +
+                            "will get the new audiobook automatically once it's ready. Other " +
+                            "devices that already downloaded this book will keep the old " +
+                            "voice until they delete and re-download it.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    when {
+                        voiceOptions.loading -> Text("Loading voices…", style = MaterialTheme.typography.bodySmall)
+                        voiceOptions.error != null -> Text(
+                            voiceOptions.error!!,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                        else -> VoiceDropdown(
+                            voices = voiceOptions.voicesFor(current?.engine ?: "pocket_tts"),
+                            currentVoice = selectedVoice ?: current?.voice,
+                            onSelect = { selectedVoice = it },
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        selectedVoice?.let { viewModel.changeVoice(it) }
+                        changingVoice = false
+                    },
+                    enabled = selectedVoice != null && selectedVoice != current?.voice,
+                ) { Text("Convert again") }
+            },
+            dismissButton = {
+                TextButton(onClick = { changingVoice = false }) { Text("Cancel") }
             },
         )
     }
@@ -253,6 +318,11 @@ private fun StatusCard(book: BookEntity) {
                     }
                 }
 
+                BookStage.LIVE_READY -> Text(
+                    "This book was uploaded as live-only, so no downloadable audiobook will ever be made for it.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+
                 else -> Unit
             }
 
@@ -283,18 +353,48 @@ private fun statusHeadline(book: BookEntity): String = when (book.stage()) {
     BookStage.AVAILABLE -> "Ready to download"
     BookStage.DOWNLOADING -> "Downloading the audiobook"
     BookStage.READY -> "Ready to read along"
+    BookStage.LIVE_READY -> "Ready to read"
     BookStage.FAILED -> "Something went wrong"
     BookStage.LOST -> "The server lost this job"
 }
 
+/**
+ * Whether "Change voice" is worth offering at all -- see
+ * [dev.reedd.data.ConversionActions.changeVoiceAndReconvert]'s own doc for
+ * the actual mechanics. [BookEntity.voice] null rules out both a book
+ * never uploaded (nothing to re-convert) and a plain `LIVE` book (no
+ * offline conversion, ever, so `uploadMode` is also checked directly --
+ * `voice` alone is not proof of that, e.g. before an upload's own response
+ * has come back). Mid-upload/mid-conversion is excluded too: there is
+ * already exactly one job in flight, and this would only confuse which
+ * one "Cancel" is cancelling.
+ */
+private fun BookEntity.canChangeOfflineVoice(): Boolean =
+    voice != null && uploadMode != UploadMode.LIVE &&
+        stage() !in setOf(BookStage.UPLOADING, BookStage.QUEUED, BookStage.CONVERTING)
+
 @Composable
-private fun Details(book: BookEntity) {
+private fun Details(book: BookEntity, onChangeVoice: (() -> Unit)? = null) {
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Row2("File", book.originalFilename)
         Row2("Size", book.sizeBytes.mb())
         book.author?.let { Row2("Author", it) }
         book.engine?.let { Row2("Engine", it) }
-        book.voice?.let { Row2("Voice", it) }
+        book.voice?.let { voice ->
+            if (onChangeVoice != null) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("Voice", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(voice, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        TextButton(onClick = onChangeVoice, contentPadding = PaddingValues(start = 8.dp)) {
+                            Text("Change", style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
+            } else {
+                Row2("Voice", voice)
+            }
+        }
         book.speed?.let { Row2("Speed", "${it}x") }
         book.jobId?.let { Row2("Job", it) }
         book.processingDuration()?.let { Row2("Processing time", it) }

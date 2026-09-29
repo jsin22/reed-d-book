@@ -40,11 +40,11 @@ class CrashLogTest {
 
     private fun log(): CrashLog {
         val api = ApiProvider(baseUrl = { server.url("/").toString() }, token = { null })
-        // Mirrors the real CrashReporter.clear(context): actually deletes
-        // the files, so a test can tell "dismiss() didn't call clear()"
-        // apart from "clear() ran but happened to leave the file alone".
+        // Mirrors the real CrashReporter.delete(file): actually deletes the
+        // file, so a test can tell "delete() didn't run" apart from "delete()
+        // ran but happened to leave the file alone".
         return CrashLog(reports = { tmpDir.listFiles()?.sortedBy { it.name } ?: emptyList() },
-            api = api, clear = { cleared++; tmpDir.listFiles()?.forEach { it.delete() } })
+            api = api, delete = { file -> cleared++; file.delete() })
     }
 
     @Before
@@ -136,5 +136,29 @@ class CrashLogTest {
 
         assertFalse("dismiss must not call clear a second time", cleared == 2)
         assertEquals(1, cleared)
+    }
+
+    /**
+     * The real, confirmed-live bug this per-file design fixes: a batch used
+     * to be all-or-nothing (one earlier `clear()` call, run only once every
+     * pending report succeeded), so a single persistently-failing report sat
+     * alongside a healthy one and blocked *both* from ever clearing --
+     * resent forever on every launch, long after the healthy one's own
+     * underlying crash was fixed and stopped recurring.
+     */
+    @Test
+    fun `one persistently-failing report does not block another from clearing`() {
+        file("crash-1-bad.txt", "the bad report")
+        file("crash-2-good.txt", "the good report")
+        server.enqueue(MockResponse.Builder().code(500).body("nope").build())
+        server.enqueue(MockResponse.Builder().code(202).body("ok").build())
+        val crashLog = log()
+
+        runStart(crashLog)
+
+        assertEquals(1, cleared)
+        assertTrue("the failing report stays for a retry", File(tmpDir, "crash-1-bad.txt").exists())
+        assertFalse("the succeeding report must not wait on the failing one",
+            File(tmpDir, "crash-2-good.txt").exists())
     }
 }

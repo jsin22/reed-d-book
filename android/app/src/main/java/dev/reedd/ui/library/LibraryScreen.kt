@@ -71,7 +71,11 @@ import java.io.File
 @Composable
 fun LibraryScreen(
     viewModel: LibraryViewModel,
-    onOpenBook: (String) -> Unit,
+    /** Open the reader -- `autoPlay` true only for the card's own Play button
+     *  (see [dev.reedd.ReaderRoute]'s own doc); every other way of reaching
+     *  the reader (the card body, Now Playing) opens to wherever the book
+     *  already is, without forcing playback to start. */
+    onOpenBook: (String, Boolean) -> Unit,
     onOpenDetail: (String) -> Unit,
     onOpenSettings: () -> Unit,
 ) {
@@ -152,7 +156,7 @@ fun LibraryScreen(
                 NowPlayingBar(
                     book = book,
                     isPlaying = playerState.isPlaying,
-                    onClick = { onOpenBook(book.id) },
+                    onClick = { onOpenBook(book.id, false) },
                     onTogglePlayPause = viewModel::togglePlayPause,
                 )
             }
@@ -180,7 +184,7 @@ fun LibraryScreen(
                             isPlaying = playerState.isPlaying,
                             showDetails = isAdmin,
                             onClick = {
-                                if (book.isPlayable) onOpenBook(book.id)
+                                if (book.isPlayable || book.canReadLive) onOpenBook(book.id, false)
                                 // A failure now retries right from the card (see
                                 // onRetryConversion/onDownload below), so a
                                 // non-admin not being able to reach Detail no
@@ -190,7 +194,8 @@ fun LibraryScreen(
                                 else if (isAdmin) onOpenDetail(book.id)
                             },
                             onLongClick = if (isAdmin) ({ onOpenDetail(book.id) }) else null,
-                            onRead = { onOpenBook(book.id) },
+                            onRead = { onOpenBook(book.id, true) },
+                            onOpen = { onOpenBook(book.id, false) },
                             onDownload = { viewModel.downloadBook(book.id) },
                             onDeleteDownloaded = { viewModel.deleteLocalContent(book.id) },
                             onRetryConversion = { viewModel.retryConversion(book.id) },
@@ -229,8 +234,8 @@ fun LibraryScreen(
                 showImport = false
                 pickedUri = null
             },
-            onConfirm = { voice, speed, engine ->
-                pickedUri?.let { viewModel.importAndUpload(it, voice, speed, engine) }
+            onConfirm = { voice, speed, engine, mode ->
+                pickedUri?.let { viewModel.importAndUpload(it, voice, speed, engine, mode) }
                 showImport = false
                 pickedUri = null
             },
@@ -358,6 +363,7 @@ private fun BookCard(
     onClick: () -> Unit,
     onLongClick: (() -> Unit)?,
     onRead: () -> Unit,
+    onOpen: () -> Unit,
     onDownload: () -> Unit,
     onDeleteDownloaded: () -> Unit,
     onRetryConversion: () -> Unit,
@@ -441,7 +447,7 @@ private fun BookCard(
                     }
                     ProgressLine(book)
                 }
-                CardAction(book, onRead = onRead, onDownload = onDownload, onRetryConversion = onRetryConversion)
+                CardAction(book, onRead = onRead, onOpen = onOpen, onDownload = onDownload, onRetryConversion = onRetryConversion)
                 if (book.isCancellable()) {
                     IconButton(onClick = onCancel) {
                         Icon(Icons.Filled.Close, contentDescription = "Cancel")
@@ -486,6 +492,7 @@ private fun BookCard(
 private fun CardAction(
     book: BookEntity,
     onRead: () -> Unit,
+    onOpen: () -> Unit,
     onDownload: () -> Unit,
     onRetryConversion: () -> Unit,
 ) {
@@ -495,6 +502,12 @@ private fun CardAction(
         }
         book.stage() == BookStage.READY -> IconButton(onClick = onRead) {
             Icon(Icons.Filled.PlayArrow, contentDescription = "Read along")
+        }
+        // onOpen, not onRead: there is no audio to play yet for a live-only
+        // book (Phase 4 of CPU_LIVE_READING_PLAN), so this opens the plain
+        // reader without claiming autoplay will start anything.
+        book.stage() == BookStage.LIVE_READY -> IconButton(onClick = onOpen) {
+            Icon(Icons.Filled.MenuBook, contentDescription = "Read")
         }
         // Checked before the generic FAILED/LOST branch below: book.stage()
         // already collapses every failure cause into BookStage.FAILED (see
@@ -580,6 +593,9 @@ private fun StageChip(book: BookEntity, nowPlaying: Boolean, isPlaying: Boolean)
             downloadEta?.let { append(" · $it") }
         } to MaterialTheme.colorScheme.primary
         BookStage.READY -> "Ready to read along" to MaterialTheme.colorScheme.primary
+        // No audiobook is ever coming for this one on its own (UploadMode.LIVE);
+        // reading it opens the plain epub -- live listening is a later phase.
+        BookStage.LIVE_READY -> "Ready to read" to MaterialTheme.colorScheme.primary
         BookStage.FAILED -> "Failed" to MaterialTheme.colorScheme.error
         BookStage.LOST -> "Job lost on server" to MaterialTheme.colorScheme.error
     }

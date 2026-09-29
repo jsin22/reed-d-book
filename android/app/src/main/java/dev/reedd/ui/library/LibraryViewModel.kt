@@ -17,6 +17,7 @@ import dev.reedd.data.remote.ApiProvider
 import dev.reedd.data.remote.EngineDto
 import dev.reedd.data.remote.JobStatus
 import dev.reedd.data.remote.ServerNotConfigured
+import dev.reedd.data.remote.UploadMode
 import dev.reedd.data.settings.LibraryViewSettings
 import dev.reedd.data.settings.ServerSettings
 import dev.reedd.data.settings.SettingsStore
@@ -274,7 +275,7 @@ class LibraryViewModel(
      * The row is inserted before the upload starts, so a book the user chose shows
      * up in the library immediately and stays there if the upload fails.
      */
-    fun importAndUpload(uri: Uri, voice: String?, speed: Double, engine: String?) {
+    fun importAndUpload(uri: Uri, voice: String?, speed: Double, engine: String?, mode: UploadMode = UploadMode.OFFLINE) {
         viewModelScope.launch {
             _importing.value = true
             try {
@@ -282,8 +283,12 @@ class LibraryViewModel(
                 // autoDownload: the user is sitting on this one right now (they
                 // just picked it and hit convert), unlike a book adopted from
                 // server sync or one a previous app run already submitted --
-                // see BookEntity.autoDownload's own doc.
-                repository.insert(book.copy(voice = voice, speed = speed, engine = engine, autoDownload = true))
+                // see BookEntity.autoDownload's own doc. Harmless for `LIVE`
+                // (no conversion ever finishes to trigger it); for
+                // `LIVE_OFFLINE` it is exactly what today's behavior already is.
+                repository.insert(
+                    book.copy(voice = voice, speed = speed, engine = engine, uploadMode = mode, autoDownload = true)
+                )
                 UploadWorker.enqueue(context, book.id)
                 PollWorker.enqueuePeriodic(context)
                 // The job exists now; do not wait out the idle period before the
@@ -438,7 +443,7 @@ class LibraryViewModel(
  * Derived rather than stored: every input is already a column, and a stored copy
  * would be one more thing to keep in step.
  */
-enum class BookStage { LOCAL, UPLOADING, QUEUED, CONVERTING, AVAILABLE, DOWNLOADING, READY, FAILED, LOST }
+enum class BookStage { LOCAL, UPLOADING, QUEUED, CONVERTING, AVAILABLE, DOWNLOADING, READY, LIVE_READY, FAILED, LOST }
 
 fun BookEntity.stage(): BookStage = when {
     isPlayable -> BookStage.READY
@@ -447,6 +452,11 @@ fun BookEntity.stage(): BookStage = when {
     jobStatus == JobStatus.ERROR -> BookStage.FAILED
     downloadState == DownloadState.FAILED -> BookStage.FAILED
     downloadState == DownloadState.RUNNING || downloadState == DownloadState.QUEUED -> BookStage.DOWNLOADING
+    // A `mode=live` job's own terminal status (see UploadMode/JobDto.mode) --
+    // never transitions to QUEUED/RUNNING/DONE, so without this branch it
+    // fell through to the plain QUEUED case below and sat there forever,
+    // looking like a conversion nothing would ever pick up.
+    jobStatus == JobStatus.LIVE_ONLY -> BookStage.LIVE_READY
     // Converted, but nobody has tapped Download yet -- distinct from DOWNLOADING
     // (a transfer actually in flight), so the card knows to offer the button.
     jobStatus == JobStatus.DONE -> BookStage.AVAILABLE

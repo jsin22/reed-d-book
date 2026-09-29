@@ -26,10 +26,18 @@ import kotlinx.coroutines.flow.asStateFlow
  * where on the page the text is.
  *
  * @property sentenceIndex the sentence this word/selection belongs to, or
- *   null when unmapped to the audio -- "Read from here" is hidden in that case.
+ *   null when unmapped to the audio.
  */
 sealed interface WordMenuTarget {
     val sentenceIndex: Int?
+    /** Where the tap/selection landed -- also what a live book's own
+     *  "Read from here" restarts synthesis at when [sentenceIndex] is null
+     *  (see [canReadFromHere]'s own doc). */
+    val resourceHref: String?
+    /** Reading progression within [resourceHref] at tap/selection time --
+     *  the same quantity a live restart needs when there is no aligned
+     *  [sentenceIndex] to use instead. */
+    val progression: Double?
     /** The word, or the selected passage -- what a note quotes, and what
      *  Definition looks up. */
     val quotedText: String
@@ -39,7 +47,23 @@ sealed interface WordMenuTarget {
      *  uses for [sentenceIndex]. */
     val canDefine: Boolean
 
-    val canReadFromHere: Boolean get() = sentenceIndex != null
+    /**
+     * Whether "Read from here" is offered at all.
+     *
+     * `sentenceIndex != null` for an offline book -- there, unmapped really
+     * does mean the text-matching alignment failed, a real (if imperfect)
+     * limitation with no fallback: the whole book was already converted
+     * once, there is nothing left to synthesize.
+     *
+     * For a live book, unmapped is the *common* case -- most of the book has
+     * simply never been visited yet -- and [resourceHref]/[progression] are
+     * always enough to start a fresh session there (see
+     * [dev.reedd.domain.LiveChunkSource.startFromFraction]), so
+     * [WordSelectionController] computes this permissively (`resourceHref
+     * != null`) instead of requiring [sentenceIndex] when it already knows
+     * the book is live.
+     */
+    val canReadFromHere: Boolean
 
     data class Tap(
         val word: String,
@@ -47,11 +71,12 @@ sealed interface WordMenuTarget {
          *  used to work) so a Notes tap can build a real [org.readium.r2.
          *  shared.publication.Locator] from it -- see [dev.reedd.domain.
          *  NoteLocators.tapLocator]. */
-        val resourceHref: String?,
+        override val resourceHref: String?,
         val blockText: String,
         val offset: Int,
-        val progression: Double?,
+        override val progression: Double?,
         override val sentenceIndex: Int?,
+        override val canReadFromHere: Boolean,
     ) : WordMenuTarget {
         override val quotedText: String get() = word
         override val canDefine: Boolean get() = true
@@ -65,9 +90,10 @@ sealed interface WordMenuTarget {
         val text: String,
         val before: String,
         val after: String,
-        val resourceHref: String,
-        val progression: Double?,
+        override val resourceHref: String,
+        override val progression: Double?,
         override val sentenceIndex: Int?,
+        override val canReadFromHere: Boolean,
     ) : WordMenuTarget {
         override val quotedText: String get() = text
         override val canDefine: Boolean get() = !text.any { it.isWhitespace() }
@@ -143,7 +169,13 @@ data class SelectionHandles(
  * tap or a drag-release needs whatever is current *then*, not whatever was
  * current when this controller was constructed.
  */
-class WordSelectionController(private val chunkIndex: () -> ChunkIndex) {
+class WordSelectionController(
+    private val chunkIndex: () -> ChunkIndex,
+    /** See [WordMenuTarget.canReadFromHere]'s own doc for why a live book
+     *  needs a more permissive check than an offline one. A supplier, not a
+     *  snapshot, for the same reason [chunkIndex] is one. */
+    private val isLive: () -> Boolean = { false },
+) {
 
     private val _tappedWord = MutableStateFlow<WordMenuTarget?>(null)
     val tappedWord: StateFlow<WordMenuTarget?> = _tappedWord.asStateFlow()
@@ -195,16 +227,18 @@ class WordSelectionController(private val chunkIndex: () -> ChunkIndex) {
         offset: Int,
         readingProgression: Double?,
     ) {
+        // readingProgression: where the reader is looking on screen, not
+        // audio playback position -- see ChunkIndex.indexOfTap for why that
+        // distinction matters.
+        val sentenceIndex = chunkIndex().indexOfTap(resourceHref, blockText, offset, readingProgression)
         _tappedWord.value = WordMenuTarget.Tap(
             word = word,
             resourceHref = resourceHref,
             blockText = blockText,
             offset = offset,
             progression = readingProgression,
-            // readingProgression: where the reader is looking on screen, not
-            // audio playback position -- see ChunkIndex.indexOfTap for why that
-            // distinction matters.
-            sentenceIndex = chunkIndex().indexOfTap(resourceHref, blockText, offset, readingProgression),
+            sentenceIndex = sentenceIndex,
+            canReadFromHere = sentenceIndex != null || (isLive() && resourceHref != null && readingProgression != null),
         )
     }
 
@@ -295,13 +329,15 @@ class WordSelectionController(private val chunkIndex: () -> ChunkIndex) {
     fun onHandleDragEnd() {
         draggingHandle = false
         val handles = _selectionHandles.value ?: return
+        val sentenceIndex = chunkIndex().indexOfSelection(handles.resourceHref, handles.text)
         _tappedWord.value = WordMenuTarget.ExtendedSelection(
             text = handles.text,
             before = handles.before,
             after = handles.after,
             resourceHref = handles.resourceHref,
             progression = handles.progression,
-            sentenceIndex = chunkIndex().indexOfSelection(handles.resourceHref, handles.text),
+            sentenceIndex = sentenceIndex,
+            canReadFromHere = sentenceIndex != null || (isLive() && handles.progression != null),
         )
     }
 

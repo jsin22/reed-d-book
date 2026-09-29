@@ -356,8 +356,13 @@ private fun JobRow(job: JobDto, onTogglePublic: (Boolean) -> Unit, onDelete: () 
     ) {
         Column(Modifier.weight(1f)) {
             Text(job.filename, style = MaterialTheme.typography.bodyMedium)
+            // Percent only means anything while a conversion is actually
+            // progressing -- a queued job hasn't started (progress is still
+            // whatever the last run left it at), and a done/errored one is
+            // already at its final state, so "status" alone says enough.
+            val statusLabel = if (job.status == "running") "${job.status} ${job.progress}%" else job.status
             Text(
-                "${job.ownerEmail ?: "unknown owner"} · ${job.status}",
+                "${job.ownerEmail ?: "unknown owner"} · $statusLabel · ${job.voice}",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

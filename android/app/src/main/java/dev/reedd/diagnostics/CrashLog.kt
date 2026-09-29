@@ -26,11 +26,21 @@ import java.io.File
  *
  * A report is only deleted once the server has accepted it, so a failed upload is
  * retried on the next launch rather than lost.
+ *
+ * Deleted **per file**, immediately after that file's own upload succeeds --
+ * not as a single all-or-nothing sweep once every pending report succeeds.
+ * Confirmed live as a real, permanent stall: one un-uploadable (or
+ * persistently-failing) report sitting alongside otherwise-healthy ones used
+ * to block every one of them from ever being cleared, since a single earlier
+ * all-or-nothing `clear()` only ran once the whole batch succeeded together --
+ * a phone that crash-looped multiple distinct ways kept re-sending *all* of
+ * them, forever, even after the underlying bugs were fixed and nothing new
+ * was crashing any more.
  */
 class CrashLog(
     private val reports: () -> List<File>,
     private val api: ApiProvider,
-    private val clear: () -> Unit,
+    private val delete: (File) -> Unit,
 ) {
     private val _lastReport = MutableStateFlow<String?>(null)
 
@@ -51,8 +61,9 @@ class CrashLog(
             _lastReport.value = runCatching { pending.last().readText() }.getOrNull()
             Log.w(TAG, "${pending.size} crash report(s) from a previous run")
 
-            val allSent = pending.all { file -> upload(file) }
-            if (allSent) runCatching { clear() }
+            for (file in pending) {
+                if (upload(file)) runCatching { delete(file) }
+            }
         }
     }
 

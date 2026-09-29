@@ -27,6 +27,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import dev.reedd.data.remote.UploadMode
 import dev.reedd.data.settings.ServerSettings
 
 /** The only engine the app offers -- see the class doc below for why. */
@@ -49,7 +50,7 @@ private const val ENGINE = "pocket_tts"
 fun ImportSheet(
     viewModel: LibraryViewModel,
     onDismiss: () -> Unit,
-    onConfirm: (voice: String?, speed: Double, engine: String?) -> Unit,
+    onConfirm: (voice: String?, speed: Double, engine: String?, mode: UploadMode) -> Unit,
 ) {
     val options by viewModel.options.collectAsStateWithLifecycle()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
@@ -77,6 +78,16 @@ fun ImportSheet(
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             Text("Convert this book", style = MaterialTheme.typography.titleLarge)
+
+            // No mode choice any more -- every upload is Live + Offline: the
+            // text (and, once the reader picks a voice, live listening) is
+            // available right away, while the real downloadable audiobook
+            // converts in the background. The reader's own settings sheet
+            // (once the book is open) is where switching between the two
+            // once both exist actually lives now, not this one-time upload
+            // choice -- see CPU_LIVE_READING_PLAN's own doc for why a
+            // three-way choice here stopped being the right shape once
+            // switching later became possible at all.
 
             when {
                 options.loading -> CircularProgressIndicator(Modifier.size(24.dp))
@@ -140,7 +151,7 @@ fun ImportSheet(
                 onClick = {
                     val chosenVoice = if (engineAvailable) voice else freeTextVoice.ifBlank { null }
                     val chosenEngine = if (engineAvailable) ENGINE else null
-                    onConfirm(chosenVoice, speed.toDouble(), chosenEngine)
+                    onConfirm(chosenVoice, speed.toDouble(), chosenEngine, UploadMode.LIVE_OFFLINE)
                 },
                 enabled = !options.loading,
                 modifier = Modifier.fillMaxWidth(),

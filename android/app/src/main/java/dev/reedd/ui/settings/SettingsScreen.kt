@@ -37,6 +37,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import dev.reedd.ui.feedback.FeedbackDialog
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -59,6 +60,7 @@ fun SettingsScreen(
 
     var baseUrl by remember { mutableStateOf("") }
     var token by remember { mutableStateOf("") }
+    var showFeedback by remember { mutableStateOf(false) }
 
     // Seed the fields once the stored settings arrive, without stamping over what
     // the user is currently typing.
@@ -304,6 +306,16 @@ fun SettingsScreen(
 
             HorizontalDivider()
 
+            Text("Feedback", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "Found a bug, or have an idea for something you'd like to see?",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlinedButton(onClick = { showFeedback = true }) { Text("Send feedback") }
+
+            HorizontalDivider()
+
             // What tells one install apart from the last one, since debug builds
             // change several times a day and versionName/versionCode do not move.
             Text(
@@ -312,5 +324,13 @@ fun SettingsScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
+    }
+
+    if (showFeedback) {
+        FeedbackDialog(
+            bookContext = null,
+            onSubmit = viewModel::submitFeedback,
+            onDismiss = { showFeedback = false },
+        )
     }
 }

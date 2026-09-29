@@ -95,4 +95,31 @@ class NotesViewModelTest {
 
         assertTrue(viewModel.notes.first { it.isEmpty() }.isEmpty())
     }
+
+    @Test
+    fun `updateNote revises the text and color of an existing note in place`() = runBlocking {
+        viewModel.saveNote(pending(), "first draft", BookmarkType.DEFAULT, spineIndex = 0)
+        val saved = viewModel.notes.first { it.isNotEmpty() }.single()
+
+        viewModel.updateNote(saved.id, "revised", BookmarkType.NEEDS_REVIEW)
+
+        val updated = viewModel.notes.first { it.singleOrNull()?.noteText == "revised" }.single()
+        assertEquals(saved.id, updated.id)
+        assertEquals(BookmarkType.NEEDS_REVIEW, updated.type)
+        // Same "remembers the chosen color" behavior saveNote already has.
+        assertEquals(BookmarkType.NEEDS_REVIEW, viewModel.lastUsedType.first { it == BookmarkType.NEEDS_REVIEW })
+    }
+
+    @Test
+    fun `startEditing and dismissEditing drive editingNote`() = runBlocking {
+        viewModel.saveNote(pending(), "a note", BookmarkType.DEFAULT, spineIndex = 0)
+        val saved = viewModel.notes.first { it.isNotEmpty() }.single()
+        assertEquals(null, viewModel.editingNote.value)
+
+        viewModel.startEditing(saved)
+        assertEquals(saved.id, viewModel.editingNote.value?.id)
+
+        viewModel.dismissEditing()
+        assertEquals(null, viewModel.editingNote.value)
+    }
 }

@@ -5,13 +5,19 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import dev.reedd.data.BookRepository
 import dev.reedd.data.db.BookEntity
+import dev.reedd.data.db.SyncDao
 import dev.reedd.data.readium.ReadiumComponents
 import dev.reedd.data.settings.ReaderSettings
 import dev.reedd.data.settings.SettingsStore
 import dev.reedd.di.AppContainer
 import dev.reedd.diagnostics.Breadcrumbs
+import dev.reedd.domain.chaptersToc
+import dev.reedd.domain.currentChapterTitle
 import dev.reedd.ui.theme.PaperPalette
+import kotlin.math.roundToInt
 import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -31,6 +37,8 @@ import org.readium.r2.shared.publication.Link
 import org.readium.r2.shared.publication.Locator
 import org.readium.r2.shared.publication.Publication
 import org.readium.r2.shared.publication.services.positions
+import org.readium.r2.shared.publication.services.search.SearchIterator
+import org.readium.r2.shared.publication.services.search.search
 import org.readium.r2.shared.util.AbsoluteUrl
 import java.io.File
 
@@ -75,6 +83,7 @@ class ReaderViewModel(
     private val repository: BookRepository,
     private val readium: ReadiumComponents,
     private val settingsStore: SettingsStore,
+    private val syncStore: SyncDao,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow<ReaderState>(ReaderState.Loading)
@@ -95,6 +104,23 @@ class ReaderViewModel(
 
     private val _pageInfo = MutableStateFlow<PageInfo?>(null)
     val pageInfo: StateFlow<PageInfo?> = _pageInfo.asStateFlow()
+
+    /** The navigator's own current locator, `locations.totalProgression`
+     *  only -- a live book's own seek bar shows this while not being
+     *  dragged (`ReadAlongBar`'s `livePageProgression`), since dragging it
+     *  only ever moves the page (`goToProgression`), never audio; the bar's
+     *  own displayed position has to come from the same place its own
+     *  seeks land, not from `ReadAlongViewModel` (which has no reference to
+     *  the navigator/Publication at all, by design). */
+    private val _currentProgression = MutableStateFlow<Double?>(null)
+    val currentProgression: StateFlow<Double?> = _currentProgression.asStateFlow()
+
+    /** The table-of-contents entry the reader is currently inside -- shown
+     *  next to the page number in the page indicator. Null wherever
+     *  [currentChapterTitle] itself would be (see its own doc): no usable
+     *  table of contents, or reading before its first entry. */
+    private val _currentChapterTitle = MutableStateFlow<String?>(null)
+    val currentChapterTitle: StateFlow<String?> = _currentChapterTitle.asStateFlow()
 
     init {
         viewModelScope.launch { open() }
@@ -131,11 +157,16 @@ class ReaderViewModel(
                 // page in line with the audio once it does.
                 val initialLocator = book.readingLocator?.toLocator()
                 Breadcrumbs.leave("reader opened: '${book.title}' (${book.id})")
+                // A book with no read-along data at all (not converted with
+                // Pocket TTS, or never finished aligning) has no chapters to
+                // fall back to either -- chaptersToc already degrades to the
+                // real (possibly broken) table of contents in that case.
+                val chapters = runCatching { syncStore.chapters(bookId) }.getOrDefault(emptyList())
                 _state.value = ReaderState.Ready(
                     publication = publication,
                     navigatorFactory = EpubNavigatorFactory(publication),
                     initialLocator = initialLocator,
-                    tableOfContents = publication.tableOfContents,
+                    tableOfContents = chaptersToc(publication, publication.tableOfContents, chapters),
                 )
             },
             onFailure = { _state.value = ReaderState.Failed(it.message ?: "could not open this epub") },
@@ -161,6 +192,19 @@ class ReaderViewModel(
                 .collect { locator ->
                     repository.updateReadingPosition(bookId, locator.toJSON().toString())
                 }
+        }
+        viewModelScope.launch {
+            fragment.currentLocator.collect { locator -> _currentProgression.value = locator.locations.totalProgression }
+        }
+        viewModelScope.launch {
+            fragment.currentLocator.collect { locator ->
+                val ready = _state.value as? ReaderState.Ready ?: return@collect
+                _currentChapterTitle.value = currentChapterTitle(
+                    readingOrder = ready.publication.readingOrder,
+                    tableOfContents = ready.tableOfContents,
+                    resourceHref = locator.href.toString(),
+                )
+            }
         }
     }
 
@@ -189,6 +233,132 @@ class ReaderViewModel(
 
     fun goTo(link: Link) {
         navigator?.go(link, animated = false)
+    }
+
+    /** "Go here" from a search result: unlike [goTo] (a [Link], from the
+     *  table of contents) this is a full [Locator] -- a search hit's own
+     *  exact spot, not just a resource's start. Not `animated = false` like
+     *  [goTo]: a search result can land far from wherever the reader
+     *  currently is, and the jump reads better as a page turn than an
+     *  instant cut -- same reasoning [NotesSheet]'s own "go to this spot"
+     *  already applies. */
+    fun goTo(locator: Locator) {
+        navigator?.go(locator, animated = true)
+    }
+
+    /** Readium's own canonical, book-wide position list -- see
+     *  [goToProgression]'s own doc. Cached per open publication: it is a
+     *  real (if lightweight -- per-resource byte length, not a render)
+     *  computation, and the seek bar can ask for it on every drag release. */
+    private var bookPositions: List<Locator>? = null
+
+    /**
+     * A live book's own seek bar: [overallFraction] (0..1) of [bookPositions]'
+     * own size picks a target locator directly -- Readium's own "total
+     * number of pages" concept (`Publication.positions()`, one entry per
+     * roughly-fixed-size chunk of the whole book, independent of screen
+     * size or font), the same thing an ebook reader's page count ordinarily
+     * means. Replaced an earlier attempt that estimated a target resource
+     * by its own text length (`dev.reedd.domain.BookProgression`) -- that
+     * measured a *different* quantity than what a reader means by "page",
+     * and produced visibly wrong jumps; this is what the reader actually
+     * asked for: take the total page count, multiply by the seek
+     * percentage, go to that page.
+     *
+     * Deliberately just moves the page -- no [dev.reedd.domain.
+     * LiveChunkSource], no server call, nothing about audio at all. Only an
+     * explicit "Read from here" tap (`ReadAlongViewModel.
+     * readFromTappedWord`) ever asks the server to synthesize something new;
+     * dragging this bar is page navigation, exactly like tapping a table of
+     * contents entry, and must stay that cheap and that safe to do freely.
+     */
+    fun goToProgression(overallFraction: Double) {
+        viewModelScope.launch {
+            val ready = _state.value as? ReaderState.Ready ?: return@launch
+            val pages = bookPositions ?: runCatching { ready.publication.positions() }.getOrNull()
+                ?.also { bookPositions = it } ?: return@launch
+            if (pages.isEmpty()) return@launch
+            val targetIndex = (overallFraction.coerceIn(0.0, 1.0) * (pages.size - 1)).roundToInt()
+                .coerceIn(0, pages.size - 1)
+            navigator?.go(pages[targetIndex], animated = false)
+        }
+    }
+
+    /** In-book full-text search. [Locator] is used directly as the result
+     *  type -- it already carries everything a results list needs (the
+     *  containing chapter's [Locator.title], [Locator.Text.before]/
+     *  [Locator.Text.highlight]/[Locator.Text.after] for a snippet, and
+     *  [Locator.locations]' href/progression for both [goTo] and
+     *  [ReadAlongViewModel.playFromSearchResult]) -- a wrapper type would
+     *  just be repeating fields Readium already named well. */
+    sealed interface SearchUiState {
+        data object Idle : SearchUiState
+        data object Searching : SearchUiState
+        data class Results(val hits: List<Locator>, val truncated: Boolean) : SearchUiState
+        data class Failed(val message: String) : SearchUiState
+    }
+
+    private val _searchState = MutableStateFlow<SearchUiState>(SearchUiState.Idle)
+    val searchState: StateFlow<SearchUiState> = _searchState.asStateFlow()
+
+    private var searchJob: Job? = null
+
+    /**
+     * Debounced so typing a whole query does not re-search on every
+     * keystroke; each call cancels whatever search is still running for the
+     * previous one, since only the latest query's results are ever worth
+     * finishing.
+     *
+     * Drains readium-shared's own [SearchIterator] in a loop rather than
+     * exposing paging in this app's own UI: its default
+     * [dev.reedd.data.readium.ReadiumComponents]-configured implementation
+     * yields one resource's matches per [SearchIterator.next] call, not a
+     * fixed-size page, so "load the next page" would mean something
+     * different depending on how long each chapter happens to be --
+     * looping here and capping the *total* hit count instead
+     * ([MAX_SEARCH_HITS]) is a simpler contract for a novel-sized book.
+     */
+    fun search(query: String) {
+        searchJob?.cancel()
+        val trimmed = query.trim()
+        if (trimmed.isEmpty()) {
+            _searchState.value = SearchUiState.Idle
+            return
+        }
+        searchJob = viewModelScope.launch {
+            delay(SEARCH_DEBOUNCE_MS)
+            val ready = _state.value as? ReaderState.Ready ?: return@launch
+            _searchState.value = SearchUiState.Searching
+            val result = runCatching {
+                // Null specifically means this publication has no search
+                // service at all -- shouldn't happen for anything this app
+                // opens (ReadiumComponents attaches one to every
+                // publication), but a plain empty result reads better than
+                // a crash if a future publication source ever skips it.
+                val iterator = ready.publication.search(trimmed) ?: return@runCatching emptyList<Locator>() to false
+                val hits = mutableListOf<Locator>()
+                var truncated = false
+                while (hits.size < MAX_SEARCH_HITS) {
+                    val page = iterator.next().getOrNull()?.locators ?: break
+                    if (page.isEmpty()) break
+                    hits += page
+                }
+                iterator.close()
+                if (hits.size > MAX_SEARCH_HITS) {
+                    truncated = true
+                }
+                hits.take(MAX_SEARCH_HITS) to truncated
+            }
+            _searchState.value = result.fold(
+                onSuccess = { (hits, truncated) -> SearchUiState.Results(hits, truncated) },
+                onFailure = { SearchUiState.Failed(it.message ?: "search failed") },
+            )
+        }
+    }
+
+    fun clearSearch() {
+        searchJob?.cancel()
+        _searchState.value = SearchUiState.Idle
     }
 
     /**
@@ -247,6 +417,7 @@ class ReaderViewModel(
 
     override fun onCleared() {
         navigator = null
+        searchJob?.cancel()
         (_state.value as? ReaderState.Ready)?.publication?.close()
     }
 
@@ -257,11 +428,19 @@ class ReaderViewModel(
 
     companion object {
         private const val POSITION_SAVE_DELAY_MS = 800L
+        private const val SEARCH_DEBOUNCE_MS = 300L
+
+        /** A caller of the search sheet is a person reading a list, not a
+         *  program consuming an index -- a common word in a long novel can
+         *  otherwise return thousands of hits with no ceiling. */
+        private const val MAX_SEARCH_HITS = 200
 
         fun factory(container: AppContainer, bookId: String) = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T =
-                ReaderViewModel(bookId, container.repository, container.readium, container.settings) as T
+                ReaderViewModel(
+                    bookId, container.repository, container.readium, container.settings, container.syncStore,
+                ) as T
         }
     }
 }

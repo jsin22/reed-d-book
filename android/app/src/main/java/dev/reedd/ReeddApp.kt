@@ -7,6 +7,7 @@ import android.webkit.WebView
 import dev.reedd.di.AppContainer
 import dev.reedd.diagnostics.Breadcrumbs
 import dev.reedd.diagnostics.CrashReporter
+import kotlinx.coroutines.launch
 
 /**
  * Owns the dependency graph.
@@ -58,6 +59,24 @@ class ReeddApp : Application() {
             WebView.setWebContentsDebuggingEnabled(true)
         }
         container = AppContainer(this)
-        container.crashLog.start(container.appScope)
+        // Not container.crashLog.start(container.appScope) directly: that
+        // races SettingsStore's own async first read of the on-disk settings
+        // (AppContainer.settings.snapshot starts as an empty ServerSettings(),
+        // baseUrl/token both null, until that read completes). CrashLog.start
+        // runs at the very first instant of the process, before anything else
+        // has had a chance to run, so it reached ApiProvider.service() before
+        // that read finished on almost every cold start -- ServerNotConfigured
+        // every time (null baseUrl), so the upload always failed and a
+        // pending report could never actually be deleted via this path.
+        // Confirmed live, 2026-09-08: a report kept resurfacing on every
+        // relaunch even after fixing CrashLog's unrelated all-or-nothing
+        // clear bug, and even once the crash itself had stopped recurring.
+        // settings.current() awaits a real, loaded value first -- the same
+        // fix CrashReporter.sendPendingEarly() already relies on for its own
+        // (successful, but non-deleting) sends.
+        container.appScope.launch {
+            container.settings.current()
+            container.crashLog.start(container.appScope)
+        }
     }
 }

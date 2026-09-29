@@ -118,9 +118,9 @@ class ChunkIndex(
         val needle = TextNormalizer.normalizeToString(selectedText).trim()
         if (needle.isEmpty()) return null
 
-        val name = resourceHref?.substringAfterLast('/')
+        val name = bareResourceName(resourceHref)
         val candidates = chunks.withIndex().filter { (_, chunk) ->
-            chunk.isAligned && (name == null || chunk.resourceHref?.substringAfterLast('/') == name)
+            chunk.isAligned && (name == null || bareResourceName(chunk.resourceHref) == name)
         }
         return matchByContent(candidates, needle)
     }
@@ -196,9 +196,9 @@ class ChunkIndex(
      */
     fun indexOfTap(resourceHref: String?, blockText: String, offset: Int, readingProgression: Double? = null): Int? {
         if (blockText.isEmpty()) return null
-        val name = resourceHref?.substringAfterLast('/')
+        val name = bareResourceName(resourceHref)
         val candidates = chunks.withIndex().filter { (_, chunk) ->
-            chunk.isAligned && (name == null || chunk.resourceHref?.substringAfterLast('/') == name)
+            chunk.isAligned && (name == null || bareResourceName(chunk.resourceHref) == name)
         }
         if (candidates.isEmpty()) return null
 

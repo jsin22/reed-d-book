@@ -66,6 +66,12 @@ object CrashReporter {
         directory(context).listFiles()?.forEach { it.delete() }
     }
 
+    /** Removes one confirmed-sent report -- see [CrashLog.start]'s own doc
+     *  for why this is per-file rather than [clear]'s all-or-nothing sweep. */
+    fun delete(file: File) {
+        file.delete()
+    }
+
     /**
      * Best-effort attempt to send any already-pending report(s) *before*
      * [dev.reedd.di.AppContainer] is built -- so a crash that happens during

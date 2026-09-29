@@ -81,6 +81,25 @@ fun ReadAlongBar(
     onPreviousSentence: () -> Unit,
     onNextSentence: () -> Unit,
     onSeek: (Long) -> Unit,
+    /** A live book's own seek -- see [livePageProgression]'s own doc for
+     *  why this is a book-wide fraction, not an audio position. */
+    onLiveSeek: (Float) -> Unit,
+    /**
+     * A live book's slider position, while not dragging it: the navigator's
+     * own current locator, `locations.totalProgression` (Readium's
+     * canonical whole-book position, the same quantity [onLiveSeek]
+     * resolves a target page from -- see `ReaderViewModel.
+     * goToProgression`/`Publication.positions()`). Owned by `ReaderScreen`,
+     * not [ReadAlongViewModel] (which has no reference to the open
+     * `Publication`/navigator by design), and used instead of anything
+     * audio-derived: the seek bar only ever moves the *page* now, so its
+     * own displayed position has to track the page too, not wherever audio
+     * happens to be -- tracking audio here was confirmed live as a real
+     * bug, the bar visibly snapping back after every manual drag, since
+     * nothing about a page-only seek ever changed the audio quantity the
+     * bar used to read its position from.
+     */
+    livePageProgression: Double?,
     onSpeed: (Float) -> Unit,
     onToggleFollow: () -> Unit,
     modifier: Modifier = Modifier,
@@ -93,6 +112,7 @@ fun ReadAlongBar(
 
     val duration = state.player.durationMs.takeIf { it > 0 } ?: 1L
     val position = if (scrubbing) scrubPosition.toLong() else state.player.positionMs
+    val liveFraction = if (scrubbing) scrubPosition else livePageProgression?.toFloat() ?: 0f
 
     Surface(
         modifier = modifier
@@ -106,18 +126,38 @@ fun ReadAlongBar(
         tonalElevation = 3.dp,
     ) {
         Column(Modifier.heightIn(min = BOTTOM_BAR_CONTENT_MIN_HEIGHT).padding(horizontal = 12.dp, vertical = 8.dp)) {
-            Slider(
-                value = position.coerceIn(0, duration).toFloat(),
-                onValueChange = {
-                    scrubbing = true
-                    scrubPosition = it
-                },
-                onValueChangeFinished = {
-                    scrubbing = false
-                    onSeek(scrubPosition.toLong())
-                },
-                valueRange = 0f..duration.toFloat(),
-            )
+            if (state.isLive) {
+                // A book-wide position, not an audio one -- see
+                // ReadAlongState.liveProgression's own doc. Releasing just
+                // moves the page (see ReaderViewModel.goToProgression) --
+                // this never starts or restarts audio; only an explicit
+                // "Read from here" tap does that.
+                Slider(
+                    value = liveFraction.coerceIn(0f, 1f),
+                    onValueChange = {
+                        scrubbing = true
+                        scrubPosition = it
+                    },
+                    onValueChangeFinished = {
+                        scrubbing = false
+                        onLiveSeek(scrubPosition)
+                    },
+                    valueRange = 0f..1f,
+                )
+            } else {
+                Slider(
+                    value = position.coerceIn(0, duration).toFloat(),
+                    onValueChange = {
+                        scrubbing = true
+                        scrubPosition = it
+                    },
+                    onValueChangeFinished = {
+                        scrubbing = false
+                        onSeek(scrubPosition.toLong())
+                    },
+                    valueRange = 0f..duration.toFloat(),
+                )
+            }
 
             Row(
                 Modifier.fillMaxWidth(),
@@ -125,7 +165,8 @@ fun ReadAlongBar(
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 Text(
-                    "${position.asClock()} / ${state.player.durationMs.asClock()}",
+                    if (state.isLive) "${(liveFraction.coerceIn(0f, 1f) * 100).toInt()}% through the book"
+                    else "${position.asClock()} / ${state.player.durationMs.asClock()}",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

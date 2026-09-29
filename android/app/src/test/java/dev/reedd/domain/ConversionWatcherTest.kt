@@ -195,6 +195,48 @@ class ConversionWatcherTest {
     }
 
     @Test
+    fun `a finished conversion deletes the old job a voice change superseded`() = runTest {
+        // ConversionActions.changeVoiceAndReconvert's own cleanup: the old
+        // job (previousJobId) is only deleted once the *new* one (job-1,
+        // this book's current job) is actually done.
+        db.books().insert(book("b1", jobId = "job-1", jobStatus = JobStatus.RUNNING, previousJobId = "old-job"))
+        enqueue(Fixtures.read("job_done.json"))
+        enqueue("""{"job_id":"old-job","deleted":true}""")
+
+        watcher.pollOnce("b1")
+
+        assertEquals(2, server.requestCount)
+        server.takeRequest() // the job status GET
+        val deleteRequest = server.takeRequest()
+        assertEquals("DELETE", deleteRequest.method)
+        assertEquals("/api/jobs/old-job", deleteRequest.url.encodedPath)
+        assertNull("consumed, so a later re-poll of this same DONE job does not try again",
+            db.books().get("b1")!!.previousJobId)
+    }
+
+    @Test
+    fun `a stale job already gone server-side still counts as cleaned up`() = runTest {
+        db.books().insert(book("b1", jobId = "job-1", jobStatus = JobStatus.RUNNING, previousJobId = "old-job"))
+        enqueue(Fixtures.read("job_done.json"))
+        enqueue("""{"detail":"not found"}""", code = 404)
+
+        watcher.pollOnce("b1")
+
+        assertNull(db.books().get("b1")!!.previousJobId)
+    }
+
+    @Test
+    fun `a stale job that fails to delete is retried on the next poll`() = runTest {
+        db.books().insert(book("b1", jobId = "job-1", jobStatus = JobStatus.RUNNING, previousJobId = "old-job"))
+        enqueue(Fixtures.read("job_done.json"))
+        enqueue("""{"detail":"disk full"}""", code = 500)
+
+        watcher.pollOnce("b1")
+
+        assertEquals("left set so a later poll simply tries again", "old-job", db.books().get("b1")!!.previousJobId)
+    }
+
+    @Test
     fun `a failed conversion is recorded with the server's reason`() = runTest {
         db.books().insert(book("b1", jobId = "job-1", jobStatus = JobStatus.RUNNING))
         enqueue(Fixtures.read("job_error.json"))

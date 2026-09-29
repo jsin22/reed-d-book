@@ -119,6 +119,6 @@ class AppContainer(context: Context) {
     val crashLog: CrashLog = CrashLog(
         reports = { CrashReporter.pending(appContext) },
         api = api,
-        clear = { CrashReporter.clear(appContext) },
+        delete = { file -> CrashReporter.delete(file) },
     )
 }

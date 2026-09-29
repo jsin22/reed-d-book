@@ -17,7 +17,10 @@ import dev.reedd.ui.library.LibraryViewModel
 import dev.reedd.ui.reader.NotesViewModel
 import dev.reedd.ui.reader.ReadAlongViewModel
 import dev.reedd.ui.reader.ReaderScreen
+import dev.reedd.ui.reader.ReaderState
 import dev.reedd.ui.reader.ReaderViewModel
+import kotlinx.coroutines.flow.filterIsInstance
+import kotlinx.coroutines.flow.first
 import dev.reedd.ui.settings.BookmarkLabelsScreen
 import dev.reedd.ui.settings.BookmarkLabelsViewModel
 import dev.reedd.ui.settings.SettingsScreen
@@ -68,7 +71,7 @@ fun ReeddNavHost(navController: NavHostController = rememberNavController()) {
                 viewModel(factory = LibraryViewModel.factory(container, context))
             LibraryScreen(
                 viewModel = viewModel,
-                onOpenBook = { navController.navigate(ReaderRoute(it, autoPlay = true)) },
+                onOpenBook = { id, autoPlay -> navController.navigate(ReaderRoute(id, autoPlay = autoPlay)) },
                 onOpenDetail = { navController.navigate(DetailRoute(it)) },
                 onOpenSettings = { navController.navigate(SettingsRoute) },
             )
@@ -96,7 +99,22 @@ fun ReeddNavHost(navController: NavHostController = rememberNavController()) {
             // Separate ViewModel: one owns the open publication, the other the
             // audio. They have different lifetimes and different reasons to change.
             val readAlongViewModel: ReadAlongViewModel =
-                viewModel(factory = ReadAlongViewModel.factory(container, route.bookId, route.autoPlay))
+                viewModel(
+                    factory = ReadAlongViewModel.factory(
+                        container, route.bookId, route.autoPlay,
+                        // Only ever awaited for a canReadLive book -- see
+                        // LiveChunkSource's own doc for why this stays a plain
+                        // suspend function of hrefs rather than handing the whole
+                        // Publication across ViewModels. Suspends rather than
+                        // reading viewModel.state.value directly: this factory
+                        // runs before ReaderViewModel.open() (its own separate
+                        // async load) has necessarily finished.
+                        readingOrderHrefs = {
+                            viewModel.state.filterIsInstance<ReaderState.Ready>().first()
+                                .publication.readingOrder.map { it.url().toString() }
+                        },
+                    )
+                )
             val notesViewModel: NotesViewModel =
                 viewModel(factory = NotesViewModel.factory(container, route.bookId))
             ReaderScreen(

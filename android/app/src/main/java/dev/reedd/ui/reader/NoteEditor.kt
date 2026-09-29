@@ -44,13 +44,15 @@ fun BookmarkEditorDialog(
     labels: Map<BookmarkType, String>,
     onSave: (type: BookmarkType, noteText: String) -> Unit,
     onCancel: () -> Unit,
+    initialText: String = "",
+    title: String = "Add a bookmark",
 ) {
     var type by rememberSaveable { mutableStateOf(initialType) }
-    var text by rememberSaveable { mutableStateOf("") }
+    var text by rememberSaveable { mutableStateOf(initialText) }
 
     AlertDialog(
         onDismissRequest = onCancel,
-        title = { Text("Add a bookmark") },
+        title = { Text(title) },
         text = {
             Column {
                 Text(

@@ -8,8 +8,10 @@ import dev.reedd.data.db.NoteDao
 import dev.reedd.data.db.NoteEntity
 import dev.reedd.data.settings.SettingsStore
 import dev.reedd.di.AppContainer
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -64,6 +66,33 @@ class NotesViewModel(
      *  case) does not cost a tap every time. */
     val lastUsedType: StateFlow<BookmarkType> =
         settingsStore.lastBookmarkType.stateIn(viewModelScope, SharingStarted.Eagerly, BookmarkType.DEFAULT)
+
+    /** The note tapped in [NotesSheet], if any -- [ReaderScreen] shows the
+     *  same [BookmarkEditorDialog] a new note uses, prefilled from it,
+     *  while this is non-null. Owned here (not [ReadAlongViewModel]'s
+     *  `pendingNoteTarget`, the new-note equivalent) since an existing note
+     *  needs no [WordMenuTarget]/[PendingNote] resolution at all -- every
+     *  field the editor can change is already known from the row tapped. */
+    private val _editingNote = MutableStateFlow<NoteEntity?>(null)
+    val editingNote: StateFlow<NoteEntity?> = _editingNote.asStateFlow()
+
+    fun startEditing(note: NoteEntity) {
+        _editingNote.value = note
+    }
+
+    fun dismissEditing() {
+        _editingNote.value = null
+    }
+
+    /** [saveNote]'s update counterpart: what [id] quotes, points at, and was
+     *  created are fixed at that point in time -- only the two fields the
+     *  editor itself can change, [noteText] and [type], are ever revised. */
+    fun updateNote(id: Long, noteText: String, type: BookmarkType) {
+        viewModelScope.launch {
+            noteDao.update(id, noteText, type)
+            settingsStore.setLastBookmarkType(type)
+        }
+    }
 
     suspend fun saveNote(pending: PendingNote, noteText: String, type: BookmarkType, spineIndex: Int) {
         noteDao.insert(

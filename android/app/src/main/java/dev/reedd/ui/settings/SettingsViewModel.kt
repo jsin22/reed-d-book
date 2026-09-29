@@ -13,6 +13,7 @@ import dev.reedd.data.remote.ServerNotConfigured
 import dev.reedd.data.settings.ServerSettings
 import dev.reedd.data.settings.SettingsStore
 import dev.reedd.di.AppContainer
+import dev.reedd.diagnostics.FeedbackReporter
 import dev.reedd.domain.AuthStatusMonitor
 import dev.reedd.domain.ConversionWatcher
 import kotlinx.coroutines.TimeoutCancellationException
@@ -253,6 +254,11 @@ class SettingsViewModel(
     }
 
     fun normalizedPreview(baseUrl: String): String? = ServerAddress.normalize(baseUrl)
+
+    /** No book context here -- this is the general entry point, reached
+     *  with no book open. See [FeedbackReporter.submit]'s own doc. */
+    suspend fun submitFeedback(type: FeedbackReporter.Type, message: String): Boolean =
+        runCatching { FeedbackReporter.submit(api, type, message) }.isSuccess
 
     companion object {
         /** How long [testConnection] waits on each request before giving up

@@ -202,6 +202,21 @@ class ChunkIndexTest {
     }
 
     @Test
+    fun `a percent-encoded href from Readium matches a stored href with literal spaces`() {
+        // Confirmed live: a Calibre-split epub whose chapter files are named
+        // after the book's own title ("The Cuckoo's Egg - v.1.0_split_002.html")
+        // stores that href with literal spaces -- EpubTextExtractor reads it
+        // straight out of the zip's own entry name, which is never
+        // percent-encoded -- but Readium's own Locator.href.toString() is a
+        // proper URL and does percent-encode the space as %20. A tap's
+        // resourceHref and the aligner's stored one named the same file but
+        // never compared equal, hiding "Read from here" on every word.
+        val spaced = ChunkIndex(listOf(aligned(0, "A sentence in a spaced file.", href = "EPUB/My Chapter.xhtml")))
+        assertEquals(0, spaced.indexOfSelection("EPUB/My%20Chapter.xhtml", "A sentence in a spaced file."))
+        assertEquals(0, spaced.indexOfTap("EPUB/My%20Chapter.xhtml", "A sentence in a spaced file.", 5))
+    }
+
+    @Test
     fun `an unmatched selection is null rather than a wrong guess`() {
         assertNull(selectable.indexOfSelection("EPUB/c1.xhtml", "this text is nowhere in the book"))
         assertNull(selectable.indexOfSelection("EPUB/c1.xhtml", "   "))

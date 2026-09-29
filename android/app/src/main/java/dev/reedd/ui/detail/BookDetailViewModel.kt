@@ -10,6 +10,8 @@ import dev.reedd.data.ConversionActions
 import dev.reedd.data.db.BookEntity
 import dev.reedd.data.remote.ApiProvider
 import dev.reedd.di.AppContainer
+import dev.reedd.ui.library.ConversionOptions
+import dev.reedd.ui.library.LibraryViewModel
 import dev.reedd.work.DownloadWorker
 import dev.reedd.work.UploadWorker
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -96,6 +98,37 @@ class BookDetailViewModel(
     /** Send the book again: after an upload failure, or a job the server lost. */
     fun retryUpload() {
         viewModelScope.launch { conversionActions.retry(bookId) }
+    }
+
+    private val _voiceOptions = MutableStateFlow(ConversionOptions())
+    val voiceOptions: StateFlow<ConversionOptions> = _voiceOptions.asStateFlow()
+
+    /** Fetched lazily, only once the "change voice" dialog is actually
+     *  opened -- most visits to this screen never touch it, so there is no
+     *  reason to pay for `GET /api/engines` on every open the way the
+     *  reader's own always-live-book voice picker does. */
+    fun loadVoiceOptions() {
+        if (_voiceOptions.value.engines.isNotEmpty() || _voiceOptions.value.loading) return
+        viewModelScope.launch {
+            _voiceOptions.value = ConversionOptions(loading = true)
+            _voiceOptions.value = try {
+                ConversionOptions(engines = api.service().engines().engines)
+            } catch (e: IOException) {
+                ConversionOptions(error = LibraryViewModel.describe(e))
+            }
+        }
+    }
+
+    /**
+     * "Update the offline voice for a book": re-converts an already-
+     * finished book with a different voice -- see [ConversionActions.
+     * changeVoiceAndReconvert]'s own doc for the full mechanics (a new job,
+     * this device's own old audio wiped, autoDownload re-armed). Nothing
+     * about any other device that already downloaded the old audiobook --
+     * it keeps its old copy until it deletes and re-downloads.
+     */
+    fun changeVoice(voice: String) {
+        viewModelScope.launch { conversionActions.changeVoiceAndReconvert(bookId, voice) }
     }
 
     /** Fetch the finished files again, e.g. after a failed download. */
