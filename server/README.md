@@ -50,6 +50,7 @@ Admin-only (see "Sharing with others" below):
 | `DELETE /api/admin/users/{user_id}` | revokes a user's access; refuses to delete your own account. |
 | `GET /api/admin/metadata-health` | `{ok, last_error, last_error_at, last_success_at}` for the category/genre lookup — see below. |
 | `GET /api/admin/feedback` | the newest reports submitted via `POST /api/feedback`, for triage. |
+| `GET /api/admin/feedback/entries` | the same reports as JSON (type, time, text), for the diagnostics dashboard's Feedback tab. |
 | `GET /api/admin/apk` | the live (`/download/app`) and pending (`REEDD_APK_BUILD_DIR`) APK's size/mtime. |
 | `POST /api/admin/push-apk` | copies the newest build in `REEDD_APK_BUILD_DIR` over `REEDD_APK_PATH` — the Admin screen's "Push Update" button. |
 | `GET /download/app` | unauthenticated: serves the APK, for an invitee who has no token yet. |

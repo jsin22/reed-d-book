@@ -828,6 +828,34 @@ def list_feedback(limit: int = 20):
     )
 
 
+@app.get('/api/admin/feedback/entries', dependencies=[Depends(require_admin)])
+def list_feedback_entries(limit: int = 100):
+    """The same submissions as `list_feedback`, one JSON object each, for the
+    diagnostics dashboard's Feedback tab. Still admin-only: the dashboard
+    itself is reachable through Tailscale Funnel with no auth, so the tab
+    asks for an admin token and sends it rather than this data riding along
+    with the unauthenticated page."""
+    settings = get_settings()
+    if not settings.feedback_dir.is_dir():
+        return {'entries': []}
+    files = sorted(settings.feedback_dir.glob('feedback-*.txt'), reverse=True)[:max(1, min(limit, MAX_FEEDBACK_FILES))]
+    entries = []
+    for f in files:
+        # feedback-<kind>-<YYYYmmddTHHMMSSffffff>.txt, as written by submit_feedback.
+        _, kind, stamp = f.stem.split('-', 2)
+        try:
+            submitted = datetime.strptime(stamp, '%Y%m%dT%H%M%S%f').replace(tzinfo=timezone.utc).isoformat()
+        except ValueError:
+            submitted = None
+        entries.append({
+            'name': f.name,
+            'type': kind,
+            'submitted_at': submitted,
+            'text': f.read_text(encoding='utf-8', errors='replace'),
+        })
+    return {'entries': entries}
+
+
 def _prune_feedback(directory: Path) -> None:
     """Keep the newest MAX_FEEDBACK_FILES; a submission loop must not fill the disk."""
     files = sorted(directory.glob('feedback-*.txt'), reverse=True)
@@ -1148,6 +1176,29 @@ _DASHBOARD_HTML = f"""<!doctype html>
   .livetts-row button:disabled {{ opacity: 0.5; cursor: default; }}
   #livetts-state {{ color: var(--ink-soft); font-size: 0.85rem; }}
   #livetts table {{ margin-top: 16px; }}
+  #feedback {{ padding: 16px; overflow-y: auto; }}
+  .fb-bar {{ display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }}
+  .fb-bar input, .fb-bar button {{
+    background: var(--surface); color: var(--ink); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 12px; font: inherit;
+  }}
+  .fb-bar input {{ flex: 1; min-width: 12rem; max-width: 26rem; }}
+  .fb-bar button {{ cursor: pointer; }}
+  .fb-bar[hidden] {{ display: none; }}
+  .fb-bar button.chip.active {{ background: var(--accent); border-color: var(--accent); color: #08111f; font-weight: 600; }}
+  .fb-card {{
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px 14px; margin-bottom: 10px; max-width: 60rem;
+  }}
+  .fb-head {{ display: flex; align-items: center; gap: 10px; color: var(--ink-soft); font-size: 0.82rem; }}
+  .fb-type {{ font-size: 0.75rem; font-weight: 600; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); }}
+  .fb-type.bug {{ color: #f27272; }}
+  .fb-type.feature {{ color: #6fce8f; }}
+  .fb-type.other {{ color: var(--accent); }}
+  .fb-msg {{ margin: 10px 0 6px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.95rem; }}
+  .fb-card details {{ color: var(--ink-soft); font-size: 0.8rem; }}
+  .fb-card summary {{ cursor: pointer; }}
+  .fb-card pre {{ white-space: pre-wrap; overflow-wrap: anywhere; margin: 6px 0 0; font-size: 0.78rem; }}
 </style>
 </head>
 <body>
@@ -1158,6 +1209,7 @@ _DASHBOARD_HTML = f"""<!doctype html>
     <button data-tab="queue">Queue</button>
     <button data-tab="system">System</button>
     <button data-tab="livetts">Live TTS</button>
+    <button data-tab="feedback">Feedback</button>
   </nav>
 </header>
 <main>
@@ -1185,6 +1237,21 @@ _DASHBOARD_HTML = f"""<!doctype html>
       </tr></thead>
       <tbody id="livetts-rows"></tbody>
     </table>
+  </section>
+  <section id="feedback">
+    <form class="fb-bar" id="fb-auth">
+      <input id="fb-token" type="password" placeholder="Admin API token" autocomplete="off">
+      <button type="submit">Load</button>
+      <button type="button" id="fb-forget">Forget token</button>
+    </form>
+    <div class="fb-bar" id="fb-filters" hidden>
+      <button class="chip active" data-kind="all">All</button>
+      <button class="chip" data-kind="bug">Bugs</button>
+      <button class="chip" data-kind="feature">Features</button>
+      <button class="chip" data-kind="other">Other</button>
+      <button id="fb-refresh">Refresh</button>
+    </div>
+    <div id="fb-list" class="empty">Enter an admin token to load feedback.</div>
   </section>
 </main>
 <script>
@@ -1326,6 +1393,94 @@ _DASHBOARD_HTML = f"""<!doctype html>
         pollTimer = setInterval(poll, 400);
       }});
     }});
+  }})();
+
+  // -- Feedback -----------------------------------------------------------
+  // This page is reachable through Tailscale Funnel with no auth, so
+  // feedback is not served with it: the tab fetches the admin-only
+  // /api/admin/feedback/entries with a token typed in here, remembered in
+  // this browser's localStorage only.
+  (function () {{
+    const TOKEN_KEY = 'reedd-admin-token';
+    const tokenEl = document.getElementById('fb-token');
+    const listEl = document.getElementById('fb-list');
+    const filtersEl = document.getElementById('fb-filters');
+    const TYPE_LABELS = {{bug: 'Bug', feature: 'Feature', other: 'Other'}};
+    let entries = [], kind = 'all';
+
+    function getToken() {{ try {{ return localStorage.getItem(TOKEN_KEY) || ''; }} catch (e) {{ return ''; }} }}
+    function setToken(t) {{ try {{ t ? localStorage.setItem(TOKEN_KEY, t) : localStorage.removeItem(TOKEN_KEY); }} catch (e) {{}} }}
+
+    function esc(s) {{
+      return String(s).replace(/[&<>"']/g, c => ({{'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}})[c]);
+    }}
+
+    // The app posts "header lines / blank line / message / breadcrumbs:"; pull
+    // the message out so it reads first. Anything not in that shape is shown whole.
+    function split(text) {{
+      const m = text.match(/^read-d-book feedback\\n([\\s\\S]*?)\\n\\n([\\s\\S]*?)(?:\\n+breadcrumbs:\\n([\\s\\S]*))?$/);
+      if (!m) return {{meta: '', message: text, crumbs: ''}};
+      return {{meta: m[1], message: m[2].trim(), crumbs: (m[3] || '').trim()}};
+    }}
+
+    function render() {{
+      const shown = entries.filter(e => kind === 'all' || e.type === kind);
+      if (!shown.length) {{
+        listEl.className = 'empty';
+        listEl.textContent = entries.length ? 'Nothing of this type.' : 'No feedback yet.';
+        return;
+      }}
+      listEl.className = '';
+      listEl.innerHTML = shown.map(e => {{
+        const p = split(e.text);
+        const when = e.submitted_at ? new Date(e.submitted_at).toLocaleString() : e.name;
+        return `<div class="fb-card">
+          <div class="fb-head"><span class="fb-type ${{esc(e.type)}}">${{esc(TYPE_LABELS[e.type] || e.type)}}</span>${{esc(when)}}</div>
+          <div class="fb-msg">${{esc(p.message || '(empty)')}}</div>
+          ${{p.meta ? `<details><summary>Device &amp; app</summary><pre>${{esc(p.meta)}}</pre></details>` : ''}}
+          ${{p.crumbs ? `<details><summary>Breadcrumbs</summary><pre>${{esc(p.crumbs)}}</pre></details>` : ''}}
+        </div>`;
+      }}).join('');
+    }}
+
+    function load() {{
+      const token = getToken();
+      if (!token) return;
+      listEl.className = 'loading';
+      listEl.textContent = 'Loading…';
+      fetch('/api/admin/feedback/entries', {{headers: {{Authorization: `Bearer ${{token}}`}}}})
+        .then(r => {{
+          if (r.status === 401 || r.status === 403) throw new Error('That token is not an admin token.');
+          if (!r.ok) throw new Error(`Server error (${{r.status}}).`);
+          return r.json();
+        }})
+        .then(data => {{ entries = data.entries; filtersEl.hidden = false; render(); }})
+        .catch(err => {{ listEl.className = 'empty'; listEl.textContent = err.message || 'Could not load feedback.'; }});
+    }}
+
+    document.getElementById('fb-auth').addEventListener('submit', ev => {{
+      ev.preventDefault();
+      setToken(tokenEl.value.trim());
+      tokenEl.value = '';
+      load();
+    }});
+    document.getElementById('fb-forget').addEventListener('click', () => {{
+      setToken('');
+      entries = [];
+      filtersEl.hidden = true;
+      listEl.className = 'empty';
+      listEl.textContent = 'Enter an admin token to load feedback.';
+    }});
+    document.getElementById('fb-refresh').addEventListener('click', load);
+    for (const chip of filtersEl.querySelectorAll('.chip')) {{
+      chip.addEventListener('click', () => {{
+        for (const c of filtersEl.querySelectorAll('.chip')) c.classList.remove('active');
+        chip.classList.add('active');
+        kind = chip.dataset.kind;
+        render();
+      }});
+    }}
+    load();
   }})();
 </script>
 </body>

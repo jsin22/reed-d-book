@@ -939,6 +939,24 @@ class FeedbackTest(ApiTestCase):
         response = self.client.post('/api/feedback', content=b'')
         self.assertEqual(400, response.status_code)
 
+    def test_entries_are_listed_as_json_newest_first(self):
+        self.client.post('/api/feedback?feedback_type=bug', content=self.MESSAGE.encode())
+        self.client.post('/api/feedback?feedback_type=feature', content=b'Dark mode please')
+        _, admin_token = self.make_user('admin@example.com', is_admin=True)
+        self.client.headers['Authorization'] = f'Bearer {admin_token}'
+
+        response = self.client.get('/api/admin/feedback/entries')
+
+        self.assertEqual(200, response.status_code)
+        entries = response.json()['entries']
+        self.assertEqual(['feature', 'bug'], [e['type'] for e in entries])
+        self.assertEqual('Dark mode please', entries[0]['text'])
+        self.assertIsNotNone(entries[0]['submitted_at'])
+
+    def test_a_non_admin_cannot_list_feedback_entries(self):
+        self.client.post('/api/feedback?feedback_type=other', content=b'a message')
+        self.assertEqual(403, self.client.get('/api/admin/feedback/entries').status_code)
+
     def test_listing_is_empty_before_any_feedback(self):
         _, admin_token = self.make_user('admin@example.com', is_admin=True)
         self.client.headers['Authorization'] = f'Bearer {admin_token}'
