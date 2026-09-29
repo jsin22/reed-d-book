@@ -109,4 +109,20 @@ class FollowControllerTest {
         assertTrue(follower.onSentenceChanged(9))
         assertTrue(follower.onSentenceChanged(10))
     }
+
+    @Test
+    fun `rejoining follows again without moving to the current sentence`() {
+        // Swiping ahead to finish a sentence that runs onto the next page: the
+        // page is already right, so moving to the sentence's start would undo
+        // the swipe.
+        val follower = FollowController()
+        follower.onSentenceChanged(4)
+        follower.onUserDragged()
+
+        follower.rejoin(4)
+
+        assertTrue(follower.isFollowing)
+        assertFalse(follower.onSentenceChanged(4))
+        assertTrue(follower.onSentenceChanged(5))
+    }
 }

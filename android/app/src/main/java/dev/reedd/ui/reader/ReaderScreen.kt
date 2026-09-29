@@ -60,6 +60,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalContext
@@ -73,17 +77,13 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.fragment.app.FragmentActivity
 import androidx.fragment.compose.AndroidFragment
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collectLatest
-import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import dev.reedd.data.db.BookmarkType
 import dev.reedd.data.remote.UploadMode
@@ -100,7 +100,6 @@ import dev.reedd.ui.theme.paperColorScheme
 import org.readium.r2.navigator.epub.EpubNavigatorFragment
 import org.readium.r2.navigator.epub.css.Length
 import org.readium.r2.navigator.epub.css.RsProperties
-import org.readium.r2.navigator.input.DragEvent
 import org.readium.r2.navigator.input.InputListener
 import org.readium.r2.navigator.input.TapEvent
 import org.readium.r2.shared.publication.Link
@@ -121,33 +120,6 @@ private const val FRAGMENT_LOOKUP_DELAY_MS = 100L
  * layout reservation rather than the indicator having a background.
  */
 private val PAGE_INDICATOR_RESERVED_HEIGHT = 24.dp
-
-/**
- * How long after the last drag/scroll signal to wait before deciding
- * whether it actually disengaged follow -- see the effect that uses this
- * in [EpubNavigator]. Long enough for a swipe's page turn (or a scroll's
- * settle) to actually land, short enough not to feel laggy if it really
- * was a deliberate look-away. Not derived from a real measurement; a
- * reasonable, tunable guess.
- */
-private const val DRAG_SETTLE_DELAY_MS = 400L
-
-/**
- * How close two positions in the *same* resource have to be to count as
- * "still where the audio is", for the settle check below -- roughly the
- * width of a page in a typical chapter. Comparing resource href alone was
- * not enough on its own: confirmed live as a real bug, not hypothetical --
- * a chapter is very often several pages long, so a genuine manual page-turn
- * within the same chapter the audio is in never changes href at all, and
- * follow never noticed the reader had moved at all as a result.
- */
-private const val PAGE_SETTLE_PROGRESSION_EPSILON = 0.02
-
-// How long after an app-driven fragment.go() to ignore the PaginationListener
-// callback it causes -- generous relative to how quickly that callback actually
-// follows go() (same frame in practice), while still short enough that a real
-// user swipe landing shortly after an app-driven jump is not itself swallowed.
-private const val APP_NAVIGATION_SUPPRESS_WINDOW_NS = 500_000_000L
 
 /** Matches `ImportSheet.kt`'s own identical constant: the only engine this
  *  app's upload/live-reading flow ever offers a voice choice within. */
@@ -727,7 +699,6 @@ fun BookmarkType.colorName(): String = when (this) {
  *  endpoints, in CSS px. See the `extendRequests` flow in [EpubNavigator]. */
 private data class ExtendRequest(val startX: Float, val startY: Float, val endX: Float, val endY: Float)
 
-@OptIn(FlowPreview::class)
 @Composable
 private fun EpubNavigator(
     state: ReaderState.Ready,
@@ -752,39 +723,17 @@ private fun EpubNavigator(
     // enough to send "Read from here" to the wrong page (BUGS.md BUG-17).
     var lastPageLocator by remember { mutableStateOf<Locator?>(null) }
 
-    // A drag/scroll/page-turn settling -- fed by both InputListener.onDrag
-    // (continuous scroll) and PaginationListener.onPageChanged (a discrete
-    // paginated page turn, including a plain manual swipe -- see that
-    // listener's own comment for why a swipe needed to feed this too, and
-    // the LaunchedEffect further down that debounces this for why the
-    // decision to disengage follow never happens directly inside either).
-    val pageSettleSignal = remember { MutableStateFlow(0L) }
-
-    // Sees to it that onPageChanged, below, ignores the page turn that
-    // follow's own auto-advance (or "Read from here"/resume, both driven by
-    // navigateTo further down) causes when it calls fragment.go() -- without
-    // this, re-enabling follow immediately disengaged it again: resuming
-    // resets navigatedTo, the very next onSentenceChanged asks navigateTo to
-    // catch the page up, that go() fires this same PaginationListener, and by
-    // the time the debounced settle check below ran 400ms later the playing
-    // sentence had already moved on to the next one, reading as "looked
-    // away". A short expiring window rather than a plain consumed flag: a
-    // go() whose target is already the current page fires no onPageChanged
-    // at all, which would leave a plain flag stuck set and wrongly swallow
-    // the next real swipe.
-    var appNavigationUntilNs by remember { mutableStateOf(0L) }
+    // Set when a finger drags the page (see the AndroidFragment's pointerInput
+    // below) and cleared by the page change that drag causes: whether follow was
+    // on when the drag began, so onPageChanged can rejoin it if the reader only
+    // swiped ahead to where the audio already is. Null when no drag is pending.
+    var swipeWasFollowing by remember { mutableStateOf<Boolean?>(null) }
 
     // The fragment's very first pagination report is always "here's where I
     // just finished loading" (the saved/initial locator) -- never a swipe,
     // since nothing could have touched the page before its first pagination
-    // pass even completed. Unlike appNavigationUntilNs above, this needs no
-    // guessed time window: confirmed live as a real, if intermittent, cause
-    // of "the crosshair was already off right after opening the book" --
-    // a freshly-opened book whose first page report happened to settle
-    // slower than whatever the playing sentence had already moved on to
-    // (worse right after the fix that lets the card open a book already
-    // autoplaying) read as "looked away" before the reader ever touched
-    // anything. Reset per publication, matching the fragment's own lifetime.
+    // pass even completed. The navigateTo effect waits for it (see there).
+    // Reset per publication, matching the fragment's own lifetime.
     var hasSeenInitialPageChange by remember(state.publication) { mutableStateOf(false) }
 
     // See the AndroidFragment's own onGloballyPositioned below: added into
@@ -819,27 +768,20 @@ private fun EpubNavigator(
                 override fun onPageChanged(pageIndex: Int, totalPages: Int, locator: Locator) {
                     viewModel.onPageChanged(pageIndex, totalPages)
                     lastPageLocator = locator
-                    // A plain manual swipe in paginated mode -- unlike continuous
-                    // scroll, which InputListener.onDrag already reports -- never
-                    // reached InputListener at all (ViewPager2 owns that gesture
-                    // itself), so follow never disengaged for it: confirmed live
-                    // as "I swipe to another page and it flips right back to the
-                    // sentence still playing". Feeding this same signal here reuses
-                    // the debounced settle check below rather than a second, parallel
-                    // one -- a font-size-triggered re-pagination lands back on this
-                    // same resource, so it still reads as "did not look away".
-                    //
-                    // Skipped entirely for the very first report (see
-                    // hasSeenInitialPageChange above -- always just-opened, never
-                    // a swipe) and for the short window right after an app-driven
-                    // go() (follow's own auto-advance / "Read from here" / resume,
-                    // see appNavigationUntilNs above) -- confirmed live as
-                    // "re-enabling follow immediately disengages it again", since
-                    // that page turn otherwise fed this exact signal too.
-                    if (!hasSeenInitialPageChange) {
-                        hasSeenInitialPageChange = true
-                    } else if (System.nanoTime() >= appNavigationUntilNs) {
-                        pageSettleSignal.value = System.nanoTime()
+                    hasSeenInitialPageChange = true
+                    // The page a finger drag landed on. Follow already went off
+                    // when the drag began; if the sentence being read is on this
+                    // page (the reader swiped ahead to finish a sentence that
+                    // runs onto it), follow picks up again without moving.
+                    val wasFollowing = swipeWasFollowing
+                    swipeWasFollowing = null
+                    val fragment = navigator
+                    if (wasFollowing == true && fragment != null) {
+                        scope.launch {
+                            if (ReadAlongLocators.isHighlightOnScreen(fragment)) {
+                                readAlongViewModel.rejoinFollowing()
+                            }
+                        }
                     }
                 }
             },
@@ -955,6 +897,29 @@ private fun EpubNavigator(
             // way to the physical bottom edge. This is the only place left that
             // can actually keep book text out of that strip.
             .padding(bottom = PAGE_INDICATOR_RESERVED_HEIGHT)
+            // A finger dragging the page is the one unambiguous sign the reader
+            // wants to look somewhere else: the app's own go() never produces a
+            // touch. So follow turns off the moment a drag starts, with no timing
+            // window or distance guess. Observed on the Initial pass and never
+            // consumed, so Readium still gets every event and turns the page as
+            // normal. Selection handles are Popups (their own windows), so
+            // dragging one never reaches here.
+            .pointerInput(Unit) {
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                    while (true) {
+                        val event = awaitPointerEvent(PointerEventPass.Initial)
+                        val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                        if ((change.position - down.position).getDistance() > viewConfiguration.touchSlop) {
+                            swipeWasFollowing = readAlongViewModel.state.value.following
+                            readAlongViewModel.onUserDragged()
+                            readAlongViewModel.dismissWordMenu()
+                            break
+                        }
+                        if (!change.pressed) break
+                    }
+                }
+            }
             // Where this fragment's own content actually starts, in window px --
             // e.g. below the TopAppBar. TapTextResolver/SelectionTextResolver's
             // rects are relative to the WebView's own viewport (its content
@@ -1025,8 +990,7 @@ private fun EpubNavigator(
         navigator?.submitPreferences(preferences)
     }
 
-    // Dragging the page means the reader wants to look somewhere else, so stop
-    // moving it for them. Registered once per fragment.
+    // Taps on the page resolve the word under them. Registered once per fragment.
     LaunchedEffect(navigator) {
         val fragment = navigator ?: return@LaunchedEffect
         val input = object : InputListener {
@@ -1093,80 +1057,9 @@ private fun EpubNavigator(
                 }
                 return true
             }
-
-            override fun onDrag(event: DragEvent): Boolean {
-                // A drag that's actually on a SelectionHandle must not be
-                // treated as a page-turn/scroll gesture here -- see
-                // ReadAlongViewModel.draggingHandle's own docstring for the
-                // real bug this guards against (dismissWordMenu wiping the
-                // handle's own state out from under it, mid-drag).
-                if (readAlongViewModel.isHandleDragActive) return true
-                // Whether this drag should actually disengage follow is
-                // decided once it settles, not here -- see the debounced
-                // effect further down for why.
-                pageSettleSignal.value = System.nanoTime()
-                readAlongViewModel.dismissWordMenu()
-                return false // let Readium scroll or page as normal
-            }
         }
         fragment.addInputListener(input)
         Log.i(TAG_TAP, "input listener attached to the navigator")
-    }
-
-    // Follow used to disengage the instant any drag was seen at all (inside
-    // InputListener.onDrag, directly) -- see FollowController's own doc for
-    // why dragging should stop it, but confirmed live to fire far too
-    // eagerly: viewing a word's definition (no deliberate page-turn
-    // intended at all -- pausing playback for it is correct, disengaging
-    // follow is not) and manually flipping to the very next page because a
-    // sentence spans the boundary between two pages (FEATURES.md's own
-    // documented limitation -- the page cannot turn mid-sentence, so
-    // catching up by hand is the only way to keep reading along) both left
-    // the reader looking at exactly the passage still playing, yet both
-    // disengaged follow anyway.
-    //
-    // Deferred until DRAG_SETTLE_DELAY_MS after the last settle signal --
-    // from InputListener.onDrag above or PaginationListener.onPageChanged
-    // (see its own comment for the manual-swipe-in-paginated-mode gap that
-    // added it here) -- then only actually disengages if the settled
-    // position is not still showing wherever the currently-playing sentence
-    // itself is. A spurious signal with no real page change behind it never
-    // reaches here at all once a newer one (or none) supersedes it
-    // (collectLatest).
-    //
-    // Same resource *and* close progression, not resource alone: confirmed
-    // live as a real, reported bug -- a chapter is very often several pages
-    // long, so a manual page-turn that stays inside the same chapter the
-    // audio is in never changes href at all, and the href-only version of
-    // this check kept reading that as "still following" no matter how far
-    // the reader had actually paged away. Comparing progression too is what
-    // still leaves follow alone for the exact two-pages-one-sentence case
-    // (PAGE_SETTLE_PROGRESSION_EPSILON's own doc) while now catching a
-    // same-chapter page-turn everywhere else in it.
-    LaunchedEffect(navigator) {
-        val fragment = navigator ?: return@LaunchedEffect
-        pageSettleSignal.filter { it != 0L }.debounce(DRAG_SETTLE_DELAY_MS).collectLatest {
-            val currentChunk = readAlongViewModel.chunkIndex()
-                .chunkAtIndex(readAlongViewModel.state.value.currentIndex)
-            val currentHref = currentChunk?.resourceHref?.let { resolveLink(state.publication, it) }
-            val settledLocator = lastPageLocator ?: fragment.currentLocator.value
-            val settledProgression = settledLocator.locations.progression
-            val stillWithSentence = currentHref != null && currentHref == settledLocator.href &&
-                currentChunk?.progression != null && settledProgression != null &&
-                kotlin.math.abs(currentChunk.progression - settledProgression) <= PAGE_SETTLE_PROGRESSION_EPSILON
-            val disengaging = !stillWithSentence
-            // Diagnostic for "definitions/spanning-a-page-boundary disengage
-            // follow when they should not" -- remove once confirmed fixed.
-            CrashReporter.reportDiagnostic(
-                context, "ReeddFollowDisengage",
-                "currentChunkHref=$currentHref settledHref=${settledLocator.href} " +
-                    "currentChunkProgression=${currentChunk?.progression} settledProgression=$settledProgression " +
-                    "disengaging=$disengaging",
-            )
-            if (disengaging) {
-                readAlongViewModel.onUserDragged()
-            }
-        }
     }
 
     // Drives SelectionTextResolver.extend() as a handle is dragged. A
@@ -1361,7 +1254,6 @@ private fun EpubNavigator(
         val chunk = readAlongViewModel.chunkIndex().chunkAtIndex(target)
         val locator = chunk?.let { ReadAlongLocators.locator(state.publication, it) }
         if (locator != null) {
-            appNavigationUntilNs = System.nanoTime() + APP_NAVIGATION_SUPPRESS_WINDOW_NS
             fragment.go(locator, animated = false)
         }
         readAlongViewModel.onNavigationHandled(target)

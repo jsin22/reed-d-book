@@ -47,6 +47,17 @@ class FollowController(following: Boolean = true) {
         navigatedTo = null
     }
 
+    /**
+     * Follow again *without* moving the page: the reader swiped to where the
+     * sentence being read already is (typically the rest of a sentence that runs
+     * onto the next page), so the page is already right. [resume] would instead
+     * jump back to where that sentence starts, i.e. the page they just left.
+     */
+    fun rejoin(index: Int) {
+        isFollowing = true
+        navigatedTo = index
+    }
+
     fun stop() {
         isFollowing = false
     }

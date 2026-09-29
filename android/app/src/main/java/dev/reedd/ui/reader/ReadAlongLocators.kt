@@ -3,6 +3,7 @@ package dev.reedd.ui.reader
 import dev.reedd.data.db.SyncChunkEntity
 import dev.reedd.domain.resolveLink
 import org.readium.r2.navigator.Decoration
+import org.readium.r2.navigator.epub.EpubNavigatorFragment
 import org.readium.r2.shared.publication.Locator
 import org.readium.r2.shared.publication.Publication
 import org.readium.r2.shared.util.mediatype.MediaType
@@ -54,4 +55,32 @@ object ReadAlongLocators {
             locator = locator,
             style = Decoration.Style.Highlight(tint = tint, isActive = false),
         )
+
+    /**
+     * Whether any part of the highlighted sentence is on the page now showing.
+     *
+     * Measured from the rendered DOM rather than estimated from progression:
+     * Readium puts a group's decorations in `<div data-group="...">`, and this is
+     * the same horizontal-overlap test its own reflowable script uses to decide
+     * whether an element is on the current page.
+     */
+    suspend fun isHighlightOnScreen(fragment: EpubNavigatorFragment): Boolean {
+        val raw = runCatching { fragment.evaluateJavascript(ON_SCREEN_SCRIPT) }.getOrNull() ?: return false
+        return raw.trim().trim('"') == "true"
+    }
+
+    private val ON_SCREEN_SCRIPT = """
+        (function() {
+          try {
+            var group = document.querySelector('[data-group="$DECORATION_GROUP"]');
+            if (!group) return false;
+            var boxes = group.querySelectorAll('*');
+            for (var i = 0; i < boxes.length; i++) {
+              var r = boxes[i].getBoundingClientRect();
+              if (r.width > 0 && r.height > 0 && r.right > 0 && r.left < window.innerWidth) return true;
+            }
+          } catch (e) {}
+          return false;
+        })();
+    """.trimIndent()
 }

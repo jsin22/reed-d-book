@@ -1019,6 +1019,13 @@ class ReadAlongViewModel(
         if (current >= 0) _navigateTo.value = current
     }
 
+    /** See [FollowController.rejoin]. */
+    fun rejoinFollowing() {
+        if (follower.isFollowing) return
+        follower.rejoin(_state.value.currentIndex)
+        _state.value = _state.value.copy(following = true)
+    }
+
     fun toggleFollowing() {
         if (follower.isFollowing) {
             follower.stop()
