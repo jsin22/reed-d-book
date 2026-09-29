@@ -13,7 +13,7 @@ import org.readium.r2.shared.publication.Link
  * NoteEntity]) is enough to sort notes correctly with a plain `ORDER BY`,
  * resolved once at save time rather than re-derived on every read.
  *
- * Same filename-normalization convention as [ChunkIndex.indexOfTap] /
+ * Same filename-normalization convention as [ChunkIndex.indexAtPageOffset] /
  * [dev.reedd.ui.reader.ReadAlongLocators]'s href matching.
  */
 fun spineIndexOf(readingOrder: List<Link>, href: String): Int? {

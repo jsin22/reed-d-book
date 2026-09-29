@@ -20,7 +20,7 @@ import java.net.URLDecoder
  * spaces, Readium's own URL had `%20` in their place -- which hid both
  * read-along's sentence highlight ([resolveLink], used by [dev.reedd.ui.
  * reader.ReadAlongLocators.locator]) and "Read from here" on every single
- * word in the book ([dev.reedd.domain.ChunkIndex.indexOfTap]/[dev.reedd.
+ * word in the book ([dev.reedd.domain.ChunkIndex.indexAtPageOffset]/[dev.reedd.
  * domain.ChunkIndex.indexOfSelection], which compare two stored hrefs
  * rather than resolving against a `Publication` but hit the exact same
  * mismatch). Decoding is a no-op on a plain filename with nothing to decode,

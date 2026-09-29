@@ -1024,14 +1024,21 @@ private fun EpubNavigator(
                         // wrong page.
                         val locator = lastPageLocator ?: fragment.currentLocator.value
                         val resourceHref = locator.href.toString()
+                        // The chapter's rendered text, which the tap's pageOffset
+                        // indexes into. Read fresh from the same WebView as the
+                        // tap, so the two can never describe different chapters.
+                        val pageText = PageText.read(fragment)
                         readAlongViewModel.onWordTapped(
                             word = tapped.word,
                             resourceHref = resourceHref,
                             blockText = tapped.blockText,
                             offset = tapped.offset,
-                            // Where the reader is looking on screen, not audio
-                            // playback position -- see ChunkIndex.indexOfTap.
+                            // Where the reader is looking on screen -- only a live
+                            // book's "Read from here" still needs it, to start
+                            // synthesis somewhere nothing is aligned yet.
                             readingProgression = locator.locations.progression,
+                            pageText = pageText,
+                            pageOffset = tapped.pageOffset,
                         )
                         // Seeds the drag handles at the tapped word's own
                         // corners -- see WordMenuTarget's docstring for why
@@ -1044,6 +1051,8 @@ private fun EpubNavigator(
                             bottom = tapped.bottom,
                             resourceHref = resourceHref,
                             progression = locator.locations.progression,
+                            pageText = pageText,
+                            pageOffset = tapped.pageOffset,
                         )
                         return@launch
                     }

@@ -1,6 +1,5 @@
 package dev.reedd.domain
 
-import dev.reedd.data.align.NormalizedText
 import dev.reedd.data.align.TextNormalizer
 import dev.reedd.data.db.SyncChunkEntity
 
@@ -126,9 +125,7 @@ class ChunkIndex(
     }
 
     /**
-     * The three-strategy content match [indexOfSelection] and [indexOfTap]'s
-     * fallback both need, shared so the latter is not a weaker reimplementation
-     * of the former over a narrower candidate list.
+     * The three-strategy content match [indexOfSelection] uses.
      *
      * @param needle already normalized and trimmed.
      */
@@ -171,125 +168,34 @@ class ChunkIndex(
     }
 
     /**
-     * The sentence at a character offset inside a block of page text — a single tap.
+     * The sentence at a character offset in a chapter's rendered text -- a single
+     * tap, for "read from here".
      *
-     * More precise than [indexOfSelection], and preferred when the tap position is
-     * known: it finds where each sentence *sits* in the block and picks the one whose
-     * span actually covers the tap, so tapping the second of two identical sentences
-     * in a paragraph selects the second one.
+     * An exact lookup through a [SentenceMap] of the whole chapter, never a guess:
+     * a tap that lands outside every mapped sentence resolves to null, so the menu
+     * leaves "Read from here" out rather than playing from somewhere else.
      *
-     * @param blockText the text content of the tapped block element.
-     * @param offset the tap's character offset within [blockText].
-     * @param readingProgression where the reader is *looking*, as a 0.0-1.0
-     *   fraction through the current resource -- Readium's own
-     *   `Locator.Locations.progression` at tap time, **not** anything to do with
-     *   audio playback. That distinction matters: "Read from here" exists
-     *   specifically to jump listening to somewhere other than where it currently
-     *   is, so anchoring to playback position (tried first, reverted -- see
-     *   BUGS.md) made the primary match latch onto whatever was nearest
-     *   *playback*, nowhere near the tap, and "completely broken, pages jump
-     *   around" is exactly what that looks like. Reading position -- what is
-     *   actually on the screen the tap landed on -- is always near the tap by
-     *   construction. Used to prefer nearby candidates first: see the walk below
-     *   for why that matters at all (a short, common line recurring many times
-     *   in one chapter).
+     * @param pageText every text node under the chapter's `<body>`, as the WebView
+     *   renders it (see `PageText`).
+     * @param offset the tapped word's start within [pageText].
      */
-    fun indexOfTap(resourceHref: String?, blockText: String, offset: Int, readingProgression: Double? = null): Int? {
-        if (blockText.isEmpty()) return null
-        val name = bareResourceName(resourceHref)
-        val candidates = chunks.withIndex().filter { (_, chunk) ->
-            chunk.isAligned && (name == null || bareResourceName(chunk.resourceHref) == name)
-        }
-        if (candidates.isEmpty()) return null
-
-        // Readium's progression is a fraction of this resource; the candidate
-        // list is already scoped to it, so the fraction converts straight into
-        // an approximate position among *these* candidates -- no absolute chunk
-        // index needed.
-        val anchorIndex = readingProgression?.let { p ->
-            candidates.getOrNull((p * candidates.size).toInt().coerceIn(0, candidates.size - 1))?.index
-        }
-
-        // Walk sentences and block text together, advancing a cursor -- the same
-        // approach the aligner uses, and for the same reason. Matching each sentence
-        // independently cannot tell two *identical* sentences apart ("He nodded."
-        // twice in one paragraph); only their order can, so the nth occurrence is
-        // assigned to the nth sentence *among the candidates given* -- see below for
-        // why that candidate list is not always every chunk in the chapter.
-        //
-        // In *normalized* space, not raw: [chunk.textHighlight] was extracted from
-        // the epub at conversion time with jsoup, [blockText] comes from the
-        // WebView's rendered DOM at tap time with Blink -- two different parsers on
-        // the same markup usually agree byte-for-byte but not always (a differently
-        // decoded entity, a stray smart quote), and a literal indexOf broke on
-        // exactly that before, falling through to the position-blind fallback below
-        // for text that in fact matched perfectly well once folded.
-        val normalizedBlock = TextNormalizer.normalize(blockText)
-
-        // Try a window around the reader's approximate position first. This is the
-        // actual fix for a real, confirmed case: this walk assigns a matching
-        // occurrence to whichever candidate it reaches *first*, in chapter order --
-        // with every chunk in the chapter in play, an identical short line pages
-        // before the reader's own paragraph can be reached first and "steal" the
-        // match meant for the one actually on screen, even though both the primary
-        // match and its normalization are working exactly as intended. Restricting
-        // to nearby candidates first removes every far-away duplicate from
-        // contention before that can happen; the unrestricted retry below exists
-        // for when nothing nearby matches at all (a stale anchor, or none given).
-        if (anchorIndex != null) {
-            val nearby = candidates.filter { (index, _) -> kotlin.math.abs(index - anchorIndex) <= ANCHOR_WINDOW }
-            walkForTap(nearby, normalizedBlock, offset).first?.let { return it }
-        }
-
-        val (result, lastMatched) = walkForTap(candidates, normalizedBlock, offset)
-        result?.let { return it }
-
-        // Nothing covered the tap exactly, even normalized and unrestricted -- fall
-        // back to a window around it, using the same three-strategy content match
-        // indexOfSelection uses (not a weaker one-strategy check), but tried first
-        // against only what is at-or-after wherever the walk above last landed: for
-        // a phrase that repeats, the nearest occurrence is what the reader tapped,
-        // and the *first* one anywhere in the chapter can be pages back.
-        val from = (offset - WINDOW / 2).coerceIn(0, blockText.length)
-        val to = (offset + WINDOW / 2).coerceIn(from, blockText.length)
-        val needle = TextNormalizer.normalizeToString(blockText.substring(from, to)).trim()
-        if (lastMatched >= 0) {
-            matchByContent(candidates.filter { (index, _) -> index >= lastMatched }, needle)?.let { return it }
-        }
-
-        // Still nothing nearby -- last resort, unrestricted, same as before.
-        return matchByContent(candidates, needle)
+    fun indexAtPageOffset(resourceHref: String?, pageText: String, offset: Int): Int? {
+        if (pageText.isEmpty() || offset < 0) return null
+        val name = bareResourceName(resourceHref) ?: return null
+        return sentenceMap(name, pageText).sentenceAt(offset)
     }
 
-    /**
-     * One pass of the cursor walk described in [indexOfTap], over whichever
-     * candidate list it is given.
-     *
-     * @return the matched chunk index (or null if none covered the tap), and the
-     *   last candidate the walk matched regardless -- [indexOfTap]'s own fallback
-     *   needs that even when this pass found no exact covering match.
-     */
-    private fun walkForTap(
-        candidates: List<IndexedValue<SyncChunkEntity>>,
-        normalizedBlock: NormalizedText,
-        offset: Int,
-    ): Pair<Int?, Int> {
-        var cursor = 0
-        var lastMatched = -1
-        for ((index, chunk) in candidates) {
-            val highlight = chunk.textHighlight?.takeIf { it.isNotEmpty() } ?: continue
-            val needle = TextNormalizer.normalizeToString(highlight)
-            if (needle.isEmpty()) continue
-            // Not in this block at all: a sentence from another paragraph. Skipped
-            // without moving the cursor.
-            val at = normalizedBlock.text.indexOf(needle, cursor).takeIf { it >= 0 } ?: continue
-            val end = at + needle.length
-            val span = normalizedBlock.originalRange(at, end)
-            if (offset in span.first..(span.last + 1)) return index to index
-            cursor = end
-            lastMatched = index
+    /** The last map built, reused while the reader keeps tapping in one chapter. */
+    private var cachedMap: Triple<String, String, SentenceMap>? = null
+
+    private fun sentenceMap(name: String, pageText: String): SentenceMap {
+        cachedMap?.let { (cachedName, cachedText, map) ->
+            if (cachedName == name && cachedText == pageText) return map
         }
-        return null to lastMatched
+        val candidates = chunks.withIndex().filter { (_, chunk) ->
+            chunk.isAligned && bareResourceName(chunk.resourceHref) == name
+        }
+        return SentenceMap(pageText, candidates).also { cachedMap = Triple(name, pageText, it) }
     }
 
     /** A copy with a different timing offset; the mapping itself is unchanged. */
@@ -304,24 +210,5 @@ class ChunkIndex(
          * coincidence than the sentence the reader meant.
          */
         private const val MIN_PARTIAL_MATCH = 8
-
-        /**
-         * Characters taken around a tap when exact matching fails: ±40. Tight on
-         * purpose — widen it and the fallback stops being about *where* the tap was.
-         */
-        private const val WINDOW = 80
-
-        /**
-         * Chunks either side of [indexOfTap]'s anchor tried before falling back to
-         * the whole chapter. A real book (a 396-minute, 9,724-chunk novel) measured
-         * short duplicated lines as close as 11 chunks apart and as far as several
-         * hundred within a single chapter -- this has to be tight enough to exclude
-         * a duplicate a genuine few pages away, while wide enough that a reader who
-         * has paused and paged ahead of the audio still taps successfully. Not
-         * derived from a real chunks-per-page measurement (pagination depends on
-         * font size and screen, which this class has no way to know); a reasonable,
-         * tunable guess.
-         */
-        private const val ANCHOR_WINDOW = 40
     }
 }

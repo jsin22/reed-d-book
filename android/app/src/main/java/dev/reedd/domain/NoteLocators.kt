@@ -8,7 +8,7 @@ import org.readium.r2.shared.util.mediatype.MediaType
  * Builds a [Locator] for a note -- for a tapped word ([tapLocator]) or a
  * drag-extended selection ([extendedLocator]). Neither Readium's `Publication`
  * nor its DOM has any other reason to hand one of these back on its own:
- * read-along matching works off raw strings via [ChunkIndex.indexOfTap]/
+ * read-along matching works off raw strings via [ChunkIndex.indexAtPageOffset]/
  * [ChunkIndex.indexOfSelection] and never needs a Locator either. Shaped
  * exactly like [dev.reedd.ui.reader.ReadAlongLocators.locator] -- a
  * text-quote anchor scoped to the resource, with `before`/`after` context to

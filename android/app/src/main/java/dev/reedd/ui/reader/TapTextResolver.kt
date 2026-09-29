@@ -12,6 +12,9 @@ data class TappedWord(
     val blockText: String,
     /** Character offset of the word within [blockText]. */
     val offset: Int,
+    /** Character offset of the word within the whole chapter's text (see
+     *  [PageText]), or null if it could not be measured. */
+    val pageOffset: Int?,
     /** The word's box in **CSS pixels**, for positioning a menu beside it. */
     val left: Float,
     val top: Float,
@@ -252,6 +255,7 @@ object TapTextResolver {
             word = word,
             blockText = text,
             offset = offset.coerceAtMost(text.length),
+            pageOffset = json.optInt("pageOffset", -1).takeIf { it >= 0 },
             left = json.optDouble("left", 0.0).toFloat(),
             top = json.optDouble("top", 0.0).toFloat(),
             right = json.optDouble("right", 0.0).toFloat(),
@@ -262,6 +266,7 @@ object TapTextResolver {
     private fun script(x: Float, y: Float): String = """
         (function() {
           try {
+            ${PageText.HELPERS}
             // Readium's decoration overlays (e.g. the currently-spoken-sentence
             // highlight, group "readalong") are real elements painted above the
             // text -- Readium's own bundle never sets pointer-events on them. Left
@@ -346,6 +351,7 @@ object TapTextResolver {
 
             return JSON.stringify({
               word: word, text: block.textContent || '', offset: offset,
+              pageOffset: reeddPageOffset(node, start),
               left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom
             });
           } catch (e) {

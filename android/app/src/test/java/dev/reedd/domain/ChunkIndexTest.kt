@@ -213,7 +213,7 @@ class ChunkIndexTest {
         // never compared equal, hiding "Read from here" on every word.
         val spaced = ChunkIndex(listOf(aligned(0, "A sentence in a spaced file.", href = "EPUB/My Chapter.xhtml")))
         assertEquals(0, spaced.indexOfSelection("EPUB/My%20Chapter.xhtml", "A sentence in a spaced file."))
-        assertEquals(0, spaced.indexOfTap("EPUB/My%20Chapter.xhtml", "A sentence in a spaced file.", 5))
+        assertEquals(0, spaced.indexAtPageOffset("EPUB/My%20Chapter.xhtml", "A sentence in a spaced file.", 5))
     }
 
     @Test
@@ -244,11 +244,12 @@ class ChunkIndexTest {
         assertEquals(2_000L, selectable.seekPositionFor(target))
     }
 
-    // -- single tap: an offset inside a block of page text ---------------------
+    // -- single tap: an offset into the chapter's rendered text -----------------
 
-    /** One paragraph as the WebView would report it, with a repeated sentence. */
-    private val paragraph =
-        "He nodded. Digital file formats are the foundation of modern computing. He nodded."
+    /** A chapter as the WebView renders it: a heading nobody speaks, then prose
+     *  with a line that repeats. */
+    private val chapterText =
+        "Chapter One\n\n  He nodded. Digital file formats are the foundation of modern computing.\n  He nodded.\n"
 
     private val tappable = ChunkIndex(
         listOf(
@@ -258,119 +259,77 @@ class ChunkIndexTest {
         )
     )
 
+    private fun ChunkIndex.tap(text: String, offset: Int, href: String = "EPUB/c1.xhtml") =
+        indexAtPageOffset(href, text, offset)
+
     @Test
     fun `a tap resolves to the sentence covering it`() {
-        assertEquals(0, tappable.indexOfTap("EPUB/c1.xhtml", paragraph, 3))
-        assertEquals(1, tappable.indexOfTap("EPUB/c1.xhtml", paragraph, 40))
+        assertEquals(0, tappable.tap(chapterText, chapterText.indexOf("nodded")))
+        assertEquals(1, tappable.tap(chapterText, chapterText.indexOf("formats")))
     }
 
     @Test
-    fun `tapping a repeated sentence picks the occurrence tapped, not the first`() {
-        // The reason a tap uses offsets rather than text matching: "He nodded."
-        // appears twice, and only the position distinguishes them.
-        val secondOccurrence = paragraph.lastIndexOf("He nodded.")
-        assertEquals(2, tappable.indexOfTap("EPUB/c1.xhtml", paragraph, secondOccurrence + 4))
+    fun `tapping a repeated line picks the occurrence tapped, by reading order`() {
+        val second = chapterText.lastIndexOf("He nodded.")
+        assertEquals(2, tappable.tap(chapterText, second))
     }
 
     @Test
-    fun `a tap at the very start and very end of a block still resolve`() {
-        assertEquals(0, tappable.indexOfTap("EPUB/c1.xhtml", paragraph, 0))
-        assertEquals(2, tappable.indexOfTap("EPUB/c1.xhtml", paragraph, paragraph.length))
+    fun `a far-apart duplicate resolves exactly, with no position hint needed`() {
+        // The case the old per-paragraph search needed a reading-position window
+        // for: a short line recurring a hundred sentences apart in one chapter.
+        val chunks = mutableListOf(aligned(0, "What do you mean?"))
+        for (i in 1..99) chunks.add(aligned(i, "Filler sentence number $i."))
+        chunks.add(aligned(100, "What do you mean?"))
+        val index = ChunkIndex(chunks)
+        val text = chunks.joinToString(" ") { it.textHighlight!! }
+
+        assertEquals(0, index.tap(text, text.indexOf("What do you mean?")))
+        assertEquals(100, index.tap(text, text.lastIndexOf("What do you mean?")))
     }
 
     @Test
-    fun `a tap in text that is not mapped resolves to nothing`() {
-        val other = "This paragraph was never spoken by anyone at all."
-        assertNull(tappable.indexOfTap("EPUB/c1.xhtml", other, 10))
+    fun `text nobody speaks resolves to nothing rather than a nearby sentence`() {
+        assertNull(tappable.tap(chapterText, chapterText.indexOf("Chapter")))
     }
 
     @Test
-    fun `an empty block is not resolved`() {
-        assertNull(tappable.indexOfTap("EPUB/c1.xhtml", "", 0))
+    fun `rendered text differing in whitespace and quote style still resolves`() {
+        val index = ChunkIndex(listOf(aligned(0, "\"Talia,\" she said."), aligned(1, "Emmy escorted them out.")))
+        val rendered = "“Talia,”   she\nsaid. Emmy escorted them out."
+        assertEquals(0, index.tap(rendered, rendered.indexOf("Talia")))
+        assertEquals(1, index.tap(rendered, rendered.indexOf("escorted")))
     }
 
     @Test
-    fun `the resource scopes a tap too`() {
+    fun `a sentence missing from the page does not derail the ones after it`() {
+        val index = ChunkIndex(
+            listOf(
+                aligned(0, "First sentence here."),
+                aligned(1, "This one was edited out of the epub."),
+                aligned(2, "Third sentence here."),
+            )
+        )
+        val text = "First sentence here. Third sentence here."
+        assertEquals(2, index.tap(text, text.indexOf("Third")))
+    }
+
+    @Test
+    fun `the resource scopes a tap`() {
         val index = ChunkIndex(
             listOf(
                 aligned(0, "Shared sentence.", href = "EPUB/c1.xhtml"),
                 aligned(1, "Shared sentence.", href = "EPUB/c2.xhtml"),
             )
         )
-        assertEquals(1, index.indexOfTap("EPUB/c2.xhtml", "Shared sentence.", 5))
+        assertEquals(1, index.tap("Shared sentence.", 3, href = "EPUB/c2.xhtml"))
+        assertNull(index.tap("Shared sentence.", 3, href = "EPUB/c3.xhtml"))
     }
 
     @Test
-    fun `a distant duplicate does not steal a match reading position would keep nearby`() {
-        // Regression, reproduced against a real book: a short, common line
-        // ("What do you mean?", "She said.") recurring many times in one chapter
-        // used to always resolve to its *first* occurrence, because the walk
-        // assigns a match to whichever candidate it reaches first in chapter
-        // order -- with no notion of where the reader actually is, an identical
-        // line pages before the tapped paragraph is exactly as good a candidate
-        // as the reader's own. This held even though the primary match and its
-        // normalization were both working exactly as intended -- BUG-17's fix
-        // did not cover this case.
-        val chunks = mutableListOf(aligned(0, "What do you mean?"))
-        for (i in 1..99) chunks.add(aligned(i, "Filler sentence number $i."))
-        chunks.add(aligned(100, "What do you mean?"))
-        val index = ChunkIndex(chunks)
-
-        val block = "He shook his head. What do you mean? She stared back."
-        val offset = block.indexOf("What do you mean?") + 5
-
-        // No reading position given: falls back to exactly the old, buggy
-        // behaviour -- the far occurrence wins, because nothing says otherwise.
-        assertEquals(0, index.indexOfTap("EPUB/c1.xhtml", block, offset))
-
-        // A reading position near the true occurrence (index 100 of 101
-        // candidates, so progression ~0.99) excludes the distant duplicate from
-        // the primary walk entirely, so the nearby one -- the one actually on
-        // screen -- wins instead.
-        assertEquals(100, index.indexOfTap("EPUB/c1.xhtml", block, offset, readingProgression = 0.99))
-    }
-
-    @Test
-    fun `a stale or missing reading position still falls back to a correct, if unrestricted, match`() {
-        // The reading position is a hint, not a requirement -- an unknown
-        // position (no locator yet) or one that happens to sit far from both
-        // occurrences must not make tapping stop working, only lose the extra
-        // precision.
-        val chunks = mutableListOf(aligned(0, "What do you mean?"))
-        for (i in 1..99) chunks.add(aligned(i, "Filler sentence number $i."))
-        chunks.add(aligned(100, "What do you mean?"))
-        val index = ChunkIndex(chunks)
-
-        val block = "He shook his head. What do you mean? She stared back."
-        val offset = block.indexOf("What do you mean?") + 5
-
-        assertEquals(0, index.indexOfTap("EPUB/c1.xhtml", block, offset, readingProgression = null))
-        // Progression ~0.5 (near candidate 50) is far from *either* occurrence,
-        // finds nothing in its own window, and falls back to the unrestricted
-        // walk, same as no reading position at all.
-        assertEquals(0, index.indexOfTap("EPUB/c1.xhtml", block, offset, readingProgression = 0.5))
-    }
-
-    @Test
-    fun `a block whose whitespace differs still resolves precisely`() {
-        // The WebView's text content will not always match the stored text byte for
-        // byte -- the normalized primary match (same folding as TextNormalizer
-        // uses for the aligner) absorbs this rather than falling through to the
-        // position-blind window fallback.
-        val reflowed = "He nodded.\n   Digital file formats are the   foundation of modern computing."
-        assertEquals(1, tappable.indexOfTap("EPUB/c1.xhtml", reflowed, 45))
-    }
-
-    @Test
-    fun `a repeated sentence pair still resolves by position when the exact block differs`() {
-        // Same shape as "tapping a repeated sentence picks the occurrence tapped,
-        // not the first" above, but through a block whose whitespace does not
-        // match byte for byte -- the normalized primary walk (this test's real
-        // point) still has to track *which* occurrence, not just *that* the text
-        // is somewhere in the chunk list.
-        val reflowed = "He  nodded.\nDigital file formats are the foundation of modern computing.\nHe  nodded."
-        val secondOccurrence = reflowed.lastIndexOf("He")
-        assertEquals(2, tappable.indexOfTap("EPUB/c1.xhtml", reflowed, secondOccurrence + 4))
+    fun `no page text or no offset resolves to nothing`() {
+        assertNull(tappable.tap("", 0))
+        assertNull(tappable.tap(chapterText, -1))
     }
 
     @Test

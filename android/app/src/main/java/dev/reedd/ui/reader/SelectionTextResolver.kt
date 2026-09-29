@@ -18,6 +18,9 @@ data class ExtendedSelection(
     val text: String,
     val before: String,
     val after: String,
+    /** Where the selection starts in the whole chapter's text (see [PageText]),
+     *  or null if it could not be measured. */
+    val pageOffset: Int?,
     val startX: Float,
     val startY: Float,
     val startBottom: Float,
@@ -134,6 +137,7 @@ object SelectionTextResolver {
             text = text,
             before = json.optString("before", ""),
             after = json.optString("after", ""),
+            pageOffset = json.optInt("pageOffset", -1).takeIf { it >= 0 },
             startX = json.optDouble("startX", 0.0).toFloat(),
             startY = json.optDouble("startY", 0.0).toFloat(),
             startBottom = json.optDouble("startBottom", 0.0).toFloat(),
@@ -146,6 +150,7 @@ object SelectionTextResolver {
     private fun extendScript(startX: Float, startY: Float, endX: Float, endY: Float): String = """
         (function() {
           try {
+            ${PageText.HELPERS}
             // Same passthrough guard TapTextResolver.resolve uses, and the same
             // element id -- idempotent either way, and this can run before or
             // after that script has, in either order.
@@ -303,6 +308,7 @@ object SelectionTextResolver {
 
             return JSON.stringify({
               text: text, before: before, after: after,
+              pageOffset: reeddPageOffset(range.startContainer, range.startOffset),
               startX: startRect.left, startY: startRect.top, startBottom: startRect.bottom,
               endX: endRect.left, endY: endRect.top, endBottom: endRect.bottom
             });

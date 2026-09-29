@@ -148,6 +148,10 @@ data class SelectionHandles(
     val after: String,
     val resourceHref: String,
     val progression: Double?,
+    /** The chapter's rendered text and where the selection starts in it (see
+     *  [PageText]) -- what "Read from here" resolves the sentence from. */
+    val pageText: String?,
+    val pageOffset: Int?,
 )
 
 /**
@@ -226,11 +230,10 @@ class WordSelectionController(
         blockText: String,
         offset: Int,
         readingProgression: Double?,
+        pageText: String?,
+        pageOffset: Int?,
     ) {
-        // readingProgression: where the reader is looking on screen, not
-        // audio playback position -- see ChunkIndex.indexOfTap for why that
-        // distinction matters.
-        val sentenceIndex = chunkIndex().indexOfTap(resourceHref, blockText, offset, readingProgression)
+        val sentenceIndex = sentenceAt(resourceHref, pageText, pageOffset)
         _tappedWord.value = WordMenuTarget.Tap(
             word = word,
             resourceHref = resourceHref,
@@ -249,7 +252,10 @@ class WordSelectionController(
      * already are the two handle positions. Called right after
      * [onWordTapped], from the same tap.
      */
-    fun armHandles(word: String, left: Float, top: Float, right: Float, bottom: Float, resourceHref: String, progression: Double?) {
+    fun armHandles(
+        word: String, left: Float, top: Float, right: Float, bottom: Float,
+        resourceHref: String, progression: Double?, pageText: String?, pageOffset: Int?,
+    ) {
         _selectionHandles.value = SelectionHandles(
             startX = left, startY = top, startBottom = bottom,
             endX = right, endY = top, endBottom = bottom,
@@ -260,6 +266,8 @@ class WordSelectionController(
             after = "",
             resourceHref = resourceHref,
             progression = progression,
+            pageText = pageText,
+            pageOffset = pageOffset,
         )
     }
 
@@ -321,6 +329,7 @@ class WordSelectionController(
             displayStartX = result.startX, displayStartY = result.startY, displayStartBottom = result.startBottom,
             displayEndX = result.endX, displayEndY = result.endY, displayEndBottom = result.endBottom,
             text = result.text, before = result.before, after = result.after,
+            pageOffset = result.pageOffset,
         )
     }
 
@@ -329,7 +338,7 @@ class WordSelectionController(
     fun onHandleDragEnd() {
         draggingHandle = false
         val handles = _selectionHandles.value ?: return
-        val sentenceIndex = chunkIndex().indexOfSelection(handles.resourceHref, handles.text)
+        val sentenceIndex = sentenceAt(handles.resourceHref, handles.pageText, handles.pageOffset)
         _tappedWord.value = WordMenuTarget.ExtendedSelection(
             text = handles.text,
             before = handles.before,
@@ -340,6 +349,11 @@ class WordSelectionController(
             canReadFromHere = sentenceIndex != null || (isLive() && handles.progression != null),
         )
     }
+
+    /** Exactly the sentence at [pageOffset], or null -- never a nearby guess. */
+    private fun sentenceAt(resourceHref: String?, pageText: String?, pageOffset: Int?): Int? =
+        if (pageText == null || pageOffset == null) null
+        else chunkIndex().indexAtPageOffset(resourceHref, pageText, pageOffset)
 
     /** Also clears [selectionHandles] -- once the menu is gone, its handles
      *  (if any were armed) have nothing left to extend. */

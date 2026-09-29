@@ -807,11 +807,15 @@ class ReadAlongViewModel(
     // Thin delegates to [selection]; see [WordSelectionController]'s own doc
     // for what each of these actually does.
 
-    fun onWordTapped(word: String, resourceHref: String?, blockText: String, offset: Int, readingProgression: Double?) =
-        selection.onWordTapped(word, resourceHref, blockText, offset, readingProgression)
+    fun onWordTapped(
+        word: String, resourceHref: String?, blockText: String, offset: Int, readingProgression: Double?,
+        pageText: String?, pageOffset: Int?,
+    ) = selection.onWordTapped(word, resourceHref, blockText, offset, readingProgression, pageText, pageOffset)
 
-    fun armHandles(word: String, left: Float, top: Float, right: Float, bottom: Float, resourceHref: String, progression: Double?) =
-        selection.armHandles(word, left, top, right, bottom, resourceHref, progression)
+    fun armHandles(
+        word: String, left: Float, top: Float, right: Float, bottom: Float,
+        resourceHref: String, progression: Double?, pageText: String?, pageOffset: Int?,
+    ) = selection.armHandles(word, left, top, right, bottom, resourceHref, progression, pageText, pageOffset)
 
     fun onHandleDragStart() = selection.onHandleDragStart()
 
@@ -835,31 +839,13 @@ class ReadAlongViewModel(
         val target = tappedWord.value ?: return
         dismissWordMenu()
         val sentenceIndex = target.sentenceIndex
-        val quoted = target.quotedText
         if (sentenceIndex != null) {
-            appContext?.let {
-                dev.reedd.diagnostics.CrashReporter.reportDiagnostic(
-                    it, "ReeddReadFromHere",
-                    "aligned path: tappedWord=\"$quoted\" resourceHref=${target.resourceHref} " +
-                        "tapProgression=${target.progression} -> sentenceIndex=$sentenceIndex " +
-                        "chunk.resourceHref=${index.chunkAtIndex(sentenceIndex)?.resourceHref} " +
-                        "chunk.textHighlight=${index.chunkAtIndex(sentenceIndex)?.textHighlight} " +
-                        "chunk.progression=${index.chunkAtIndex(sentenceIndex)?.progression}",
-                )
-            }
             playFrom(sentenceIndex)
             return
         }
         if (!isLive) return
         val href = target.resourceHref ?: return
         val progression = target.progression ?: return
-        appContext?.let {
-            dev.reedd.diagnostics.CrashReporter.reportDiagnostic(
-                it, "ReeddReadFromHere",
-                "fraction path: tappedWord=\"$quoted\" resourceHref=$href tapProgression=$progression " +
-                    "isTap=${target is WordMenuTarget.Tap}",
-            )
-        }
         viewModelScope.launch {
             // A plain word tap carries its own exact block text + character
             // offset -- LiveChunkSource.startFromTap uses that to build a
