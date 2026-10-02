@@ -246,17 +246,28 @@ class ChunkIndexTest {
 
     // -- single tap: an offset into the chapter's rendered text -----------------
 
+    /**
+     * Sentences placed in [text] the way the aligner places them: in order, each
+     * found after the previous one, with `progression` its start as a fraction of
+     * the text.
+     */
+    private fun alignedIn(text: String, vararg sentences: String, href: String = "EPUB/c1.xhtml"): List<SyncChunkEntity> {
+        var cursor = 0
+        return sentences.mapIndexed { ordinal, sentence ->
+            val at = text.indexOf(sentence, cursor)
+            require(at >= 0) { "'$sentence' not in text after $cursor" }
+            cursor = at + sentence.length
+            aligned(ordinal, sentence, href).copy(progression = at.toDouble() / text.length)
+        }
+    }
+
     /** A chapter as the WebView renders it: a heading nobody speaks, then prose
      *  with a line that repeats. */
     private val chapterText =
         "Chapter One\n\n  He nodded. Digital file formats are the foundation of modern computing.\n  He nodded.\n"
 
     private val tappable = ChunkIndex(
-        listOf(
-            aligned(0, "He nodded."),
-            aligned(1, "Digital file formats are the foundation of modern computing."),
-            aligned(2, "He nodded."),
-        )
+        alignedIn(chapterText, "He nodded.", "Digital file formats are the foundation of modern computing.", "He nodded.")
     )
 
     private fun ChunkIndex.tap(text: String, offset: Int, href: String = "EPUB/c1.xhtml") =
@@ -269,23 +280,37 @@ class ChunkIndexTest {
     }
 
     @Test
-    fun `tapping a repeated line picks the occurrence tapped, by reading order`() {
-        val second = chapterText.lastIndexOf("He nodded.")
-        assertEquals(2, tappable.tap(chapterText, second))
+    fun `tapping a repeated line picks the occurrence tapped`() {
+        assertEquals(2, tappable.tap(chapterText, chapterText.lastIndexOf("He nodded.")))
     }
 
     @Test
-    fun `a far-apart duplicate resolves exactly, with no position hint needed`() {
-        // The case the old per-paragraph search needed a reading-position window
-        // for: a short line recurring a hundred sentences apart in one chapter.
-        val chunks = mutableListOf(aligned(0, "What do you mean?"))
-        for (i in 1..99) chunks.add(aligned(i, "Filler sentence number $i."))
-        chunks.add(aligned(100, "What do you mean?"))
-        val index = ChunkIndex(chunks)
-        val text = chunks.joinToString(" ") { it.textHighlight!! }
+    fun `a far-apart duplicate resolves exactly`() {
+        val lines = listOf("What do you mean?") + (1..99).map { "Filler sentence number $it." } + "What do you mean?"
+        val text = lines.joinToString(" ")
+        val index = ChunkIndex(alignedIn(text, *lines.toTypedArray()))
 
         assertEquals(0, index.tap(text, text.indexOf("What do you mean?")))
         assertEquals(100, index.tap(text, text.lastIndexOf("What do you mean?")))
+    }
+
+    @Test
+    fun `one sentence matched out of place does not lose the ones around it`() {
+        // Regression, from a real Gutenberg header page: the converter's injected
+        // title line, split by a "Mr." bug, left a stray "Jekyll and Mr." matched
+        // into the page ahead of the real title. A single forward pass then never
+        // found the real title line behind it, and a tap on any later "Mr."
+        // resolved to the stray piece.
+        val text = "The strange case of Dr. Jekyll and Mr. Hyde. Title: The strange case of Dr. Jekyll and Mr. Hyde."
+        val stray = aligned(1, "Jekyll and Mr.").copy(progression = text.indexOf("Jekyll").toDouble() / text.length)
+        val real = alignedIn(text, "The strange case of Dr.", "Jekyll and Mr.", "Hyde.", "Title: The strange case of Dr.", "Jekyll and Mr.")
+            .mapIndexed { i, chunk -> chunk.copy(ordinal = i + 2) }
+        val index = ChunkIndex(listOf(stray) + real)
+
+        assertEquals(1, index.tap(text, 0))                                   // "The strange case of Dr."
+        assertEquals(2, index.tap(text, text.indexOf("Jekyll")))             // the real one wins the overlap
+        assertEquals(4, index.tap(text, text.indexOf("Title")))
+        assertEquals(5, index.tap(text, text.lastIndexOf("Jekyll")))
     }
 
     @Test
@@ -295,31 +320,19 @@ class ChunkIndexTest {
 
     @Test
     fun `rendered text differing in whitespace and quote style still resolves`() {
-        val index = ChunkIndex(listOf(aligned(0, "\"Talia,\" she said."), aligned(1, "Emmy escorted them out.")))
+        val stored = "\"Talia,\" she said. Emmy escorted them out."
+        val index = ChunkIndex(alignedIn(stored, "\"Talia,\" she said.", "Emmy escorted them out."))
         val rendered = "“Talia,”   she\nsaid. Emmy escorted them out."
         assertEquals(0, index.tap(rendered, rendered.indexOf("Talia")))
         assertEquals(1, index.tap(rendered, rendered.indexOf("escorted")))
     }
 
     @Test
-    fun `a sentence missing from the page does not derail the ones after it`() {
-        val index = ChunkIndex(
-            listOf(
-                aligned(0, "First sentence here."),
-                aligned(1, "This one was edited out of the epub."),
-                aligned(2, "Third sentence here."),
-            )
-        )
-        val text = "First sentence here. Third sentence here."
-        assertEquals(2, index.tap(text, text.indexOf("Third")))
-    }
-
-    @Test
     fun `the resource scopes a tap`() {
         val index = ChunkIndex(
             listOf(
-                aligned(0, "Shared sentence.", href = "EPUB/c1.xhtml"),
-                aligned(1, "Shared sentence.", href = "EPUB/c2.xhtml"),
+                aligned(0, "Shared sentence.", href = "EPUB/c1.xhtml").copy(progression = 0.0),
+                aligned(1, "Shared sentence.", href = "EPUB/c2.xhtml").copy(progression = 0.0),
             )
         )
         assertEquals(1, index.tap("Shared sentence.", 3, href = "EPUB/c2.xhtml"))
