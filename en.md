@@ -26,7 +26,25 @@ I?", and a percentage might have answered it.
 
 ## Requested
 
-*Nothing waiting. Add new enhancements here.*
+### E-8 — Look up rare words from a full dictionary on the server
+
+- **Where**: reader (Definition) / server
+- **Why**: less common words a reader actually wants defined come back "not
+  found" -- confirmed missing 2026-10-01: catholicity, perspicacity, obsequious,
+  pusillanimous, sanctimonious, verisimilitude, lugubrious, quotidian. The
+  offline dictionary only keeps words on a frequency allowlist cut at its top
+  80,000 (`FREQ_LIMIT` in `tools/build_dictionary_wiktionary.py`), which leaves
+  55,147 headwords -- and rare words are exactly what that cut drops.
+- **Must / nice**: nice -- the common-word dictionary works; this fills its gap.
+- **Notes**: chosen approach (option 2 of 3): keep the small offline dictionary
+  in the APK, and host a full one (no frequency cutoff) on the server. The app
+  looks up locally first and asks the server only on a miss, so common words stay
+  offline and the APK does not grow. Rejected: shipping the full dictionary in
+  the APK (likely tens of MB) and just raising the cutoff (frequency lists are
+  thin on rare literary words, so gaps remain). First step: re-download the
+  kaikki.org English Wiktionary extract (a few hundred MB compressed; no longer
+  on the build machine) and rebuild with the frequency filter off for the
+  server's copy.
 
 ---
 
