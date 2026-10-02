@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 
 from app import config, live_reading
 from app.book_metadata import LookupUnavailable
+from app.feedback_status import FeedbackStatus
 from app.main import app
 from app.store import JobStore
 from app.users import UserStore
@@ -952,6 +953,45 @@ class FeedbackTest(ApiTestCase):
         self.assertEqual(['feature', 'bug'], [e['type'] for e in entries])
         self.assertEqual('Dark mode please', entries[0]['text'])
         self.assertIsNotNone(entries[0]['submitted_at'])
+
+    def _submit_as_admin(self):
+        name = self.client.post('/api/feedback?feedback_type=bug', content=b'Broken').json()['stored']
+        _, admin_token = self.make_user('admin@example.com', is_admin=True)
+        self.client.headers['Authorization'] = f'Bearer {admin_token}'
+        return name
+
+    def test_feedback_can_be_marked_fixed_and_reopened(self):
+        name = self._submit_as_admin()
+        self.assertIsNone(self.client.get('/api/admin/feedback/entries').json()['entries'][0]['fixed_at'])
+
+        marked = self.client.post(f'/api/admin/feedback/{name}/status', json={'fixed': True})
+        self.assertEqual(200, marked.status_code)
+        self.assertIsNotNone(marked.json()['fixed_at'])
+        entry = self.client.get('/api/admin/feedback/entries').json()['entries'][0]
+        self.assertEqual(marked.json()['fixed_at'], entry['fixed_at'])
+
+        reopened = self.client.post(f'/api/admin/feedback/{name}/status', json={'fixed': False})
+        self.assertIsNone(reopened.json()['fixed_at'])
+        self.assertIsNone(self.client.get('/api/admin/feedback/entries').json()['entries'][0]['fixed_at'])
+
+    def test_marking_rejects_names_that_are_not_stored_feedback(self):
+        self._submit_as_admin()
+        for name in ('feedback-bug-20990101T000000000000.txt', 'users.json', '..%2Fusers.json'):
+            response = self.client.post(f'/api/admin/feedback/{name}/status', json={'fixed': True})
+            self.assertEqual(404, response.status_code, name)
+
+    def test_a_non_admin_cannot_mark_feedback_fixed(self):
+        name = self.client.post('/api/feedback?feedback_type=bug', content=b'Broken').json()['stored']
+        response = self.client.post(f'/api/admin/feedback/{name}/status', json={'fixed': True})
+        self.assertEqual(403, response.status_code)
+
+    def test_pruning_feedback_also_drops_its_fixed_status(self):
+        from app import main
+        name = self._submit_as_admin()
+        self.client.post(f'/api/admin/feedback/{name}/status', json={'fixed': True})
+        with mock.patch.object(main, 'MAX_FEEDBACK_FILES', 1):
+            self.client.post('/api/feedback?feedback_type=other', content=b'newer')
+        self.assertEqual({}, FeedbackStatus(self.settings.feedback_dir).fixed_at())
 
     def test_a_non_admin_cannot_list_feedback_entries(self):
         self.client.post('/api/feedback?feedback_type=other', content=b'a message')

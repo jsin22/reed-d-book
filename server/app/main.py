@@ -79,6 +79,7 @@ which does so lazily and only when someone actually uses that dashboard tab.
 
 import logging
 import os
+import re
 import shutil
 import subprocess
 from datetime import datetime, timezone
@@ -97,6 +98,7 @@ from .config import get_settings
 from . import live_reading, live_tts_experiment
 from .cover_generator import generate_placeholder_cover
 from .cover_lookup import fetch_cover
+from .feedback_status import FeedbackStatus
 from .mailer import invite_configured, send_invite
 from .metadata_health import MetadataHealth
 from .store import (DONE, LIVE_ONLY, TERMINAL_STATUSES, JobNotFound, JobStore, UploadTooLarge,
@@ -839,6 +841,7 @@ def list_feedback_entries(limit: int = 100):
     if not settings.feedback_dir.is_dir():
         return {'entries': []}
     files = sorted(settings.feedback_dir.glob('feedback-*.txt'), reverse=True)[:max(1, min(limit, MAX_FEEDBACK_FILES))]
+    fixed_at = FeedbackStatus(settings.feedback_dir).fixed_at()
     entries = []
     for f in files:
         # feedback-<kind>-<YYYYmmddTHHMMSSffffff>.txt, as written by submit_feedback.
@@ -852,8 +855,27 @@ def list_feedback_entries(limit: int = 100):
             'type': kind,
             'submitted_at': submitted,
             'text': f.read_text(encoding='utf-8', errors='replace'),
+            'fixed_at': fixed_at.get(f.name),
         })
     return {'entries': entries}
+
+
+#: Exactly the names submit_feedback writes -- checked before a name from the
+#: URL goes anywhere near the filesystem.
+_FEEDBACK_NAME = re.compile(r'feedback-[a-z]+-\d{8}T\d{12}\.txt')
+
+
+class FeedbackStatusBody(BaseModel):
+    fixed: bool
+
+
+@app.post('/api/admin/feedback/{name}/status', dependencies=[Depends(require_admin)])
+def set_feedback_status(name: str, body: FeedbackStatusBody):
+    """Mark one submission fixed, or reopen it (`fixed: false`)."""
+    settings = get_settings()
+    if not _FEEDBACK_NAME.fullmatch(name) or not (settings.feedback_dir / name).is_file():
+        raise HTTPException(status_code=404, detail='no such feedback')
+    return {'name': name, 'fixed_at': FeedbackStatus(settings.feedback_dir).set_fixed(name, body.fixed)}
 
 
 def _prune_feedback(directory: Path) -> None:
@@ -861,6 +883,7 @@ def _prune_feedback(directory: Path) -> None:
     files = sorted(directory.glob('feedback-*.txt'), reverse=True)
     for stale in files[MAX_FEEDBACK_FILES:]:
         stale.unlink(missing_ok=True)
+    FeedbackStatus(directory).forget_missing({f.name for f in files[:MAX_FEEDBACK_FILES]})
 
 
 @app.get('/api/jobs/{job_id}/log', response_class=PlainTextResponse)
@@ -1198,6 +1221,14 @@ _DASHBOARD_HTML = f"""<!doctype html>
   .fb-msg {{ margin: 10px 0 6px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.95rem; }}
   .fb-card details {{ color: var(--ink-soft); font-size: 0.8rem; }}
   .fb-card summary {{ cursor: pointer; }}
+  .fb-card.fixed {{ opacity: 0.55; }}
+  .fb-fixed {{ font-size: 0.75rem; font-weight: 600; color: #6fce8f; }}
+  .fb-toggle {{
+    margin-left: auto; background: none; color: var(--ink-soft); border: 1px solid var(--border);
+    border-radius: 6px; padding: 3px 10px; font: inherit; font-size: 0.78rem; cursor: pointer;
+  }}
+  .fb-toggle:disabled {{ opacity: 0.5; cursor: default; }}
+  .fb-sep {{ width: 1px; align-self: stretch; background: var(--border); margin: 0 4px; }}
   .fb-card pre {{ white-space: pre-wrap; overflow-wrap: anywhere; margin: 6px 0 0; font-size: 0.78rem; }}
 </style>
 </head>
@@ -1245,7 +1276,11 @@ _DASHBOARD_HTML = f"""<!doctype html>
       <button type="button" id="fb-forget">Forget token</button>
     </form>
     <div class="fb-bar" id="fb-filters" hidden>
-      <button class="chip active" data-kind="all">All</button>
+      <button class="chip active" data-state="open">Open</button>
+      <button class="chip" data-state="fixed">Fixed</button>
+      <button class="chip" data-state="all">All</button>
+      <span class="fb-sep"></span>
+      <button class="chip active" data-kind="all">All types</button>
       <button class="chip" data-kind="bug">Bugs</button>
       <button class="chip" data-kind="feature">Features</button>
       <button class="chip" data-kind="other">Other</button>
@@ -1406,7 +1441,7 @@ _DASHBOARD_HTML = f"""<!doctype html>
     const listEl = document.getElementById('fb-list');
     const filtersEl = document.getElementById('fb-filters');
     const TYPE_LABELS = {{bug: 'Bug', feature: 'Feature', other: 'Other'}};
-    let entries = [], kind = 'all';
+    let entries = [], kind = 'all', state = 'open';
 
     function getToken() {{ try {{ return localStorage.getItem(TOKEN_KEY) || ''; }} catch (e) {{ return ''; }} }}
     function setToken(t) {{ try {{ t ? localStorage.setItem(TOKEN_KEY, t) : localStorage.removeItem(TOKEN_KEY); }} catch (e) {{}} }}
@@ -1424,18 +1459,24 @@ _DASHBOARD_HTML = f"""<!doctype html>
     }}
 
     function render() {{
-      const shown = entries.filter(e => kind === 'all' || e.type === kind);
+      const shown = entries.filter(e =>
+        (kind === 'all' || e.type === kind) &&
+        (state === 'all' || (state === 'fixed') === Boolean(e.fixed_at)));
       if (!shown.length) {{
         listEl.className = 'empty';
-        listEl.textContent = entries.length ? 'Nothing of this type.' : 'No feedback yet.';
+        listEl.textContent = !entries.length ? 'No feedback yet.'
+          : state === 'open' ? 'Nothing open — everything here is marked fixed.' : 'Nothing matches these filters.';
         return;
       }}
       listEl.className = '';
       listEl.innerHTML = shown.map(e => {{
         const p = split(e.text);
         const when = e.submitted_at ? new Date(e.submitted_at).toLocaleString() : e.name;
-        return `<div class="fb-card">
-          <div class="fb-head"><span class="fb-type ${{esc(e.type)}}">${{esc(TYPE_LABELS[e.type] || e.type)}}</span>${{esc(when)}}</div>
+        const fixed = e.fixed_at
+          ? `<span class="fb-fixed">✓ Fixed ${{esc(new Date(e.fixed_at).toLocaleDateString())}}</span>` : '';
+        return `<div class="fb-card${{e.fixed_at ? ' fixed' : ''}}">
+          <div class="fb-head"><span class="fb-type ${{esc(e.type)}}">${{esc(TYPE_LABELS[e.type] || e.type)}}</span>${{esc(when)}}${{fixed}}
+            <button class="fb-toggle" data-name="${{esc(e.name)}}">${{e.fixed_at ? 'Reopen' : 'Mark fixed'}}</button></div>
           <div class="fb-msg">${{esc(p.message || '(empty)')}}</div>
           ${{p.meta ? `<details><summary>Device &amp; app</summary><pre>${{esc(p.meta)}}</pre></details>` : ''}}
           ${{p.crumbs ? `<details><summary>Breadcrumbs</summary><pre>${{esc(p.crumbs)}}</pre></details>` : ''}}
@@ -1473,13 +1514,30 @@ _DASHBOARD_HTML = f"""<!doctype html>
     }});
     document.getElementById('fb-refresh').addEventListener('click', load);
     for (const chip of filtersEl.querySelectorAll('.chip')) {{
+      const group = chip.dataset.kind ? 'kind' : 'state';
       chip.addEventListener('click', () => {{
-        for (const c of filtersEl.querySelectorAll('.chip')) c.classList.remove('active');
+        for (const c of filtersEl.querySelectorAll(`.chip[data-${{group}}]`)) c.classList.remove('active');
         chip.classList.add('active');
-        kind = chip.dataset.kind;
+        if (group === 'kind') kind = chip.dataset.kind; else state = chip.dataset.state;
         render();
       }});
     }}
+
+    listEl.addEventListener('click', ev => {{
+      const btn = ev.target.closest('.fb-toggle');
+      if (!btn) return;
+      const entry = entries.find(e => e.name === btn.dataset.name);
+      if (!entry) return;
+      btn.disabled = true;
+      fetch(`/api/admin/feedback/${{encodeURIComponent(entry.name)}}/status`, {{
+        method: 'POST',
+        headers: {{Authorization: `Bearer ${{getToken()}}`, 'Content-Type': 'application/json'}},
+        body: JSON.stringify({{fixed: !entry.fixed_at}}),
+      }})
+        .then(r => {{ if (!r.ok) throw new Error(); return r.json(); }})
+        .then(data => {{ entry.fixed_at = data.fixed_at; render(); }})
+        .catch(() => {{ btn.disabled = false; btn.textContent = 'Failed — retry'; }});
+    }});
     load();
   }})();
 </script>
