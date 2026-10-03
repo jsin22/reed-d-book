@@ -41,6 +41,20 @@ class ParseResponseTest(unittest.TestCase):
         self.assertEqual(result['category'], 'Fiction')
         self.assertEqual(result['genres'], ['Horror', 'Mystery'])
 
+    def test_genres_are_ordered_most_confident_first(self):
+        # The app groups a book by its first genre, so first must mean main --
+        # the model's own listing order is not a ranking.
+        result = _parse_response(json.dumps({
+            'category': 'Non-fiction',
+            'genres': [
+                {'genre': 'History', 'confidence': 8},
+                {'genre': 'Science', 'confidence': 9},
+                {'genre': 'Thriller', 'confidence': 7},
+                {'genre': 'Crime', 'confidence': 7},
+            ],
+        }))
+        self.assertEqual(result['genres'], ['Science', 'History', 'Thriller', 'Crime'])
+
     def test_a_genre_one_point_below_the_floor_is_dropped(self):
         result = _parse_response(json.dumps({
             'category': 'Fiction',

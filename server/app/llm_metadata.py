@@ -92,7 +92,7 @@ def _parse_response(text: str) -> dict | None:
     if category not in ('Fiction', 'Non-fiction', None):
         category = None
 
-    genres = []
+    scored = []
     for entry in parsed.get('genres') or []:
         if not isinstance(entry, dict):
             continue
@@ -100,10 +100,14 @@ def _parse_response(text: str) -> dict | None:
         confidence = entry.get('confidence')
         if genre not in _GENRES or not isinstance(confidence, (int, float)):
             continue
-        if confidence >= _CONFIDENCE_THRESHOLD and genre not in genres:
-            genres.append(genre)
+        if confidence >= _CONFIDENCE_THRESHOLD and genre not in (g for g, _ in scored):
+            scored.append((genre, confidence))
+    # Most confident first, so the first genre is the book's main one -- the
+    # app's library groups a book by it. The model's own listing order is not
+    # a ranking. Stable, so equal scores keep the model's order.
+    scored.sort(key=lambda pair: -pair[1])
 
-    return {'category': category, 'genres': genres}
+    return {'category': category, 'genres': [genre for genre, _ in scored]}
 
 
 def query_gemini(title: str, author: str | None, settings) -> dict:

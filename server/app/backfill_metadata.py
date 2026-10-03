@@ -21,6 +21,7 @@ all already counts as resolved.
     python -m app.backfill_metadata              # writes the results
     python -m app.backfill_metadata --dry-run     # prints what it would do
     python -m app.backfill_metadata --recheck     # re-enrich already-resolved jobs too
+    python -m app.backfill_metadata --reorder-genres  # sort genres by confidence, no lookups
 """
 
 import logging
@@ -93,6 +94,42 @@ def backfill(dry_run: bool = False, recheck: bool = False) -> None:
     print(f'done: {verb} {updated}, skipped {skipped}, unavailable {unavailable}')
 
 
+def reorder_genres(dry_run: bool = False) -> None:
+    """Re-sort every cached and job genre list most-confident-first, from the
+    confidence scores already in each cache entry's raw Gemini response -- no
+    new lookups. For books looked up before `_parse_response` sorted by
+    confidence, whose genres are still in the model's own listing order."""
+    from .llm_metadata import _parse_response
+
+    settings = get_settings()
+    jobs = JobStore(settings.jobs_dir)
+    cache = BookMetadataStore(settings.data_dir)
+
+    reordered = 0
+    for manifest in jobs.list(limit=10_000):
+        title, author = manifest.get('title'), manifest.get('author')
+        cached = cache.get(title, author) if title else None
+        raw = (cached or {}).get('raw') or {}
+        try:
+            text = raw['candidates'][0]['content']['parts'][0]['text']
+        except (KeyError, IndexError, TypeError):
+            continue
+        parsed = _parse_response(text)
+        genres = (parsed or {}).get('genres')
+        if not genres or genres == manifest.get('genres'):
+            continue
+        print(f'{manifest["job_id"]}: {title!r} {manifest.get("genres")} -> {genres}')
+        reordered += 1
+        if not dry_run:
+            cache.put(title, author, {**cached, 'genres': genres})
+            try:
+                jobs.update(manifest['job_id'], genres=genres)
+            except JobNotFound:
+                pass
+    verb = 'would reorder' if dry_run else 'reordered'
+    print(f'done: {verb} {reordered}')
+
+
 if __name__ == '__main__':
     import argparse
 
@@ -101,5 +138,10 @@ if __name__ == '__main__':
                          help='print what would change without writing anything')
     parser.add_argument('--recheck', action='store_true',
                          help='re-run already-resolved jobs too, bypassing the cache')
+    parser.add_argument('--reorder-genres', action='store_true',
+                         help='only re-sort existing genres most-confident-first, from cached scores')
     args = parser.parse_args()
-    backfill(dry_run=args.dry_run, recheck=args.recheck)
+    if args.reorder_genres:
+        reorder_genres(dry_run=args.dry_run)
+    else:
+        backfill(dry_run=args.dry_run, recheck=args.recheck)
