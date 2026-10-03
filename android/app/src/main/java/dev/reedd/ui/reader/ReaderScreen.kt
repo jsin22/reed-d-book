@@ -27,6 +27,7 @@ import androidx.compose.material.icons.filled.EditNote
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
@@ -518,7 +519,11 @@ fun ReaderScreen(
                     onSetPreferLiveReading = readAlongViewModel::setPreferLiveReading,
                     currentVoice = book?.liveVoice ?: book?.voice,
                     voiceOptions = voiceOptions,
-                    onSelectVoice = readAlongViewModel::setVoice,
+                    onApplyVoice = { voice ->
+                        readAlongViewModel.setVoice(voice)
+                        // Back to the book: Play starts in the new voice.
+                        showAppearance = false
+                    },
                     onSendFeedback = {
                         // Closed first, not stacked underneath -- a dialog on
                         // top of a still-open bottom sheet is exactly the
@@ -1281,7 +1286,7 @@ private fun AppearanceControls(
     onSetPreferLiveReading: (Boolean) -> Unit,
     currentVoice: String?,
     voiceOptions: ConversionOptions,
-    onSelectVoice: (String) -> Unit,
+    onApplyVoice: (String) -> Unit,
     onSendFeedback: () -> Unit,
 ) {
     // Anything that was ever queued for a background conversion
@@ -1369,7 +1374,19 @@ private fun AppearanceControls(
                     "The server reported no voices for this engine.",
                     style = MaterialTheme.typography.bodySmall,
                 )
-                else -> VoiceDropdown(voices = voices, currentVoice = currentVoice, onSelect = onSelectVoice)
+                else -> {
+                    // Picking only selects; nothing changes until Apply, which is
+                    // enabled once the selection differs from the voice in use.
+                    var selected by remember(currentVoice) { mutableStateOf(currentVoice) }
+                    VoiceDropdown(voices = voices, currentVoice = selected, onSelect = { selected = it })
+                    Button(
+                        onClick = { selected?.let(onApplyVoice) },
+                        enabled = selected != null && selected != currentVoice,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("Apply")
+                    }
+                }
             }
         }
 

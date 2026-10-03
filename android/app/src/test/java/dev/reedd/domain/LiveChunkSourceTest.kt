@@ -305,7 +305,7 @@ class LiveChunkSourceTest {
      * right away, in the new voice.
      */
     @Test
-    fun `changeVoice restarts at the given spot using the new voice`() = runBlocking {
+    fun `applyVoice restarts at the given spot using the new voice`() = runBlocking {
         // First "chapter": one sentence, done immediately -- finishes and
         // self-releases on its own, same as the happy-path test's shape.
         enqueueJson("""{"session_id":"s1"}""")
@@ -333,8 +333,8 @@ class LiveChunkSourceTest {
         source.startFrom(resourceHref, sentenceIndex = 0)
         await { source.finished.value }
 
-        source.changeVoice("selene", resourceHref, sentenceIndex = 1)
-        // A fresh session, ordinal 0 again -- changeVoice is a hard reset,
+        source.applyVoice("selene", resumeAt = resourceHref to 1)
+        // A fresh session, ordinal 0 again -- applyVoice is a hard reset,
         // same as any other restart, not a seamless handoff.
         await { source.chunkIndexFlow.value.size == 1 && source.chunkIndexFlow.value.chunkAtIndex(0)?.startMs == 0L }
 
@@ -343,6 +343,59 @@ class LiveChunkSourceTest {
         val body = restartRequest.body!!.utf8()
         assertTrue("expected the new voice in the restart request: $body", body.contains("\"voice\":\"selene\""))
         assertTrue("expected the same sentence index: $body", body.contains("\"from_sentence_index\":1"))
+    }
+
+    /**
+     * Reported live: a voice picked while the first sentence was still being
+     * synthesized was dropped -- the change only ever applied once something
+     * had played -- so the session kept going, and played, in the old voice.
+     * Applying it now redoes that same pending start in the new voice.
+     */
+    @Test
+    fun `applyVoice while the first sentence is still preparing restarts that start in the new voice`() = runBlocking {
+        // Answered by path, not from a queue: how many status polls land before
+        // the voice change depends on timing.
+        val startBodies = java.util.Collections.synchronizedList(mutableListOf<String>())
+        server.dispatcher = object : mockwebserver3.Dispatcher() {
+            override fun dispatch(request: mockwebserver3.RecordedRequest): MockResponse {
+                val path = request.url.encodedPath
+                fun json(body: String) = MockResponse.Builder().code(200).setHeader("Content-Type", "application/json").body(body).build()
+                return when {
+                    path.endsWith("/live/start") -> {
+                        startBodies += request.body!!.utf8()
+                        json("""{"session_id":"s${startBodies.size}"}""")
+                    }
+                    // The first session never gets past preparing; the second delivers.
+                    path.endsWith("/s1/status") -> json(
+                        """{"status":"running","error":null,"resource_href":"$resourceHref","cursor":0,"total_sentences":1,"chunks":[]}"""
+                    )
+                    path.endsWith("/s2/status") -> json(
+                        """{"status":"done","error":null,"resource_href":"$resourceHref","cursor":0,"total_sentences":1,
+                            "chunks":[{"index":0,"duration_s":2.375,"chars":10,"text":"\n\nUnderstanding Digital Formats."}]}"""
+                    )
+                    path.contains("/chunk/") -> MockResponse.Builder().code(200).setHeader("Content-Type", "audio/wav").body("chunk").build()
+                    else -> json("""{"stopped":true}""")
+                }
+            }
+        }
+
+        val source = LiveChunkSource(
+            bookId = "b1", jobId = "job-1", epub = epubPath(), voice = "alba",
+            title = "A Brief Guide to Digital Formats", author = "Sample Generator", coverPath = null,
+            api = api(), player = player, files = files, nextResourceHref = { null },
+        )
+
+        source.startFrom(resourceHref, sentenceIndex = 0)
+        await { startBodies.size == 1 && source.preparing.value }
+
+        source.applyVoice("selene", resumeAt = null)
+        await { source.chunkIndexFlow.value.size == 1 }
+
+        assertEquals(2, startBodies.size)
+        assertTrue("first start used the original voice: ${startBodies[0]}", startBodies[0].contains("\"voice\":\"alba\""))
+        assertTrue("restart used the new voice: ${startBodies[1]}", startBodies[1].contains("\"voice\":\"selene\""))
+        assertEquals("restart kept the same start", startBodies[0].replace("alba", "selene"), startBodies[1])
+        await { !source.preparing.value }
     }
 
     /**

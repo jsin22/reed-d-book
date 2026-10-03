@@ -70,6 +70,9 @@ data class ReadAlongState(
      *  since this class deliberately has no reference to the open
      *  `Publication`/navigator (see its own class doc). */
     val isLive: Boolean = false,
+    /** A live session is synthesizing its first sentence: audio is coming,
+     *  just not yet. See [dev.reedd.domain.LiveChunkSource.preparing]. */
+    val livePreparing: Boolean = false,
 )
 
 /**
@@ -279,19 +282,12 @@ class ReadAlongViewModel(
                 return@launch
             }
             val globalIndex = _state.value.currentIndex
-            val (href, sentenceIndex) = if (globalIndex >= 0) {
-                source.resumePointFor(globalIndex) ?: run {
-                    logModeSwitch("setVoice: resumePointFor($globalIndex) returned null, aborting")
-                    return@launch
-                }
-            } else {
-                // nothing has actually started playing yet -- next startLive already picks up the new voice
-                logModeSwitch("setVoice: currentIndex=$globalIndex, nothing played yet, aborting")
-                return@launch
-            }
+            // Where to continue in the new voice: the sentence reached so far,
+            // or (nothing played yet) wherever the pending session was starting.
+            val resumeAt = if (globalIndex >= 0) source.resumePointFor(globalIndex) else null
             val wasPlaying = player.state.value.isPlaying
-            logModeSwitch("setVoice: calling changeVoice(voice=$voice, href=$href, sentenceIndex=$sentenceIndex) wasPlaying=$wasPlaying")
-            source.changeVoice(voice, href, sentenceIndex)
+            logModeSwitch("setVoice: applyVoice(voice=$voice, resumeAt=$resumeAt) wasPlaying=$wasPlaying")
+            source.applyVoice(voice, resumeAt)
             if (wasPlaying) player.play()
         }
     }
@@ -506,6 +502,11 @@ class ReadAlongViewModel(
                     _state.value = _state.value.copy(currentIndex = 0, available = true)
                     _navigateTo.value = 0
                 }
+            }
+        }
+        viewModelScope.launch {
+            source.preparing.collect { preparing ->
+                _state.value = _state.value.copy(livePreparing = preparing)
             }
         }
         viewModelScope.launch {

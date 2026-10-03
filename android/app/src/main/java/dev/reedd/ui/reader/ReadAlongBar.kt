@@ -8,6 +8,8 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.material3.LocalContentColor
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.FastForward
 import androidx.compose.material.icons.filled.FastRewind
@@ -176,10 +178,21 @@ fun ReadAlongBar(
                         Icon(Icons.Filled.FastRewind, contentDescription = "Previous sentence")
                     }
                     FilledIconButton(onClick = onTogglePlay) {
-                        Icon(
-                            if (state.player.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                            contentDescription = if (state.player.isPlaying) "Pause" else "Play",
-                        )
+                        // A live session's first sentence takes a few seconds to
+                        // synthesize; a spinner says audio is coming, so the reader
+                        // does not tap again (which would restart the wait).
+                        if (state.livePreparing && !state.player.isPlaying) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(20.dp),
+                                strokeWidth = 2.dp,
+                                color = LocalContentColor.current,
+                            )
+                        } else {
+                            Icon(
+                                if (state.player.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                                contentDescription = if (state.player.isPlaying) "Pause" else "Play",
+                            )
+                        }
                     }
                     IconButton(onClick = onNextSentence) {
                         Icon(Icons.Filled.FastForward, contentDescription = "Next sentence")

@@ -133,6 +133,31 @@ class LiveChunkSource(
         _message.value = null
     }
 
+    /**
+     * True from the moment a session is asked to start until its first
+     * sentence's audio reaches the player (or it fails) -- the ~5s the server
+     * takes to synthesize that first sentence. Without it a Play press in that
+     * window looked like nothing happened, and tapping again restarted the wait.
+     */
+    private val _preparing = MutableStateFlow(false)
+    val preparing: StateFlow<Boolean> = _preparing.asStateFlow()
+
+    private fun fail(message: String) {
+        _message.value = message
+        _preparing.value = false
+    }
+
+    /** What the latest [restart] asked for, so [applyVoice] can redo a start
+     *  that has not played anything yet in the new voice. */
+    private data class StartRequest(
+        val resourceHref: String,
+        val fromSentenceIndex: Int,
+        val fromFraction: Double?,
+        val anchorText: String?,
+        val anchorOffset: Int?,
+    )
+    private var lastStart: StartRequest? = null
+
     /** Starts (or restarts) from a specific resource + sentence. Discards
      *  whatever was buffered, aligned, or queued -- see this class's own
      *  doc for why a hard reset, not a seamless handoff, is this phase's
@@ -140,18 +165,29 @@ class LiveChunkSource(
     suspend fun startFrom(resourceHref: String, sentenceIndex: Int) = restart(resourceHref, sentenceIndex, fromFraction = null)
 
     /**
-     * Picking a new voice mid-session, from the reader's settings sheet:
-     * a hard reset at the *same* spot, same mechanism as [startFrom] (see
-     * this class's own doc on why a reset, not a seamless handoff, is this
-     * phase's scope) -- effectively "resend the current sentence" the
-     * reader was just asking about, just in the new voice instead of
-     * waiting for the book to be reopened. Everything already buffered or
-     * queued in the old voice is discarded, same as any other restart.
+     * The reader applied a new voice from the settings sheet. Every case ends
+     * with the new voice actually in use -- previously a change made before
+     * anything had played was dropped, and the old voice kept playing:
+     *
+     *  * [resumeAt] given (something has played): restart at that sentence in
+     *    the new voice, a hard reset like [startFrom];
+     *  * otherwise, a session already started but nothing played yet: redo that
+     *    same start in the new voice;
+     *  * otherwise nothing has started: the next start uses it.
+     *
+     * Anything already buffered or queued in the old voice is discarded.
      */
-    suspend fun changeVoice(newVoice: String, resourceHref: String, sentenceIndex: Int) {
-        log("changeVoice: oldVoice=$voice newVoice=$newVoice resourceHref=$resourceHref sentenceIndex=$sentenceIndex")
+    suspend fun applyVoice(newVoice: String, resumeAt: Pair<String, Int>?) {
+        log("applyVoice: oldVoice=$voice newVoice=$newVoice resumeAt=$resumeAt lastStart=$lastStart")
         voice = newVoice
-        startFrom(resourceHref, sentenceIndex)
+        val pending = lastStart
+        when {
+            resumeAt != null -> startFrom(resumeAt.first, resumeAt.second)
+            pending != null -> restart(
+                pending.resourceHref, pending.fromSentenceIndex, pending.fromFraction,
+                pending.anchorText, pending.anchorOffset,
+            )
+        }
     }
 
     /**
@@ -244,7 +280,10 @@ class LiveChunkSource(
         val myGeneration = ++generation
         reset()
         if (myGeneration != generation) return // superseded by a newer call while reset() was awaiting
+        lastStart = StartRequest(resourceHref, fromSentenceIndex, fromFraction, anchorText, anchorOffset)
+        _preparing.value = true
         job = scope.launch { runChapter(resourceHref, fromSentenceIndex, fromFraction, anchorText, anchorOffset) }
+            .also { started -> started.invokeOnCompletion { if (myGeneration == generation) _preparing.value = false } }
     }
 
     /**
@@ -271,6 +310,7 @@ class LiveChunkSource(
         chapterResourceHrefs.clear()
         _chunkIndex.value = ChunkIndex.EMPTY
         _finished.value = false
+        _preparing.value = false
         player.prepareLive(bookId, title, author, coverPath)
     }
 
@@ -334,12 +374,12 @@ class LiveChunkSource(
                 LiveStartBody(resourceHref, fromSentenceIndex, fromFraction, anchorText, anchorOffset, voice),
             )
         } catch (e: ApiException) {
-            _message.value = if (e.isBusy) "Reading live is busy right now -- try again shortly" else (e.detail ?: "Could not start reading live")
+            fail(if (e.isBusy) "Reading live is busy right now -- try again shortly" else (e.detail ?: "Could not start reading live"))
             return
         } catch (e: CancellationException) {
             throw e // a new startFrom/startFromFraction cancelled this one -- not a real error, see reset's own doc
         } catch (e: Exception) {
-            _message.value = "Could not reach the server to read live"
+            fail("Could not reach the server to read live")
             return
         }
         currentSessionId = session.sessionId
@@ -373,7 +413,7 @@ class LiveChunkSource(
             } catch (e: CancellationException) {
                 throw e // see runChapter's own startLive catch for why
             } catch (e: Exception) {
-                _message.value = "Lost the connection while reading live"
+                fail("Lost the connection while reading live")
                 return
             }
 
@@ -455,13 +495,14 @@ class LiveChunkSource(
                     // real crash without this: IllegalStateException, "MediaController
                     // method is called from a wrong thread."
                     withContext(Dispatchers.Main) { player.appendLiveChunk(bookId, file) }
+                    _preparing.value = false
                 }
                 lastProcessedIndex = newChunks.maxOf { it.index }
             }
 
             when {
                 status.status == "error" -> {
-                    _message.value = status.error ?: "Reading live failed"
+                    fail(status.error ?: "Reading live failed")
                     return
                 }
                 status.status == "done" && lastProcessedIndex + 1 >= status.totalSentences -> {
