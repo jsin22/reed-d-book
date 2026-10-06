@@ -95,7 +95,7 @@ from .book_metadata import LookupUnavailable, lookup as lookup_book_metadata
 from .book_metadata_store import BookMetadataStore
 from .celery_app import enqueue, revoke
 from .config import get_settings
-from . import book_guide, dictionary, live_reading, live_tts_experiment
+from . import book_ask, book_ai, book_guide, dictionary, live_reading, live_tts_experiment
 from .cover_generator import generate_placeholder_cover
 from .cover_lookup import fetch_cover
 from .feedback_status import FeedbackStatus
@@ -559,6 +559,51 @@ def download_guide(job_id: str, user: dict = Depends(require_user)):
     if guide is None:
         raise HTTPException(status_code=404, detail='no guide for this book yet')
     return guide
+
+
+class AskPosition(BaseModel):
+    """The furthest point the reader has reached: the chapter (resource href),
+    and a window of page text around that point with the point's offset in it.
+    [progression] (0-1 through the chapter) is only a fallback."""
+    resource_href: str
+    anchor_text: str | None = None
+    anchor_offset: int | None = None
+    progression: float | None = None
+
+
+class AskTurn(BaseModel):
+    q: str
+    a: str
+
+
+class AskBody(BaseModel):
+    question: str
+    position: AskPosition
+    history: list[AskTurn] = []
+
+
+@app.post('/api/books/{job_id}/ask')
+def ask_about_book(job_id: str, body: AskBody, user: dict = Depends(require_user)):
+    """Answer a question about the book from its text up to the reader's
+    position only -- see app/book_ask.py. 502 if the model cannot answer."""
+    get_job(job_id, user)  # 404s on an unknown or invisible id
+    if not body.question.strip():
+        raise HTTPException(status_code=400, detail='empty question')
+    epub_path = store().epub_path(job_id)
+    if not epub_path.is_file():
+        raise HTTPException(status_code=404, detail='this book has no epub on the server')
+    try:
+        answer = book_ask.ask(
+            job_id, epub_path, body.question.strip(), body.position.resource_href,
+            anchor_text=body.position.anchor_text, anchor_offset=body.position.anchor_offset,
+            progression=body.position.progression,
+            history=[turn.model_dump() for turn in body.history],
+        )
+    except book_ask.UnknownPosition as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except book_ai.BookAIError as e:
+        raise HTTPException(status_code=502, detail=f'could not get an answer right now ({e})')
+    return {'answer': answer}
 
 
 @app.get('/api/jobs/{job_id}/epub')
