@@ -11,8 +11,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -24,7 +22,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.EditNote
-import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.QuestionAnswer
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
@@ -72,10 +69,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.net.toUri
-import androidx.core.view.WindowCompat
-import androidx.core.view.WindowInsetsCompat
-import androidx.core.view.WindowInsetsControllerCompat
 import androidx.fragment.app.FragmentActivity
 import androidx.fragment.compose.AndroidFragment
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -158,9 +153,6 @@ fun ReaderScreen(
     val pageHref by viewModel.currentHref.collectAsStateWithLifecycle()
     var showSearch by rememberSaveable { mutableStateOf(false) }
     var showFeedback by rememberSaveable { mutableStateOf(false) }
-    // Immersive: toolbars hidden so the text has the whole screen. Entered from the
-    // toolbar button, left by a tap that lands on nothing readable.
-    var immersive by rememberSaveable { mutableStateOf(false) }
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val pageInfo by viewModel.pageInfo.collectAsStateWithLifecycle()
@@ -208,45 +200,7 @@ fun ReaderScreen(
         readAlongViewModel.clearLiveMessage()
     }
 
-    // Hide the system status and navigation bars too, not just the app's own toolbars
-    // — otherwise "immersive" still leaves a status-bar strip above the text, which is
-    // most of what remains of the top margin.
     val view = LocalView.current
-    LaunchedEffect(immersive) {
-        val window = (view.context as? android.app.Activity)?.window ?: return@LaunchedEffect
-        val controller = WindowCompat.getInsetsController(window, view)
-        controller.systemBarsBehavior =
-            WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-        if (immersive) {
-            controller.hide(WindowInsetsCompat.Type.systemBars())
-        } else {
-            controller.show(WindowInsetsCompat.Type.systemBars())
-        }
-    }
-
-    // Confirmed live: leaving the reader while still in fullscreen (the
-    // system Back gesture/button, not the toolbar's own un-fullscreen
-    // button, is the ordinary way to do this) never ran the `else` branch
-    // above -- `immersive` never flipped back to false, it just stopped
-    // existing along with the rest of this screen's composition -- so the
-    // system bars stayed hidden at the *window* level after returning to
-    // the library. This is a single-Activity app, so that window is shared
-    // with every other screen: the library's own Scaffold still reserves
-    // its ordinary content padding for a status/nav bar that the OS no
-    // longer thinks is there, which is what showed up as its content
-    // running out past where the (actually still-hidden) system controls
-    // are. Unconditional and key-independent on purpose: this must run
-    // once, on this screen's teardown, regardless of what `immersive` last
-    // was -- an `onDispose` inside the effect above would only fire for the
-    // *specific* recomposition matching whatever `immersive` was keyed to
-    // when this screen unmounted, not "this screen is gone now."
-    DisposableEffect(Unit) {
-        onDispose {
-            val window = (view.context as? android.app.Activity)?.window ?: return@onDispose
-            WindowCompat.getInsetsController(window, view).show(WindowInsetsCompat.Type.systemBars())
-        }
-    }
-
     // Reading and listening along both go long stretches with no touch input, which
     // is exactly what the system screen timeout is watching for -- without this the
     // screen dims and locks mid-chapter. Cleared on dispose so leaving the reader
@@ -263,45 +217,44 @@ fun ReaderScreen(
 
         Scaffold(
             topBar = {
-                if (!immersive) {
-                    TopAppBar(
-                        title = {
-                            Text(
-                                book?.title ?: "",
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                style = MaterialTheme.typography.titleMedium,
-                            )
-                        },
-                        navigationIcon = {
-                            IconButton(onClick = onBack) {
-                                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
-                            }
-                        },
-                        actions = {
-                            // Explicit control, because a tap on the page is now an
-                            // offer to read from there and cannot double as this.
-                            IconButton(onClick = { immersive = true }) {
-                                Icon(Icons.Filled.Fullscreen, contentDescription = "Full screen")
-                            }
-                            IconButton(onClick = { showContents = true }) {
-                                Icon(Icons.AutoMirrored.Filled.List, contentDescription = "Contents")
-                            }
-                            IconButton(onClick = { showSearch = true }) {
-                                Icon(Icons.Filled.Search, contentDescription = "Search this book")
-                            }
-                            IconButton(onClick = { showNotes = true }) {
-                                Icon(Icons.Filled.EditNote, contentDescription = "Notes and bookmarks")
-                            }
-                            IconButton(onClick = { guideViewModel.refresh(); showGuide = true }) {
-                                Icon(Icons.Filled.QuestionAnswer, contentDescription = "About this book")
-                            }
-                            IconButton(onClick = { showAppearance = true }) {
-                                Icon(Icons.Filled.Settings, contentDescription = "Settings")
-                            }
-                        },
-                    )
-                }
+                TopAppBar(
+                    title = {
+                        Text(
+                            book?.title ?: "",
+                            // The title gets only what the back arrow and five
+                            // icons leave (~100dp on a phone), so small text over
+                            // two lines shows far more of it than one larger line.
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.titleSmall.copy(
+                                fontSize = 10.sp,
+                                lineHeight = 12.sp,
+                            ),
+                        )
+                    },
+                    navigationIcon = {
+                        IconButton(onClick = onBack) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        }
+                    },
+                    actions = {
+                        IconButton(onClick = { showContents = true }) {
+                            Icon(Icons.AutoMirrored.Filled.List, contentDescription = "Contents")
+                        }
+                        IconButton(onClick = { showSearch = true }) {
+                            Icon(Icons.Filled.Search, contentDescription = "Search this book")
+                        }
+                        IconButton(onClick = { showNotes = true }) {
+                            Icon(Icons.Filled.EditNote, contentDescription = "Notes and bookmarks")
+                        }
+                        IconButton(onClick = { guideViewModel.refresh(); showGuide = true }) {
+                            Icon(Icons.Filled.QuestionAnswer, contentDescription = "About this book")
+                        }
+                        IconButton(onClick = { showAppearance = true }) {
+                            Icon(Icons.Filled.Settings, contentDescription = "Settings")
+                        }
+                    },
+                )
             },
             bottomBar = {
                 // Gated on the book's own row (Room, near-instant), not
@@ -323,9 +276,7 @@ fun ReaderScreen(
                 // A tapped word/selection takes this whole slot over from the
                 // transport controls -- see WordMenuBar's own docstring for why
                 // this, not a popup floating near the text, is where the menu
-                // lives now. Not gated on !immersive: a tap still resolves a
-                // word regardless of immersive state (see onTap further
-                // down), so its menu has to stay reachable too.
+                // lives now.
                 val menuTarget = tappedWord
                 if (menuTarget != null) {
                     WordMenuBar(
@@ -349,14 +300,6 @@ fun ReaderScreen(
                         },
                     )
                 } else if (book?.isPlayable == true || book?.canReadLive == true) {
-                    // Also shown in fullscreen now, not just the normal
-                    // reader: fullscreen has to reserve this same height
-                    // regardless (see the Spacer branch below for why --
-                    // tapping a word is otherwise the first thing that ever
-                    // gives this slot a reason to exist, an unavoidable
-                    // resize confirmed live to break word selection), so an
-                    // empty reserved strip may as well be the transport
-                    // controls instead of nothing.
                     ReadAlongBar(
                         state = readAlong,
                         onTogglePlay = readAlongViewModel::togglePlayPause,
@@ -375,28 +318,18 @@ fun ReaderScreen(
                         onSpeed = readAlongViewModel::setSpeed,
                         onToggleFollow = readAlongViewModel::toggleFollowing,
                     )
-                } else if (immersive) {
-                    // A plain, non-playable epub has no ReadAlongBar to fall
-                    // back on, but fullscreen still needs *something*
-                    // reserving this height: tapping a word is otherwise the
-                    // first thing that ever gives this slot a reason to
-                    // exist at all, an unavoidable, real fragment resize
-                    // (confirmed live: 2912px down to 2384px right as a word
-                    // is tapped) that forces a repagination and leaves the
-                    // just-armed selection handles marking the word's
-                    // *previous* position. A first attempt at fixing that
-                    // after the fact instead -- re-locating the tapped word
-                    // once the resize settled -- ran into a deeper problem:
-                    // Readium's paginated columns can move the same word
-                    // onto a different, currently off-screen page, so a
-                    // plain DOM-wide text search does not reliably find its
-                    // way back to the visible one (confirmed live, landing a
-                    // handle at an X coordinate past the page's own width).
-                    // Reserving the height *before* there is anything to
-                    // show in it means a tap never resizes anything at all.
-                    // The tradeoff is that fullscreen does not quite reach
-                    // the physical bottom edge after all -- deliberate, in
-                    // exchange for word selection actually working there.
+                } else {
+                    // A book with no audio has no ReadAlongBar, but this slot
+                    // still reserves its height: tapping a word is otherwise the
+                    // first thing that ever gives this slot a reason to exist, a
+                    // real fragment resize (confirmed live: 2912px down to 2384px
+                    // right as a word is tapped) that forces a repagination and
+                    // leaves the just-armed selection handles marking the word's
+                    // *previous* position. Re-locating the word after the resize
+                    // was tried and failed: Readium's paginated columns can move
+                    // it onto a different, off-screen page. Reserving the height
+                    // before there is anything to show means a tap never resizes
+                    // anything at all.
                     Spacer(
                         Modifier
                             .fillMaxWidth()
@@ -406,16 +339,6 @@ fun ReaderScreen(
                 }
             },
             snackbarHost = { SnackbarHost(snackbar) },
-            // With the bars hidden the page should reach the physical edges of the
-            // screen, so the Scaffold stops reserving room for system insets --
-            // except the display cutout, which is not a system bar and stays
-            // present (and un-hideable) regardless of BEHAVIOR_SHOW_TRANSIENT_
-            // BARS_BY_SWIPE above: a curved-edge/notched screen was confirmed
-            // clipping the first word of the top line here when this was a flat
-            // WindowInsets(0), because nothing was left protecting that area at
-            // all once the status bar (which used to incidentally cover it) was
-            // hidden too.
-            contentWindowInsets = if (immersive) WindowInsets.displayCutout else ScaffoldDefaults.contentWindowInsets,
         ) { padding ->
             Box(Modifier.fillMaxSize().padding(padding)) {
                 when (val current = state) {
@@ -432,11 +355,6 @@ fun ReaderScreen(
                         viewModel = viewModel,
                         readAlongViewModel = readAlongViewModel,
                         settings = settings,
-                        // One-way on purpose: entering fullscreen is the toolbar
-                        // button's job alone now (BUGS.md). A tap landing on nothing
-                        // can still close it, or there would be no way back once the
-                        // toolbar with the button on it is itself hidden.
-                        onExitImmersive = { immersive = false },
                         onMessage = { text -> scope.launch { snackbar.showSnackbar(text) } },
                     )
                 }
@@ -757,7 +675,6 @@ private fun EpubNavigator(
     viewModel: ReaderViewModel,
     readAlongViewModel: ReadAlongViewModel,
     settings: ReaderSettings,
-    onExitImmersive: () -> Unit,
     onMessage: (String) -> Unit,
 ) {
     val context = LocalContext.current
@@ -908,8 +825,6 @@ private fun EpubNavigator(
                 // too far down by exactly the padding amount -- landing on
                 // whatever text is actually rendered that much lower.
                 //
-                // Fullscreen mode was never affected because it hides system bars
-                // entirely, leaving nothing for Readium's own listener to pad for.
                 // Explicitly false: this app's layout already owns every inset
                 // Readium might otherwise try to account for a second time.
                 shouldApplyInsetsPadding = false,
@@ -1050,10 +965,7 @@ private fun EpubNavigator(
              * A single tap anywhere resolves the word under it. Page turning is
              * swipe-only -- there is deliberately no tap-to-turn-page zone, so a tap
              * always means "what word is this" and nothing else. When nothing is
-             * under the finger it either dismisses an outstanding menu or, if the
-             * toolbars are currently hidden, brings them back -- but never hides
-             * them: entering fullscreen is the toolbar button's job alone, so a tap
-             * on the page can never start it, only end it.
+             * under the finger it dismisses an outstanding menu, if any.
              */
             override fun onTap(event: TapEvent): Boolean {
                 scope.launch {
@@ -1112,8 +1024,6 @@ private fun EpubNavigator(
                     if (readAlongViewModel.tappedWord.value != null) {
                         readAlongViewModel.dismissWordMenu()
                         TapTextResolver.clearHighlight(fragment)
-                    } else {
-                        onExitImmersive()
                     }
                 }
                 return true

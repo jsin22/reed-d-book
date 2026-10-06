@@ -93,8 +93,6 @@ once the book is on the device.
   grey page with near-black text, which also switches off the publisher's
   own CSS for that theme only (otherwise a book's own `background: #fff`
   would punch a white hole through the grey page).
-- A full-screen mode that hides both the app's own toolbars and the
-  system bars, so the page reaches the physical edge of the screen.
 - A muted position indicator (`24 / 312`) at the bottom of the page —
   Readium's stable position slices, not a page count in the print sense,
   since a reflowable EPUB has no fixed page count independent of font size
