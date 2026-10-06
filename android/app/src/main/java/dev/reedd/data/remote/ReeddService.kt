@@ -58,6 +58,9 @@ interface ReeddService {
 
     /** A word the bundled dictionary does not have, from the server's full one
      *  (E-8). [candidates]: the inflection forms the app would try itself. */
+    @GET("api/jobs/{jobId}/guide")
+    suspend fun guide(@Path("jobId") jobId: String): GuideDto
+
     @GET("api/dictionary/{word}")
     suspend fun define(@Path("word") word: String, @Query("candidates") candidates: List<String>): DefinitionDto
 

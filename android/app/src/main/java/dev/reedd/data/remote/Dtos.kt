@@ -331,3 +331,31 @@ data class SenseDto(
     val synonyms: List<String> = emptyList(),
 )
 
+/** `GET /api/jobs/{id}/guide` -- the book guide, built per chapter on the
+ *  server (see `server/app/book_guide.py`). Partial while still building:
+ *  each chapter carries its own [GuideChapterDto.status]. */
+@Serializable
+data class GuideDto(
+    val version: Int = 1,
+    val chapters: List<GuideChapterDto> = emptyList(),
+)
+
+@Serializable
+data class GuideChapterDto(
+    val index: Int,
+    /** The chapter's resource filename -- matched to Readium hrefs by
+     *  `bareResourceName`, like every other server/app href crossing. */
+    val source: String,
+    val title: String = "",
+    val status: String = "pending",
+    val summary: String = "",
+    val characters: List<GuideCharacterDto> = emptyList(),
+)
+
+@Serializable
+data class GuideCharacterDto(
+    val name: String,
+    val aliases: List<String> = emptyList(),
+    val description: String = "",
+)
+

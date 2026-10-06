@@ -139,6 +139,10 @@ class DownloadWorker(
             val audiobook = downloadAudiobook(book, jobId, progress)
             val sync = downloadSync(book, jobId)
             parseSync(book, sync)
+            // The book guide, so Story so far / Characters work offline. Best
+            // effort: it may still be building on the server (the reader fetches
+            // it again later), and never a reason to fail the download.
+            runCatching { container.guides.refresh(bookId, jobId) }
 
             container.repository.updateDownload(
                 bookId,

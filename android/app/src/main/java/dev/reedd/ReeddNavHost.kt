@@ -117,10 +117,13 @@ fun ReeddNavHost(navController: NavHostController = rememberNavController()) {
                 )
             val notesViewModel: NotesViewModel =
                 viewModel(factory = NotesViewModel.factory(container, route.bookId))
+            val guideViewModel: dev.reedd.ui.reader.GuideViewModel =
+                viewModel(factory = dev.reedd.ui.reader.GuideViewModel.factory(container, route.bookId))
             ReaderScreen(
                 viewModel = viewModel,
                 readAlongViewModel = readAlongViewModel,
                 notesViewModel = notesViewModel,
+                guideViewModel = guideViewModel,
                 onBack = { navController.popBackStack() },
             )
         }

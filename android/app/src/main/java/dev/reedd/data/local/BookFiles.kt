@@ -31,6 +31,9 @@ class BookFiles(context: Context) {
 
     fun cover(bookId: String): File = File(bookDir(bookId), "cover.jpg")
 
+    /** The book guide (recaps + characters), saved so it works offline. */
+    fun guide(bookId: String): File = File(bookDir(bookId), "guide.json")
+
     fun audiobookDir(bookId: String): File = File(root, "audiobooks/$bookId").apply { mkdirs() }
 
     /**

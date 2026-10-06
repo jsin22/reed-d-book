@@ -6,6 +6,7 @@ import dev.reedd.data.db.NoteDao
 import dev.reedd.data.db.ReeddDatabase
 import dev.reedd.data.db.SyncDao
 import dev.reedd.data.dictionary.Dictionary
+import dev.reedd.data.guide.BookGuideStore
 import dev.reedd.data.dictionary.DictionaryLookup
 import dev.reedd.data.download.ResumableDownloader
 import dev.reedd.data.local.BookFiles
@@ -111,6 +112,9 @@ class AppContainer(context: Context) {
 
     /** The bundled offline dictionary; opens its database on first lookup. */
     val dictionary: Dictionary by lazy { Dictionary(appContext) }
+
+    /** The book guide (recaps + characters) saved per book for offline use. */
+    val guides: BookGuideStore by lazy { BookGuideStore(files, api) }
 
     /** [dictionary] first, then the server's full one for words it lacks (E-8). */
     val dictionaryLookup: DictionaryLookup by lazy { DictionaryLookup(dictionary, api) }

@@ -25,6 +25,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.EditNote
 import androidx.compose.material.icons.filled.Fullscreen
+import androidx.compose.material.icons.filled.QuestionAnswer
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
@@ -141,6 +142,7 @@ fun ReaderScreen(
     viewModel: ReaderViewModel,
     readAlongViewModel: ReadAlongViewModel,
     notesViewModel: NotesViewModel,
+    guideViewModel: GuideViewModel,
     onBack: () -> Unit,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -150,6 +152,10 @@ fun ReaderScreen(
     var showAppearance by rememberSaveable { mutableStateOf(false) }
     var showContents by rememberSaveable { mutableStateOf(false) }
     var showNotes by rememberSaveable { mutableStateOf(false) }
+    var showGuide by rememberSaveable { mutableStateOf(false) }
+    val guide by guideViewModel.guide.collectAsStateWithLifecycle()
+    val guideLoading by guideViewModel.loading.collectAsStateWithLifecycle()
+    val pageHref by viewModel.currentHref.collectAsStateWithLifecycle()
     var showSearch by rememberSaveable { mutableStateOf(false) }
     var showFeedback by rememberSaveable { mutableStateOf(false) }
     // Immersive: toolbars hidden so the text has the whole screen. Entered from the
@@ -286,6 +292,9 @@ fun ReaderScreen(
                             }
                             IconButton(onClick = { showNotes = true }) {
                                 Icon(Icons.Filled.EditNote, contentDescription = "Notes and bookmarks")
+                            }
+                            IconButton(onClick = { guideViewModel.refresh(); showGuide = true }) {
+                                Icon(Icons.Filled.QuestionAnswer, contentDescription = "About this book")
                             }
                             IconButton(onClick = { showAppearance = true }) {
                                 Icon(Icons.Filled.Settings, contentDescription = "Settings")
@@ -487,6 +496,18 @@ fun ReaderScreen(
                     }
                 }
             }
+        }
+
+        if (showGuide) {
+            // The spoiler limit: whichever is further into the book, the page
+            // shown or the sentence being read aloud.
+            val audioHref = readAlongViewModel.chunkIndex().chunkAtIndex(readAlong.currentIndex)?.resourceHref
+            GuideSheet(
+                guide = guide,
+                loading = guideLoading,
+                currentHref = furthestHref((state as? ReaderState.Ready)?.publication, pageHref, audioHref),
+                onDismiss = { showGuide = false },
+            )
         }
 
         if (showSearch) {
@@ -1447,3 +1468,15 @@ private fun androidx.compose.ui.graphics.Color.toArgbCompat(): Int =
         (green * 255).toInt(),
         (blue * 255).toInt(),
     )
+
+/** Of two resource hrefs, the one later in the book's reading order -- either
+ *  may be null; with no publication to order by, the page's own. */
+private fun furthestHref(publication: org.readium.r2.shared.publication.Publication?, a: String?, b: String?): String? {
+    if (a == null || b == null || publication == null) return a ?: b
+    fun position(href: String): Int {
+        val name = dev.reedd.domain.bareResourceName(href)
+        return publication.readingOrder.indexOfFirst { dev.reedd.domain.bareResourceName(it.url().toString()) == name }
+    }
+    return if (position(b) > position(a)) b else a
+}
+

@@ -115,6 +115,11 @@ class ReaderViewModel(
     private val _currentProgression = MutableStateFlow<Double?>(null)
     val currentProgression: StateFlow<Double?> = _currentProgression.asStateFlow()
 
+    /** The resource (chapter) the page is in -- the book guide's spoiler limit
+     *  is the chapter the reader has reached. */
+    private val _currentHref = MutableStateFlow<String?>(null)
+    val currentHref: StateFlow<String?> = _currentHref.asStateFlow()
+
     /** The table-of-contents entry the reader is currently inside -- shown
      *  next to the page number in the page indicator. Null wherever
      *  [currentChapterTitle] itself would be (see its own doc): no usable
@@ -197,7 +202,10 @@ class ReaderViewModel(
                 }
         }
         viewModelScope.launch {
-            fragment.currentLocator.collect { locator -> _currentProgression.value = locator.locations.totalProgression }
+            fragment.currentLocator.collect { locator ->
+                _currentProgression.value = locator.locations.totalProgression
+                _currentHref.value = locator.href.toString()
+            }
         }
         viewModelScope.launch {
             fragment.currentLocator.collect { locator ->
