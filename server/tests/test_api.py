@@ -41,6 +41,11 @@ class ApiTestCase(TempDataDirTestCase):
         patcher = mock.patch('app.main.enqueue', return_value=FAKE_TASK_ID)
         self.enqueue = patcher.start()
         self.addCleanup(patcher.stop)
+        # Uploads start a book-guide build (a model call per chapter); never
+        # for real in tests -- see test_book_guide.py for the guide itself.
+        guide_patcher = mock.patch('app.main.book_guide.start_in_background', return_value=True)
+        self.start_guide = guide_patcher.start()
+        self.addCleanup(guide_patcher.stop)
 
     def make_user(self, email='other@example.com', is_admin=False):
         return self.users.create(email, is_admin=is_admin)

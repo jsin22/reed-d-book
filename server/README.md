@@ -49,6 +49,7 @@ Admin-only (see "Sharing with others" below):
 | `POST /api/admin/users` | `{"email": str}` — invites a user and emails them a token. |
 | `DELETE /api/admin/users/{user_id}` | revokes a user's access; refuses to delete your own account. |
 | `GET /api/admin/metadata-health` | `{ok, last_error, last_error_at, last_success_at}` for the category/genre lookup — see below. |
+| `GET /api/jobs/{id}/guide` | the book guide: per chapter, a recap and the characters as of its end, built spoiler-safe one chapter at a time by `app/book_guide.py` (Gemini, via `app/book_ai.py`) after upload; partial while building (`guide` on the job shows progress). Existing books: `backfill_metadata --build-guides`. |
 | `GET /api/dictionary/{word}` | a definition from the full Wiktionary dictionary, for words the app's bundled (frequency-cut) copy lacks; `candidates` = the app's inflection forms. 404 unknown word, 503 dictionary not built (see `tools/build_dictionary_wiktionary.py`, output `data/dictionary/full.db`). |
 | `GET /api/admin/feedback` | the newest reports submitted via `POST /api/feedback`, for triage. |
 | `GET /api/admin/feedback/entries` | the same reports as JSON (type, time, text), for the diagnostics dashboard's Feedback tab. |

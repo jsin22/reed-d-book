@@ -23,6 +23,7 @@ all already counts as resolved.
     python -m app.backfill_metadata --recheck     # re-enrich already-resolved jobs too
     python -m app.backfill_metadata --reorder-genres  # sort genres by confidence, no lookups
     python -m app.backfill_metadata --fill-durations  # add duration_s from sync files
+    python -m app.backfill_metadata --build-guides [JOB_ID ...]  # book guides (uses the model)
 """
 
 import logging
@@ -156,6 +157,27 @@ def fill_durations(dry_run: bool = False) -> None:
     print(f'done: {verb} {filled}')
 
 
+def build_guides(job_ids: list[str] | None = None) -> None:
+    """Build the book guide for jobs that do not have a finished one yet --
+    all of them, or just [job_ids]. Sequential and in the foreground; each
+    guide resumes from where an earlier, interrupted run stopped."""
+    from . import book_guide
+
+    jobs = JobStore(get_settings().jobs_dir)
+    for manifest in jobs.list(limit=10_000):
+        job_id = manifest['job_id']
+        if job_ids and job_id not in job_ids and job_id[:8] not in job_ids:
+            continue
+        if (manifest.get('guide') or {}).get('status') == book_guide.DONE:
+            continue
+        print(f'{job_id}: building guide for {manifest.get("title")!r}')
+        try:
+            guide = book_guide.build(job_id)
+            print(f'  done: {len(guide["chapters"])} chapters')
+        except Exception as e:  # noqa: BLE001 -- report and move on to the next book
+            print(f'  stopped: {e}')
+
+
 if __name__ == '__main__':
     import argparse
 
@@ -168,8 +190,12 @@ if __name__ == '__main__':
                          help='only re-sort existing genres most-confident-first, from cached scores')
     parser.add_argument('--fill-durations', action='store_true',
                          help='only add duration_s to finished jobs, from their sync files')
+    parser.add_argument('--build-guides', nargs='*', metavar='JOB_ID',
+                         help='build book guides (all unfinished, or just these job ids / 8-char prefixes)')
     args = parser.parse_args()
-    if args.fill_durations:
+    if args.build_guides is not None:
+        build_guides(args.build_guides or None)
+    elif args.fill_durations:
         fill_durations(dry_run=args.dry_run)
     elif args.reorder_genres:
         reorder_genres(dry_run=args.dry_run)

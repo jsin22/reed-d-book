@@ -95,7 +95,7 @@ from .book_metadata import LookupUnavailable, lookup as lookup_book_metadata
 from .book_metadata_store import BookMetadataStore
 from .celery_app import enqueue, revoke
 from .config import get_settings
-from . import dictionary, live_reading, live_tts_experiment
+from . import book_guide, dictionary, live_reading, live_tts_experiment
 from .cover_generator import generate_placeholder_cover
 from .cover_lookup import fetch_cover
 from .feedback_status import FeedbackStatus
@@ -110,6 +110,13 @@ app = FastAPI(
     description='Converts .epub to .m4b + read-along timing metadata.',
     version='1.0.0',
 )
+
+
+@app.on_event('startup')
+def _resume_book_guides():
+    """Guide builds run on threads in this process, so a restart interrupts
+    them; each one resumes from its last finished chapter."""
+    book_guide.resume_unfinished()
 
 
 @app.on_event('shutdown')
@@ -464,6 +471,9 @@ def create_job(background_tasks: BackgroundTasks,
     if not looks_like_epub(jobs.job_dir(job_id) / manifest['filename']):
         jobs.delete(job_id)
         raise HTTPException(status_code=400, detail='file is not a valid epub (not a zip archive)')
+    # The book guide only needs the epub, so it starts for every mode, live
+    # included, alongside (not behind) the conversion -- see book_guide.
+    background_tasks.add_task(book_guide.start_in_background, job_id)
 
     if mode == 'live':
         # No Celery task at all -- this book is only ever read live
@@ -537,6 +547,18 @@ def download_sync(job_id: str, user: dict = Depends(require_user)):
     """The text-to-timestamp mapping. Format documented in audiblez/SYNC.md."""
     path = _completed_file(job_id, 'sync', user)
     return FileResponse(path, media_type='application/json', filename=path.name)
+
+
+@app.get('/api/jobs/{job_id}/guide')
+def download_guide(job_id: str, user: dict = Depends(require_user)):
+    """The book guide (a recap per chapter, and characters) as built so far --
+    possibly partial while it is still being built; each chapter carries its
+    own status. 404 until the first chapter entry exists. See book_guide."""
+    get_job(job_id, user)  # 404s on an unknown or invisible id
+    guide = book_guide.read_guide(job_id)
+    if guide is None:
+        raise HTTPException(status_code=404, detail='no guide for this book yet')
+    return guide
 
 
 @app.get('/api/jobs/{job_id}/epub')

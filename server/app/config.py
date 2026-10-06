@@ -48,6 +48,8 @@ class Settings:
     apk_build_dir: Path
     gemini_api_key: str
     gemini_model: str
+    book_ai_backend: str
+    book_ai_model: str
     live_reading_max_sessions: int
 
     @property
@@ -146,6 +148,11 @@ def load_settings() -> Settings:
         # LookupUnavailable rather than silently doing nothing.
         gemini_api_key=_env('GEMINI_API_KEY', ''),
         gemini_model=_env('GEMINI_MODEL', 'gemini-3.1-flash-lite'),
+        # Asking about a book (book_ai.py): which backend answers, and with
+        # which model. Only 'gemini' exists today; the setting is the seam a
+        # local model (Ollama) plugs into later without app changes.
+        book_ai_backend=_env('BOOK_AI_BACKEND', 'gemini'),
+        book_ai_model=_env('BOOK_AI_MODEL', 'gemini-3.1-flash-lite'),
         # CPU-only always (see app.live_reading) -- a live session never
         # touches the GPU, so this is unrelated to conversion_workers above
         # and just caps how many PocketTTSEngine instances (each a real
