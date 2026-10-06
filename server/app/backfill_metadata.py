@@ -22,6 +22,7 @@ all already counts as resolved.
     python -m app.backfill_metadata --dry-run     # prints what it would do
     python -m app.backfill_metadata --recheck     # re-enrich already-resolved jobs too
     python -m app.backfill_metadata --reorder-genres  # sort genres by confidence, no lookups
+    python -m app.backfill_metadata --fill-durations  # add duration_s from sync files
 """
 
 import logging
@@ -130,6 +131,31 @@ def reorder_genres(dry_run: bool = False) -> None:
     print(f'done: {verb} {reordered}')
 
 
+def fill_durations(dry_run: bool = False) -> None:
+    """Add `duration_s` to finished jobs from before conversion recorded it,
+    read from each job's own sync file."""
+    from .tasks import sync_duration
+
+    jobs = JobStore(get_settings().jobs_dir)
+    filled = 0
+    for manifest in jobs.list(limit=10_000):
+        sync = manifest.get('sync') or {}
+        if manifest.get('duration_s') is not None or not sync.get('file'):
+            continue
+        duration = sync_duration(jobs.job_dir(manifest['job_id']) / 'out' / sync['file'])
+        if duration is None:
+            continue
+        print(f'{manifest["job_id"]}: {manifest.get("title")!r} -> {duration / 3600:.2f}h')
+        filled += 1
+        if not dry_run:
+            try:
+                jobs.update(manifest['job_id'], duration_s=duration)
+            except JobNotFound:
+                pass
+    verb = 'would fill' if dry_run else 'filled'
+    print(f'done: {verb} {filled}')
+
+
 if __name__ == '__main__':
     import argparse
 
@@ -140,8 +166,12 @@ if __name__ == '__main__':
                          help='re-run already-resolved jobs too, bypassing the cache')
     parser.add_argument('--reorder-genres', action='store_true',
                          help='only re-sort existing genres most-confident-first, from cached scores')
+    parser.add_argument('--fill-durations', action='store_true',
+                         help='only add duration_s to finished jobs, from their sync files')
     args = parser.parse_args()
-    if args.reorder_genres:
+    if args.fill_durations:
+        fill_durations(dry_run=args.dry_run)
+    elif args.reorder_genres:
         reorder_genres(dry_run=args.dry_run)
     else:
         backfill(dry_run=args.dry_run, recheck=args.recheck)

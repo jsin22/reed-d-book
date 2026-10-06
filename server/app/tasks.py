@@ -8,6 +8,7 @@ substitute a fake.
 """
 
 import contextlib
+import json
 import os
 import sys
 import time
@@ -135,6 +136,16 @@ def _describe(path: Path):
     return {'file': path.name, 'bytes': path.stat().st_size}
 
 
+def sync_duration(sync_path: Path) -> float | None:
+    """The audiobook's length in seconds, from its sync file -- surfaced on the
+    job so a device knows a book's length before downloading it (the library
+    groups books by length)."""
+    try:
+        return float(json.loads(sync_path.read_text(encoding='utf-8'))['duration'])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
 def _cleanup_intermediates(output_dir: Path):
     """Drop the per-chapter .wav files, which are ~20x the size of the .m4b.
 
@@ -214,7 +225,8 @@ def convert_epub(self, job_id):
             cover_path.write_bytes(fetched)
 
     update_fields = dict(status=DONE, finished_at=utcnow(), progress=100, eta=None,
-                          audiobook=_describe(m4b), sync=_describe(sync))
+                          audiobook=_describe(m4b), sync=_describe(sync),
+                          duration_s=sync_duration(sync))
     if cover_path.is_file():
         update_fields['cover'] = _describe(cover_path)
 
