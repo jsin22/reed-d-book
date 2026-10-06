@@ -11,6 +11,7 @@ import dev.reedd.data.remote.AskBodyDto
 import dev.reedd.data.remote.AskPositionDto
 import dev.reedd.data.remote.AskTurnDto
 import dev.reedd.data.remote.GuideDto
+import dev.reedd.domain.BookGuideView
 import dev.reedd.domain.ReaderPoint
 import dev.reedd.di.AppContainer
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -84,6 +85,32 @@ class GuideViewModel(
 
     init {
         refresh()
+    }
+
+    /**
+     * "Who is this?" on a tapped name: answered at once from the book guide's
+     * characters as of the end of the previous chapter -- offline too -- when
+     * the name matches one; otherwise asked of the AI like any question. Either
+     * way it lands in the conversation, so a follow-up works.
+     */
+    fun whoIs(rawName: String, currentHref: String?, point: ReaderPoint?) {
+        val name = BookGuideView.cleanName(rawName)
+        if (name.isEmpty() || _chat.value.any { it.pending }) return
+        val question = "Who is $name?"
+        val guide = _guide.value
+        val known = guide?.let {
+            val current = BookGuideView.chapterIndexOf(it, currentHref) ?: 0
+            BookGuideView.findCharacter(BookGuideView.charactersSoFar(it, current), name)
+        }
+        if (known != null) {
+            val aliases = if (known.aliases.isEmpty()) "" else " (also ${known.aliases.joinToString()})"
+            _chat.value = _chat.value + ChatTurn(
+                question,
+                answer = "${known.name}$aliases: ${known.description}\n\nFrom the book guide, as of the end of the previous chapter.",
+            )
+        } else {
+            ask(question, point)
+        }
     }
 
     /** Called on open and each time the guide sheet is shown. */

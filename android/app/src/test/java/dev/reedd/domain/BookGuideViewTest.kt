@@ -64,4 +64,51 @@ class BookGuideViewTest {
         assertFalse(BookGuideView.isComplete(partial))
         assertTrue(BookGuideView.isComplete(guide))
     }
+
+    // -- "Who is this?" ------------------------------------------------------------
+
+    private val cast = listOf(
+        GuideCharacterDto("Mr. Utterson", listOf("the lawyer", "Gabriel John Utterson"), "A lawyer."),
+        GuideCharacterDto("Mr. Hyde", listOf("Edward Hyde"), "A cruel man."),
+        GuideCharacterDto("Dr. Jekyll", listOf("Henry Jekyll", "Harry"), "A doctor."),
+        GuideCharacterDto("Poole", emptyList(), "Jekyll's butler."),
+    )
+
+    @Test
+    fun `a tapped surname finds the character, titles aside`() {
+        assertEquals("Mr. Utterson", BookGuideView.findCharacter(cast, "Utterson")?.name)
+        assertEquals("Mr. Hyde", BookGuideView.findCharacter(cast, "Hyde")?.name)
+        assertEquals("Mr. Hyde", BookGuideView.findCharacter(cast, "Mr. Hyde")?.name)
+    }
+
+    @Test
+    fun `punctuation and possessives around a tap are ignored`() {
+        assertEquals("Mr. Hyde", BookGuideView.findCharacter(cast, "Hyde's")?.name)
+        assertEquals("Mr. Hyde", BookGuideView.findCharacter(cast, "“Hyde,”")?.name)
+        assertEquals("Dr. Jekyll", BookGuideView.findCharacter(cast, "Harry!")?.name)
+    }
+
+    @Test
+    fun `an exact alias wins over a partial match`() {
+        // Matched as a whole alias, not word by word.
+        assertEquals("Dr. Jekyll", BookGuideView.findCharacter(cast, "Henry Jekyll")?.name)
+    }
+
+    @Test
+    fun `an unknown name or a bare title finds nobody`() {
+        assertNull(BookGuideView.findCharacter(cast, "Lanyon"))
+        assertNull(BookGuideView.findCharacter(cast, "Mr."))
+        assertNull(BookGuideView.findCharacter(cast, "..."))
+    }
+
+    @Test
+    fun `only capitalized taps of up to four words look like names`() {
+        assertTrue(BookGuideView.looksLikeName("Utterson"))
+        assertTrue(BookGuideView.looksLikeName("“Hyde's"))
+        assertTrue(BookGuideView.looksLikeName("Sir Danvers Carew"))
+        assertFalse(BookGuideView.looksLikeName("lawyer"))
+        assertFalse(BookGuideView.looksLikeName("..."))
+        assertFalse(BookGuideView.looksLikeName("The man who walked down the street"))
+    }
 }
+

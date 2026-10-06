@@ -16,6 +16,7 @@ import androidx.compose.material.icons.automirrored.filled.MenuBook
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.PersonSearch
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -73,6 +74,9 @@ fun WordMenuBar(
     onBookmark: () -> Unit,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
+    /** "Who is this?", offered only for a tap that looks like a name; null
+     *  hides it entirely (e.g. a book with nothing to ask about). */
+    onWhoIs: (() -> Unit)? = null,
 ) {
     val clipboard = LocalClipboard.current
     val scope = rememberCoroutineScope()
@@ -115,6 +119,13 @@ fun WordMenuBar(
                         icon = { Icon(Icons.AutoMirrored.Filled.MenuBook, contentDescription = null) },
                         label = "Definition",
                         onClick = onDefine,
+                    )
+                }
+                if (onWhoIs != null && dev.reedd.domain.BookGuideView.looksLikeName(target.quotedText)) {
+                    MenuAction(
+                        icon = { Icon(Icons.Filled.PersonSearch, contentDescription = null) },
+                        label = "Who is this?",
+                        onClick = onWhoIs,
                     )
                 }
                 MenuAction(

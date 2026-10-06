@@ -334,6 +334,19 @@ fun ReaderScreen(
                         onDefine = readAlongViewModel::defineTappedWord,
                         onBookmark = readAlongViewModel::openNoteEditor,
                         onDismiss = readAlongViewModel::dismissWordMenu,
+                        onWhoIs = {
+                            val name = menuTarget.quotedText
+                            readAlongViewModel.dismissWordMenu()
+                            val publication = (state as? ReaderState.Ready)?.publication
+                            val audioHref = readAlongViewModel.chunkIndex().chunkAtIndex(readAlong.currentIndex)?.resourceHref
+                            scope.launch {
+                                val point = dev.reedd.domain.ReaderPoints.furthest(
+                                    viewModel.pageEndPoint(), readAlongViewModel.sentencePoint(),
+                                ) { href -> readingOrderIndex(publication, href) }
+                                guideViewModel.whoIs(name, furthestHref(publication, pageHref, audioHref), point)
+                            }
+                            showGuide = true // opens on the Ask tab, where the answer lands
+                        },
                     )
                 } else if (book?.isPlayable == true || book?.canReadLive == true) {
                     // Also shown in fullscreen now, not just the normal

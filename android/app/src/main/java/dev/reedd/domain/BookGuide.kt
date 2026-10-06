@@ -57,6 +57,47 @@ object BookGuideView {
         return merged
     }
 
+    /** Titles that come before a name but do not identify anyone on their own. */
+    private val TITLES = setOf(
+        "mr", "mrs", "ms", "miss", "dr", "sir", "lady", "lord", "madame", "monsieur", "mme", "m",
+        "captain", "capt", "inspector", "detective", "professor", "prof", "father", "mother",
+        "uncle", "aunt", "the", "of",
+    )
+
+    /** A tapped word or selection, cleaned to compare with names: surrounding
+     *  quotes and punctuation stripped, a possessive dropped ("Hyde's" -> "Hyde"). */
+    fun cleanName(raw: String): String =
+        raw.trim().trim { !it.isLetterOrDigit() }
+            .replace(Regex("""['’]s$"""), "")
+            .trim { !it.isLetterOrDigit() }
+
+    /** Whether a tapped word or selection looks like a name worth asking
+     *  "who is this?" about: one to four words, starting with a capital. */
+    fun looksLikeName(raw: String): Boolean {
+        val name = cleanName(raw)
+        val words = name.split(Regex("""\s+""")).filter { it.isNotEmpty() }
+        return words.size in 1..4 && name.firstOrNull()?.isUpperCase() == true && name.any { it.isLetter() }
+    }
+
+    private fun words(label: String): List<String> =
+        label.lowercase().split(Regex("""[^\p{L}\p{N}]+""")).filter { it.isNotEmpty() }
+
+    /**
+     * The character a tapped name refers to: an exact name or alias first, then
+     * a character whose name/alias contains every word tapped once titles are set
+     * aside -- so "Utterson" finds "Mr. Utterson" and "Hyde" finds "Mr. Hyde".
+     * Null when nothing matches.
+     */
+    fun findCharacter(characters: List<GuideCharacterDto>, tapped: String): GuideCharacterDto? {
+        val tappedWords = words(cleanName(tapped)).filter { it !in TITLES }
+        if (tappedWords.isEmpty()) return null
+        val wanted = tappedWords.joinToString(" ")
+        fun labels(c: GuideCharacterDto) = listOf(c.name) + c.aliases
+        characters.firstOrNull { c -> labels(c).any { words(it).filter { w -> w !in TITLES }.joinToString(" ") == wanted } }
+            ?.let { return it }
+        return characters.firstOrNull { c -> labels(c).any { label -> words(label).containsAll(tappedWords) } }
+    }
+
     /** Whether every chapter has been built -- an incomplete guide is worth
      *  fetching again later. */
     fun isComplete(guide: GuideDto): Boolean = guide.chapters.isNotEmpty() && guide.chapters.all { it.status == "done" }
