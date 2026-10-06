@@ -6,7 +6,8 @@ import androidx.lifecycle.viewModelScope
 import dev.reedd.data.BookRepository
 import dev.reedd.data.db.BookEntity
 import dev.reedd.data.db.BookmarkType
-import dev.reedd.data.dictionary.Dictionary
+import dev.reedd.data.dictionary.DictionaryLookup
+import dev.reedd.data.dictionary.LookupResult
 import dev.reedd.data.local.BookFiles
 import dev.reedd.data.remote.ApiProvider
 import dev.reedd.di.AppContainer
@@ -49,6 +50,9 @@ data class DefinitionState(
     val loading: Boolean = false,
     val definition: dev.reedd.data.dictionary.Definition? = null,
     val notFound: Boolean = false,
+    /** Not in the bundled dictionary, and the server's full one could not be
+     *  asked -- shown differently from a real "no such word". */
+    val unreachable: Boolean = false,
 )
 
 /** What the read-along UI renders, and what the reader screen highlights from. */
@@ -91,7 +95,7 @@ class ReadAlongViewModel(
     private val bookId: String,
     private val repository: BookRepository,
     private val aligner: ReadAlongAligner,
-    private val dictionary: Dictionary,
+    private val dictionary: DictionaryLookup,
     val player: PlayerConnection,
     /** Start audio immediately once loaded -- the library's play button, not
      *  every way of reaching the reader. See `ReeddNavHost.kt`'s
@@ -941,12 +945,13 @@ class ReadAlongViewModel(
         player.pause()
         _definition.value = DefinitionState(word = target.quotedText, loading = true)
         viewModelScope.launch {
-            val found = runCatching { dictionary.lookup(target.quotedText) }.getOrNull()
+            val result = dictionary.lookup(target.quotedText)
             _definition.value = DefinitionState(
                 word = target.quotedText,
                 loading = false,
-                definition = found,
-                notFound = found == null,
+                definition = (result as? LookupResult.Found)?.definition,
+                notFound = result !is LookupResult.Found,
+                unreachable = result == LookupResult.Unreachable,
             )
         }
     }
@@ -1080,7 +1085,7 @@ class ReadAlongViewModel(
                 bookId,
                 container.repository,
                 container.readAlongAligner,
-                container.dictionary,
+                container.dictionaryLookup,
                 container.playerConnection,
                 autoPlay,
                 container.api,

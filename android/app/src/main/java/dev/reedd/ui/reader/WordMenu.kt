@@ -196,7 +196,8 @@ fun DefinitionSheet(state: DefinitionState, onDismiss: () -> Unit) {
                 )
 
                 state.notFound || state.definition == null -> Text(
-                    "Not in the dictionary.",
+                    if (state.unreachable) "Not in the offline dictionary, and the server couldn't be reached."
+                    else "Not in the dictionary.",
                     modifier = Modifier.padding(top = 16.dp),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,

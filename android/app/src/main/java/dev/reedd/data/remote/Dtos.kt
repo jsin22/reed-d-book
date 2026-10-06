@@ -314,3 +314,20 @@ enum class UploadMode {
         }
     }
 }
+
+/** `GET /api/dictionary/{word}` -- the same fields the bundled dictionary has. */
+@Serializable
+data class DefinitionDto(
+    val queried: String,
+    val word: String,
+    val senses: List<SenseDto>,
+)
+
+@Serializable
+data class SenseDto(
+    @SerialName("part_of_speech") val partOfSpeech: String,
+    val definition: String,
+    val pronunciation: String? = null,
+    val synonyms: List<String> = emptyList(),
+)
+

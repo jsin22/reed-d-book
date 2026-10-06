@@ -6,6 +6,7 @@ import dev.reedd.data.db.NoteDao
 import dev.reedd.data.db.ReeddDatabase
 import dev.reedd.data.db.SyncDao
 import dev.reedd.data.dictionary.Dictionary
+import dev.reedd.data.dictionary.DictionaryLookup
 import dev.reedd.data.download.ResumableDownloader
 import dev.reedd.data.local.BookFiles
 import dev.reedd.data.local.EpubImporter
@@ -110,6 +111,9 @@ class AppContainer(context: Context) {
 
     /** The bundled offline dictionary; opens its database on first lookup. */
     val dictionary: Dictionary by lazy { Dictionary(appContext) }
+
+    /** [dictionary] first, then the server's full one for words it lacks (E-8). */
+    val dictionaryLookup: DictionaryLookup by lazy { DictionaryLookup(dictionary, api) }
 
     /**
      * Not lazy: it is started from [dev.reedd.ReeddApp.onCreate] so a crash report

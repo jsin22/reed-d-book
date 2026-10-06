@@ -56,6 +56,11 @@ interface ReeddService {
     @GET("api/jobs")
     suspend fun listJobs(@Query("limit") limit: Int = 50): JobListDto
 
+    /** A word the bundled dictionary does not have, from the server's full one
+     *  (E-8). [candidates]: the inflection forms the app would try itself. */
+    @GET("api/dictionary/{word}")
+    suspend fun define(@Path("word") word: String, @Query("candidates") candidates: List<String>): DefinitionDto
+
     @GET("api/jobs/{jobId}")
     suspend fun job(@Path("jobId") jobId: String): JobDto
 
