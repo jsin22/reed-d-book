@@ -39,6 +39,16 @@ class LibrarySortTest {
     }
 
     @Test
+    fun `author ascending sorts by surname, not first name`() {
+        val books = listOf(
+            book("a", "Jekyll", "Robert Louis Stevenson"),
+            book("b", "Carrie", "Stephen King"),
+            book("c", "Gatsby", "F. Scott Fitzgerald"),
+        )
+        assertEquals(listOf("c", "b", "a"), books.librarySorted(LibrarySort.AUTHOR_ASC).map { it.id })
+    }
+
+    @Test
     fun `recently added is newest first`() {
         assertEquals(listOf("2", "3", "1"), library.librarySorted(LibrarySort.RECENTLY_ADDED).map { it.id })
     }

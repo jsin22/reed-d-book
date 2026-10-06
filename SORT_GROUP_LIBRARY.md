@@ -32,6 +32,10 @@ Decided through discussion, not open questions any more:
   genre (Horror *and* Fantasy), which a single "group by" bucket can't
   represent well. A filter -- "show books tagged Horror" -- handles that
   naturally, and doesn't force every book into exactly one bucket.
+  *Revisited 2026-10-03:* grouping was added alongside filtering (see
+  "Group by" below), on what the reader has done with a book -- reading
+  status, length, last opened -- rather than on genre, so the multi-genre
+  objection never arises. Filtering is unchanged.
 - **Two filter facets: Category and Genre.** (A third, Format --
   novel/play/poem/short story -- was considered and dropped: format
   signals are rarer and noisier in the source data than genre-content
@@ -280,3 +284,51 @@ server, no database, no Compose involved.
    Done -- `ui/library/LibrarySortFilterSheet.kt`, opened from a new
    TopAppBar icon on the Library screen; persisted via
    `SettingsStore.LibraryViewSettings`.
+
+## Group by (added 2026-10-03)
+
+A **Group by** section in the same sheet: None / Reading status / Length /
+Last opened. Filters apply first, then grouping; the chosen sort orders books
+*within* each group. Each group header shows a count and collapses on tap;
+"Collapse all" and "Expand all" sit above the groups. The grouping and the
+collapsed groups are per-device preferences in `SettingsStore`, like sort and
+filter. Logic is pure and unit-tested: `domain/LibraryGrouping.kt`,
+`LibraryGroupingTest.kt`.
+
+- **Reading status**: **Reading now** (opened in the last 14 days, not
+  finished), **On hold** (started, not opened for 14+ days), **Not started**
+  (never opened), **Finished** (95%+ through by either the page -- Readium's
+  `totalProgression` in the saved reading position -- or the listening
+  position against the audio's length; the page alone missed books heard to
+  the end with the phone locked, since the page only follows the audio while
+  the reader is on screen), **Not downloaded** (no
+  audiobook on this phone -- converting, on the server, live-only, failed;
+  this takes priority over the others).
+  **Manual status:** swiping a library card left reveals a button for each
+  status the book is not in (Reading now, On hold, Not started, Finished),
+  plus **Auto** once a status was set by hand; applied only on tap, with Undo.
+  Works in every grouping (under Length/Last opened the book keeps its group,
+  since those are facts, but its status changes). Stored per book in
+  `BookEntity.statusOverride` (a `ReadingStatus` name, or null = automatic;
+  `MIGRATION_17_18` carried over the earlier finished-only flag). A manual
+  status wins over everything, Not downloaded included, so a swipe always
+  visibly moves the book. Finished sticks through re-reading; any other manual
+  status is cleared the next time the book is opened (`BookDao.markOpened`),
+  handing it back to the automatic rules. Not downloaded is never a target --
+  it is a fact, not a status.
+- **Length**: Short (under 3h), Medium (3-8h), Long (8-15h), Very long (15h+),
+  Unknown length. From the audiobook's duration, which the server now reports
+  on every finished job (`duration_s`, read from the sync file; older jobs
+  filled with `python -m app.backfill_metadata --fill-durations`), so a book's
+  length is known before it is downloaded.
+- **Last opened**: Today (calendar day), This week (7 days), This month (30
+  days), Earlier, Never opened. Opening a book now records the time even if no
+  page is turned (it used to update only on a page change).
+
+An earlier cut grouped by Author (surname ranges), first Genre and Age (added
+date); replaced after trying it. Two pieces of it stayed: Author A-Z sorts by
+surname (`domain/AuthorNames.kt`), and the server orders each book's genres
+most-confident-first.
+
+Group keys are namespaced by grouping (`LENGTH:Short (under 3h)`), so each
+grouping remembers its own collapsed groups.

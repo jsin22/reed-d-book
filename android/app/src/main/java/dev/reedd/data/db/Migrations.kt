@@ -331,3 +331,22 @@ val MIGRATION_15_16 = object : Migration(15, 16) {
         db.execSQL("ALTER TABLE books ADD COLUMN previousJobId TEXT")
     }
 }
+
+/** [BookEntity.finishedOverride]: null for every existing book, i.e. the
+ *  automatic Finished rule, exactly as before. */
+val MIGRATION_16_17 = object : Migration(16, 17) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE books ADD COLUMN finishedOverride INTEGER")
+    }
+}
+
+/** [BookEntity.statusOverride] replaces the finished-only flag with any reading
+ *  status. A book marked finished keeps that; a "not finished" pin (false) had
+ *  no equivalent and goes back to automatic. */
+val MIGRATION_17_18 = object : Migration(17, 18) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE books ADD COLUMN statusOverride TEXT")
+        db.execSQL("UPDATE books SET statusOverride = 'FINISHED' WHERE finishedOverride = 1")
+        db.execSQL("UPDATE books SET finishedOverride = NULL")
+    }
+}

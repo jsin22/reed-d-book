@@ -137,6 +137,9 @@ class ReaderViewModel(
             _state.value = ReaderState.Failed("the epub is missing from storage; re-import it")
             return
         }
+        // Opening counts as reading for "Last opened"/"Reading now", even if
+        // no page is turned before closing (that is all that updated it before).
+        repository.markOpened(bookId)
 
         readium.open(file).fold(
             onSuccess = { publication ->

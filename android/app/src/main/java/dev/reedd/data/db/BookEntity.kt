@@ -151,6 +151,19 @@ data class BookEntity(
     /** Total audio length from the sync file, in milliseconds. */
     val audioDurationMs: Long? = null,
     val lastOpenedAt: Long? = null,
+    /**
+     * Unused since [statusOverride] replaced it (MIGRATION_17_18 copied its
+     * values across). Still declared only because the column cannot be dropped
+     * without rebuilding the whole table, and Room checks the table matches.
+     */
+    val finishedOverride: Boolean? = null,
+    /**
+     * The reading status the reader set by swiping this book's library card --
+     * a `domain.ReadingStatus` name -- or null to let the automatic rules decide
+     * (see `domain.readingStatus`). FINISHED stays until changed; any other
+     * status is cleared the next time the book is opened. Local to this device.
+     */
+    val statusOverride: String? = null,
 
     // -- read-along playback -------------------------------------------------
     /** Where the audiobook resumes, in milliseconds. */

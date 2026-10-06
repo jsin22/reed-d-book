@@ -17,6 +17,33 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.material.icons.filled.AutoMode
+import androidx.compose.material.icons.filled.BookmarkBorder
+import androidx.compose.material.icons.automirrored.filled.MenuBook
+import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
+import dev.reedd.domain.ReadingStatus
+import dev.reedd.domain.StatusAction
+import dev.reedd.domain.statusActions
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.material3.SnackbarResult
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.gestures.rememberDraggableState
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.animation.core.Animatable
+import androidx.compose.material3.TextButton
+import androidx.compose.material.icons.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.material.icons.Icons
@@ -81,6 +108,7 @@ fun LibraryScreen(
 ) {
     val books by viewModel.visibleBooks.collectAsStateWithLifecycle()
     val libraryView by viewModel.libraryView.collectAsStateWithLifecycle()
+    val groups by viewModel.groups.collectAsStateWithLifecycle()
     val availableCategories by viewModel.availableCategories.collectAsStateWithLifecycle()
     val availableGenres by viewModel.availableGenres.collectAsStateWithLifecycle()
     val message by viewModel.message.collectAsStateWithLifecycle()
@@ -95,6 +123,14 @@ fun LibraryScreen(
     val allBooks by viewModel.books.collectAsStateWithLifecycle()
     val nowPlaying = allBooks.find { it.id == playerState.bookId }
     val snackbar = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
+    val listState = rememberLazyListState()
+    // The one card whose swipe action is showing, if any -- opening another,
+    // or scrolling, closes it.
+    var swipedBookId by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(listState.isScrollInProgress) {
+        if (listState.isScrollInProgress) swipedBookId = null
+    }
     var showImport by remember { mutableStateOf(false) }
     var showSortFilter by remember { mutableStateOf(false) }
     var pickedUri by remember { mutableStateOf<android.net.Uri?>(null) }
@@ -172,12 +208,28 @@ fun LibraryScreen(
                 // is the fix, so this offers that instead of the import pitch.
                 NoFilterMatches(Modifier.fillMaxSize(), onClearFilters = viewModel::clearFilters)
             } else {
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    items(books, key = { it.id }) { book ->
+                // One card, shared by the flat list and the grouped one.
+                val bookCard: @Composable (BookEntity) -> Unit = { book ->
+                    SwipeToReveal(
+                        open = swipedBookId == book.id,
+                        onOpenChange = { open -> swipedBookId = if (open) book.id else null },
+                        actions = statusActions(book).map { action ->
+                            RevealAction(label = action.label(), icon = action.icon()) {
+                                swipedBookId = null
+                                val previous = viewModel.applyStatusAction(book, action)
+                                scope.launch {
+                                    val result = snackbar.showSnackbar(
+                                        message = action.confirmation(book.title),
+                                        actionLabel = "Undo",
+                                        duration = SnackbarDuration.Short,
+                                    )
+                                    if (result == SnackbarResult.ActionPerformed) {
+                                        viewModel.restoreStatusOverride(book.id, previous)
+                                    }
+                                }
+                            }
+                        },
+                    ) {
                         BookCard(
                             book = book,
                             nowPlaying = book.id == playerState.bookId,
@@ -203,6 +255,37 @@ fun LibraryScreen(
                         )
                     }
                 }
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    if (groups.isEmpty()) {
+                        items(books, key = { it.id }) { book -> bookCard(book) }
+                    } else {
+                        item(key = "group-controls") {
+                            GroupControls(
+                                onCollapseAll = viewModel::collapseAllGroups,
+                                onExpandAll = viewModel::expandAllGroups,
+                            )
+                        }
+                        groups.forEach { group ->
+                            val collapsed = group.key in libraryView.collapsedGroups
+                            item(key = "group:${group.key}") {
+                                GroupHeader(
+                                    label = group.label,
+                                    count = group.books.size,
+                                    collapsed = collapsed,
+                                    onToggle = { viewModel.toggleGroup(group.key) },
+                                )
+                            }
+                            if (!collapsed) {
+                                items(group.books, key = { it.id }) { book -> bookCard(book) }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -221,6 +304,7 @@ fun LibraryScreen(
             genres = availableGenres,
             onDismiss = { showSortFilter = false },
             onSortChange = viewModel::setSort,
+            onGroupingChange = viewModel::setGrouping,
             onCategoryChange = viewModel::setFilterCategory,
             onGenresChange = viewModel::setFilterGenres,
             onClearFilters = viewModel::clearFilters,
@@ -761,4 +845,136 @@ private fun formatEtaSeconds(totalSeconds: Long): String {
         .take(2)
         .joinToString(" ")
         .ifBlank { "0s" }
+}
+
+/** Collapse all / Expand all, shown above the groups while grouping is on. */
+@Composable
+private fun GroupControls(onCollapseAll: () -> Unit, onExpandAll: () -> Unit) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+        TextButton(onClick = onCollapseAll) { Text("Collapse all") }
+        TextButton(onClick = onExpandAll) { Text("Expand all") }
+    }
+}
+
+/** A group's title row: tapping anywhere on it collapses or expands the group. */
+@Composable
+private fun GroupHeader(label: String, count: Int, collapsed: Boolean, onToggle: () -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onToggle)
+            .padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            if (collapsed) Icons.Filled.KeyboardArrowRight else Icons.Filled.KeyboardArrowDown,
+            contentDescription = if (collapsed) "Expand $label" else "Collapse $label",
+        )
+        Text(
+            label,
+            style = MaterialTheme.typography.titleMedium,
+            modifier = Modifier.padding(start = 8.dp).weight(1f),
+        )
+        Text(
+            "$count",
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/** One button behind a swiped card. */
+private class RevealAction(val label: String, val icon: ImageVector, val onClick: () -> Unit)
+
+private fun StatusAction.label(): String = when (this) {
+    is StatusAction.MoveTo -> status.label
+    StatusAction.Auto -> "Auto"
+}
+
+private fun StatusAction.icon(): ImageVector = when (this) {
+    is StatusAction.MoveTo -> when (status) {
+        ReadingStatus.READING_NOW -> Icons.AutoMirrored.Filled.MenuBook
+        ReadingStatus.ON_HOLD -> Icons.Filled.Pause
+        ReadingStatus.NOT_STARTED -> Icons.Filled.BookmarkBorder
+        ReadingStatus.FINISHED -> Icons.Filled.Check
+    }
+    StatusAction.Auto -> Icons.Filled.AutoMode
+}
+
+private fun StatusAction.confirmation(title: String): String = when (this) {
+    is StatusAction.MoveTo -> "Moved “$title” to ${status.label}"
+    StatusAction.Auto -> "“$title” is back to automatic"
+}
+
+/**
+ * A card that slides left to reveal a row of actions behind it. A swipe only
+ * reveals; nothing happens until an action is tapped, so scrolling or a stray
+ * swipe never changes a book. A short swipe snaps back; past a third of the
+ * revealed width (or a quick fling) it stays open.
+ */
+@Composable
+private fun SwipeToReveal(
+    open: Boolean,
+    onOpenChange: (Boolean) -> Unit,
+    actions: List<RevealAction>,
+    content: @Composable () -> Unit,
+) {
+    val actionWidth = 76.dp
+    val revealPx = with(LocalDensity.current) { (actionWidth * actions.size).toPx() }
+    val offset = remember { Animatable(0f) }
+    val dragScope = rememberCoroutineScope()
+    LaunchedEffect(open, revealPx) { offset.animateTo(if (open) -revealPx else 0f) }
+
+    // Sized by the card alone; matchParentSize below makes the actions as tall as it.
+    Box(Modifier.fillMaxWidth()) {
+        // Drawn only once the card has moved, so nothing peeks out around the
+        // card's rounded corners while it is closed.
+        if (offset.value < -1f) {
+            Row(
+                Modifier.matchParentSize(),
+                horizontalArrangement = Arrangement.spacedBy(4.dp, Alignment.End),
+            ) {
+                actions.forEach { action ->
+                    Surface(
+                        onClick = action.onClick,
+                        color = MaterialTheme.colorScheme.primaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                        shape = MaterialTheme.shapes.medium,
+                        modifier = Modifier.width(actionWidth - 4.dp).fillMaxHeight(),
+                    ) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center,
+                            modifier = Modifier.padding(horizontal = 4.dp),
+                        ) {
+                            Icon(action.icon, contentDescription = null)
+                            Text(
+                                action.label,
+                                style = MaterialTheme.typography.labelSmall,
+                                textAlign = TextAlign.Center,
+                                maxLines = 2,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        Box(
+            Modifier
+                .offset { IntOffset(offset.value.roundToInt(), 0) }
+                .draggable(
+                    orientation = Orientation.Horizontal,
+                    state = rememberDraggableState { delta ->
+                        dragScope.launch { offset.snapTo((offset.value + delta).coerceIn(-revealPx, 0f)) }
+                    },
+                    onDragStopped = { velocity ->
+                        val keepOpen = offset.value < -revealPx / 3 || velocity < -1500f
+                        onOpenChange(keepOpen)
+                        offset.animateTo(if (keepOpen) -revealPx else 0f)
+                    },
+                ),
+        ) {
+            content()
+        }
+    }
 }

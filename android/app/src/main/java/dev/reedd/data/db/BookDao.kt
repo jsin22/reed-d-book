@@ -125,7 +125,8 @@ interface BookDao {
             genres = COALESCE(:genres, genres),
             voice = :voice,
             speed = :speed,
-            engine = COALESCE(:engine, engine)
+            engine = COALESCE(:engine, engine),
+            audioDurationMs = COALESCE(:audioDurationMs, audioDurationMs)
         WHERE id = :id
         """
     )
@@ -173,6 +174,9 @@ interface BookDao {
         voice: String,
         speed: Double,
         engine: String?,
+        // COALESCE: the server only reports it for a finished job, and the
+        // downloaded sync file (setSyncFile) is the other source of it.
+        audioDurationMs: Long? = null,
     )
 
     /**
@@ -258,6 +262,20 @@ interface BookDao {
 
     @Query("UPDATE books SET readingLocator = :locator, lastOpenedAt = :openedAt WHERE id = :id")
     suspend fun updateReadingPosition(id: String, locator: String?, openedAt: Long)
+
+    /** Also hands a manually set status other than FINISHED back to the
+     *  automatic rules -- see [BookEntity.statusOverride]. */
+    @Query(
+        """
+        UPDATE books SET lastOpenedAt = :openedAt,
+            statusOverride = CASE WHEN statusOverride = 'FINISHED' THEN statusOverride ELSE NULL END
+        WHERE id = :id
+        """
+    )
+    suspend fun markOpened(id: String, openedAt: Long)
+
+    @Query("UPDATE books SET statusOverride = :status WHERE id = :id")
+    suspend fun setStatusOverride(id: String, status: String?)
 
     /**
      * Written while audio plays, so it is deliberately the narrowest statement

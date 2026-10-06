@@ -26,12 +26,16 @@ import dev.reedd.diagnostics.CrashLog
 import dev.reedd.diagnostics.CrashReporter
 import dev.reedd.domain.AuthStatus
 import dev.reedd.domain.AuthStatusMonitor
-import dev.reedd.domain.ConversionWatcher
-import dev.reedd.domain.LibraryFilter
-import dev.reedd.domain.LibrarySort
 import dev.reedd.domain.availableCategories
 import dev.reedd.domain.availableGenres
+import dev.reedd.domain.BookGroup
+import dev.reedd.domain.ConversionWatcher
 import dev.reedd.domain.filteredBy
+import dev.reedd.domain.grouped
+import dev.reedd.domain.LibraryFilter
+import dev.reedd.domain.LibraryGrouping
+import dev.reedd.domain.StatusAction
+import dev.reedd.domain.LibrarySort
 import dev.reedd.domain.librarySorted
 import dev.reedd.playback.PlayerConnection
 import dev.reedd.playback.PlayerState
@@ -115,6 +119,49 @@ class LibraryViewModel(
 
     val availableGenres: StateFlow<List<String>> = books.map { it.availableGenres() }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /** [visibleBooks] split into groups per [libraryView]'s grouping -- empty
+     *  when grouping is off, in which case the screen shows the flat list. */
+    val groups: StateFlow<List<BookGroup>> = combine(visibleBooks, libraryView) { visible, view ->
+        visible.grouped(view.grouping)
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    fun setGrouping(grouping: LibraryGrouping) {
+        viewModelScope.launch { settingsStore.setLibraryViewSettings(libraryView.value.copy(grouping = grouping)) }
+    }
+
+    fun toggleGroup(key: String) {
+        val collapsed = libraryView.value.collapsedGroups
+        updateCollapsed(if (key in collapsed) collapsed - key else collapsed + key)
+    }
+
+    /** Collapses every group in the current grouping; other groupings keep theirs. */
+    fun collapseAllGroups() = updateCollapsed(libraryView.value.collapsedGroups + groups.value.map { it.key })
+
+    fun expandAllGroups() = updateCollapsed(libraryView.value.collapsedGroups - groups.value.map { it.key }.toSet())
+
+    /**
+     * A tapped swipe button on a library card: set the book's reading status by
+     * hand, or hand it back to the automatic rules. Returns the previous manual
+     * status, for Undo via [restoreStatusOverride].
+     */
+    fun applyStatusAction(book: BookEntity, action: StatusAction): String? {
+        val previous = book.statusOverride
+        val next = when (action) {
+            is StatusAction.MoveTo -> action.status.name
+            StatusAction.Auto -> null
+        }
+        viewModelScope.launch { repository.setStatusOverride(book.id, next) }
+        return previous
+    }
+
+    fun restoreStatusOverride(bookId: String, previous: String?) {
+        viewModelScope.launch { repository.setStatusOverride(bookId, previous) }
+    }
+
+    private fun updateCollapsed(collapsed: Set<String>) {
+        viewModelScope.launch { settingsStore.setLibraryViewSettings(libraryView.value.copy(collapsedGroups = collapsed)) }
+    }
 
     fun setSort(sort: LibrarySort) {
         viewModelScope.launch { settingsStore.setLibraryViewSettings(libraryView.value.copy(sort = sort)) }

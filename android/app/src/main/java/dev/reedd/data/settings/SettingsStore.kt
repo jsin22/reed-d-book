@@ -10,6 +10,7 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import dev.reedd.data.db.BookmarkType
+import dev.reedd.domain.LibraryGrouping
 import dev.reedd.domain.LibrarySort
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.Flow
@@ -105,6 +106,10 @@ data class LibraryViewSettings(
     val sort: LibrarySort = LibrarySort.RECENTLY_ADDED,
     val filterCategory: String? = null,
     val filterGenres: Set<String> = emptySet(),
+    val grouping: LibraryGrouping = LibraryGrouping.NONE,
+    /** [dev.reedd.domain.BookGroup.key]s the reader has collapsed. Keys are
+     *  namespaced by grouping, so each grouping remembers its own. */
+    val collapsedGroups: Set<String> = emptySet(),
 )
 
 private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "settings")
@@ -207,6 +212,9 @@ class SettingsStore(context: Context, scope: CoroutineScope) {
                 ?: LibraryViewSettings().sort,
             filterCategory = prefs[KEY_LIBRARY_FILTER_CATEGORY],
             filterGenres = prefs[KEY_LIBRARY_FILTER_GENRES] ?: emptySet(),
+            grouping = prefs[KEY_LIBRARY_GROUPING]?.let { runCatching { LibraryGrouping.valueOf(it) }.getOrNull() }
+                ?: LibraryGrouping.NONE,
+            collapsedGroups = prefs[KEY_LIBRARY_COLLAPSED_GROUPS] ?: emptySet(),
         )
     }
 
@@ -216,6 +224,8 @@ class SettingsStore(context: Context, scope: CoroutineScope) {
             if (settings.filterCategory == null) prefs.remove(KEY_LIBRARY_FILTER_CATEGORY)
             else prefs[KEY_LIBRARY_FILTER_CATEGORY] = settings.filterCategory
             prefs[KEY_LIBRARY_FILTER_GENRES] = settings.filterGenres
+            prefs[KEY_LIBRARY_GROUPING] = settings.grouping.name
+            prefs[KEY_LIBRARY_COLLAPSED_GROUPS] = settings.collapsedGroups
         }
     }
 
@@ -271,6 +281,8 @@ class SettingsStore(context: Context, scope: CoroutineScope) {
         val KEY_LIBRARY_SORT = stringPreferencesKey("library_sort")
         val KEY_LIBRARY_FILTER_CATEGORY = stringPreferencesKey("library_filter_category")
         val KEY_LIBRARY_FILTER_GENRES = stringSetPreferencesKey("library_filter_genres")
+        val KEY_LIBRARY_GROUPING = stringPreferencesKey("library_grouping")
+        val KEY_LIBRARY_COLLAPSED_GROUPS = stringSetPreferencesKey("library_collapsed_groups")
         val KEY_LAST_BOOKMARK_TYPE = stringPreferencesKey("last_bookmark_type")
 
         /** Not a real theme name -- see [readerSettings] and [setReaderSettings]. */

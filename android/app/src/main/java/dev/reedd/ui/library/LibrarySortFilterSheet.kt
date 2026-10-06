@@ -21,6 +21,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import dev.reedd.data.settings.LibraryViewSettings
+import dev.reedd.domain.LibraryGrouping
 import dev.reedd.domain.LibrarySort
 
 private fun LibrarySort.label(): String = when (this) {
@@ -47,6 +48,7 @@ fun LibrarySortFilterSheet(
     genres: List<String>,
     onDismiss: () -> Unit,
     onSortChange: (LibrarySort) -> Unit,
+    onGroupingChange: (LibraryGrouping) -> Unit,
     onCategoryChange: (String?) -> Unit,
     onGenresChange: (Set<String>) -> Unit,
     onClearFilters: () -> Unit,
@@ -67,6 +69,19 @@ fun LibrarySortFilterSheet(
                 ) {
                     RadioButton(selected = view.sort == option, onClick = { onSortChange(option) })
                     Text(option.label(), style = MaterialTheme.typography.bodyLarge)
+                }
+            }
+
+            HorizontalDivider()
+
+            Text("Group by", style = MaterialTheme.typography.titleLarge)
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                LibraryGrouping.entries.forEach { option ->
+                    FilterChip(
+                        selected = view.grouping == option,
+                        onClick = { onGroupingChange(option) },
+                        label = { Text(option.label()) },
+                    )
                 }
             }
 
@@ -121,4 +136,11 @@ fun LibrarySortFilterSheet(
             }
         }
     }
+}
+
+private fun LibraryGrouping.label(): String = when (this) {
+    LibraryGrouping.NONE -> "None"
+    LibraryGrouping.READING_STATUS -> "Reading status"
+    LibraryGrouping.LENGTH -> "Length"
+    LibraryGrouping.LAST_OPENED -> "Last opened"
 }

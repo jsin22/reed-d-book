@@ -82,7 +82,7 @@ class MigrationTest {
             .addMigrations(
                 MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7,
                 MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12,
-                MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16,
+                MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18,
             )
             .allowMainThreadQueries()
             .build()
@@ -504,6 +504,52 @@ class MigrationTest {
             // ...but nobody has ever picked a *separate* live voice yet, so
             // there is nothing truthful to backfill it with.
             assertNull(book.liveVoice)
+        } finally {
+            db.close()
+        }
+    }
+
+    @Test
+    fun `MIGRATION_16_17 leaves existing books on the automatic finished rule`() = runTest {
+        createVersion(16).use { old ->
+            old.execSQL(
+                """
+                INSERT INTO books (id, epubPath, originalFilename, title, sizeBytes, addedAt,
+                                   jobProgress, jobChaptersDone, jobMissing, uploadedBytes,
+                                   downloadState, downloadedBytes, downloadTotalBytes)
+                VALUES ('b1', '/e', 'Book.epub', 'Book', 1, 1, 0, 0, 0, 0, 'NONE', 0, 0)
+                """.trimIndent()
+            )
+        }
+
+        val db = openMigrated()
+        try {
+            assertNull(db.books().get("b1")!!.statusOverride)
+        } finally {
+            db.close()
+        }
+    }
+
+    @Test
+    fun `MIGRATION_17_18 carries a finished mark into the status override`() = runTest {
+        createVersion(17).use { old ->
+            for ((id, flag) in listOf("done" to "1", "pinned" to "0", "auto" to "NULL")) {
+                old.execSQL(
+                    """
+                    INSERT INTO books (id, epubPath, originalFilename, title, sizeBytes, addedAt,
+                                       jobProgress, jobChaptersDone, jobMissing, uploadedBytes,
+                                       downloadState, downloadedBytes, downloadTotalBytes, finishedOverride)
+                    VALUES ('$id', '/e', 'Book.epub', 'Book', 1, 1, 0, 0, 0, 0, 'NONE', 0, 0, $flag)
+                    """.trimIndent()
+                )
+            }
+        }
+
+        val db = openMigrated()
+        try {
+            assertEquals("FINISHED", db.books().get("done")!!.statusOverride)
+            assertNull(db.books().get("pinned")!!.statusOverride)
+            assertNull(db.books().get("auto")!!.statusOverride)
         } finally {
             db.close()
         }

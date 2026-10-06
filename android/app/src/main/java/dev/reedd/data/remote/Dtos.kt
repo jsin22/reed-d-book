@@ -44,6 +44,10 @@ data class JobDto(
      *  why polling alone never fills this in: the lookup only runs when a
      *  device actually downloads the cover, not on every poll. */
     val cover: FileRefDto? = null,
+    /** The audiobook's length in seconds, once finished -- known before the
+     *  book is downloaded, so the library can group by length. Absent on
+     *  jobs from before the server recorded it. */
+    @SerialName("duration_s") val durationS: Double? = null,
     /** Absent on a job from before per-user accounts existed; treat as private. */
     val public: Boolean = false,
     /** 'offline' (default), 'live', or 'live_offline' -- see server/app/main.py's

@@ -20,10 +20,13 @@ enum class LibrarySort {
  */
 fun List<BookEntity>.librarySorted(sort: LibrarySort): List<BookEntity> = when (sort) {
     LibrarySort.TITLE_ASC -> sortedBy { it.title.lowercase() }
-    // A book with no author sorts after every named one, rather than grouping
-    // at the front the way a plain `sortedBy { it.author }` would (Kotlin
-    // treats null as less than any string).
-    LibrarySort.AUTHOR_ASC -> sortedWith(compareBy<BookEntity> { it.author == null }.thenBy { it.author?.lowercase() })
+    // By surname ("Robert Louis Stevenson" under S), matching how the Author
+    // grouping files books -- see authorSortKey. A book with no author sorts
+    // after every named one, rather than grouping at the front the way a plain
+    // `sortedBy { it.author }` would (Kotlin treats null as less than any string).
+    LibrarySort.AUTHOR_ASC -> sortedWith(
+        compareBy<BookEntity> { authorSortKey(it.author) == null }.thenBy { authorSortKey(it.author) }
+    )
     LibrarySort.RECENTLY_ADDED -> sortedByDescending { it.addedAt }
     // Same "never happened sorts last" reasoning as AUTHOR_ASC, just descending:
     // a book that has never been opened has no lastOpenedAt to rank by at all,

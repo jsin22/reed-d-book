@@ -99,6 +99,7 @@ class BookRepository(
             voice = job.voice,
             speed = job.speed,
             engine = job.engine,
+            audioDurationMs = job.durationS?.let { (it * 1000).toLong() },
         )
     }
 
@@ -160,6 +161,10 @@ class BookRepository(
 
     suspend fun updateReadingPosition(bookId: String, locator: String?) =
         bookDao.updateReadingPosition(bookId, locator, System.currentTimeMillis())
+
+    suspend fun markOpened(bookId: String) = bookDao.markOpened(bookId, System.currentTimeMillis())
+
+    suspend fun setStatusOverride(bookId: String, status: String?) = bookDao.setStatusOverride(bookId, status)
 
 
     /**

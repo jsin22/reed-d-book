@@ -118,6 +118,47 @@ class BookDaoTest {
     }
 
     @Test
+    fun `opening a book clears a manual status other than finished`() = runTest {
+        // A manual Reading now / On hold / Not started lasts until the book is
+        // next opened; Finished sticks through re-reading.
+        dao.insert(book("held", jobId = null))
+        dao.insert(book("done", jobId = null))
+        dao.setStatusOverride("held", "ON_HOLD")
+        dao.setStatusOverride("done", "FINISHED")
+
+        dao.markOpened("held", openedAt = 1_000)
+        dao.markOpened("done", openedAt = 1_000)
+
+        assertNull(dao.get("held")!!.statusOverride)
+        assertEquals(1_000L, dao.get("held")!!.lastOpenedAt)
+        assertEquals("FINISHED", dao.get("done")!!.statusOverride)
+    }
+
+    @Test
+    fun `a poll records the audiobook length, and a poll without one keeps it`() = runTest {
+        // The library groups books by length before they are downloaded, so the
+        // server's duration_s has to land on the row from the job listing.
+        dao.insert(book("b1", jobId = "job-1"))
+        dao.updateJobState(
+            id = "b1", status = JobStatus.DONE, progress = 100, eta = null, chaptersDone = 3,
+            error = null, startedAt = "t0", finishedAt = "t1", audiobookBytes = 1,
+            audiobookRemoteName = null, syncRemoteName = null,
+            category = null, genres = null,
+            voice = "alba", speed = 1.0, engine = null, audioDurationMs = 7_652_880L,
+        )
+        assertEquals(7_652_880L, dao.get("b1")!!.audioDurationMs)
+
+        dao.updateJobState(
+            id = "b1", status = JobStatus.DONE, progress = 100, eta = null, chaptersDone = 3,
+            error = null, startedAt = "t0", finishedAt = "t1", audiobookBytes = 1,
+            audiobookRemoteName = null, syncRemoteName = null,
+            category = null, genres = null,
+            voice = "alba", speed = 1.0, engine = null, audioDurationMs = null,
+        )
+        assertEquals(7_652_880L, dao.get("b1")!!.audioDurationMs)
+    }
+
+    @Test
     fun `a poll re-syncs voice and speed from the server, self-healing a locally corrupted value`() = runTest {
         // Real, reported bug: an older build let the live-reading voice
         // picker write into this same book's `voice` column before it was
