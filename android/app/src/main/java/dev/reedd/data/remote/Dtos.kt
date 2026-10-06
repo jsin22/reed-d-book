@@ -359,3 +359,25 @@ data class GuideCharacterDto(
     val description: String = "",
 )
 
+/** `POST /api/books/{id}/ask` -- see `server/app/book_ask.py`. */
+@Serializable
+data class AskBodyDto(
+    val question: String,
+    val position: AskPositionDto,
+    val history: List<AskTurnDto> = emptyList(),
+)
+
+@Serializable
+data class AskPositionDto(
+    @SerialName("resource_href") val resourceHref: String,
+    @SerialName("anchor_text") val anchorText: String? = null,
+    @SerialName("anchor_offset") val anchorOffset: Int? = null,
+    val progression: Double? = null,
+)
+
+@Serializable
+data class AskTurnDto(val q: String, val a: String)
+
+@Serializable
+data class AskAnswerDto(val answer: String)
+

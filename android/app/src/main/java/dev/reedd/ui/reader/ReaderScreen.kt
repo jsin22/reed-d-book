@@ -502,10 +502,23 @@ fun ReaderScreen(
             // The spoiler limit: whichever is further into the book, the page
             // shown or the sentence being read aloud.
             val audioHref = readAlongViewModel.chunkIndex().chunkAtIndex(readAlong.currentIndex)?.resourceHref
+            val publication = (state as? ReaderState.Ready)?.publication
+            val chat by guideViewModel.chat.collectAsStateWithLifecycle()
             GuideSheet(
                 guide = guide,
                 loading = guideLoading,
-                currentHref = furthestHref((state as? ReaderState.Ready)?.publication, pageHref, audioHref),
+                currentHref = furthestHref(publication, pageHref, audioHref),
+                chat = chat,
+                onAsk = { question ->
+                    // Measured at the moment of asking: the end of the page shown
+                    // or the sentence being read, whichever is further along.
+                    scope.launch {
+                        val point = dev.reedd.domain.ReaderPoints.furthest(
+                            viewModel.pageEndPoint(), readAlongViewModel.sentencePoint(),
+                        ) { href -> readingOrderIndex(publication, href) }
+                        guideViewModel.ask(question, point)
+                    }
+                },
                 onDismiss = { showGuide = false },
             )
         }
@@ -1473,10 +1486,12 @@ private fun androidx.compose.ui.graphics.Color.toArgbCompat(): Int =
  *  may be null; with no publication to order by, the page's own. */
 private fun furthestHref(publication: org.readium.r2.shared.publication.Publication?, a: String?, b: String?): String? {
     if (a == null || b == null || publication == null) return a ?: b
-    fun position(href: String): Int {
-        val name = dev.reedd.domain.bareResourceName(href)
-        return publication.readingOrder.indexOfFirst { dev.reedd.domain.bareResourceName(it.url().toString()) == name }
-    }
-    return if (position(b) > position(a)) b else a
+    return if (readingOrderIndex(publication, b) > readingOrderIndex(publication, a)) b else a
+}
+
+/** A resource's position in the book's reading order, -1 if unknown. */
+private fun readingOrderIndex(publication: org.readium.r2.shared.publication.Publication?, href: String): Int {
+    val name = dev.reedd.domain.bareResourceName(href)
+    return publication?.readingOrder?.indexOfFirst { dev.reedd.domain.bareResourceName(it.url().toString()) == name } ?: -1
 }
 

@@ -58,6 +58,9 @@ interface ReeddService {
 
     /** A word the bundled dictionary does not have, from the server's full one
      *  (E-8). [candidates]: the inflection forms the app would try itself. */
+    @POST("api/books/{jobId}/ask")
+    suspend fun ask(@Path("jobId") jobId: String, @Body body: AskBodyDto): AskAnswerDto
+
     @GET("api/jobs/{jobId}/guide")
     suspend fun guide(@Path("jobId") jobId: String): GuideDto
 

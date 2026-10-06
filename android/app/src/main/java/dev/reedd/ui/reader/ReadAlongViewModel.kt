@@ -1018,6 +1018,10 @@ class ReadAlongViewModel(
         _state.value = _state.value.copy(following = true)
     }
 
+    /** The sentence being read aloud, as a point the ask endpoint can place. */
+    fun sentencePoint(): dev.reedd.domain.ReaderPoint? =
+        dev.reedd.domain.ReaderPoints.sentence(index.chunkAtIndex(_state.value.currentIndex))
+
     fun toggleFollowing() {
         if (follower.isFollowing) {
             follower.stop()

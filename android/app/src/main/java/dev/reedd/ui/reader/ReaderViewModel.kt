@@ -115,6 +115,16 @@ class ReaderViewModel(
     private val _currentProgression = MutableStateFlow<Double?>(null)
     val currentProgression: StateFlow<Double?> = _currentProgression.asStateFlow()
 
+    /** The end of the page being shown, as a point the ask endpoint can place
+     *  (see [dev.reedd.domain.ReaderPoint]); null before the page is ready. */
+    suspend fun pageEndPoint(): dev.reedd.domain.ReaderPoint? {
+        val fragment = navigator ?: return null
+        val href = _currentHref.value ?: return null
+        val text = PageText.read(fragment) ?: return null
+        val end = PageText.visiblePageEnd(fragment) ?: return null
+        return dev.reedd.domain.ReaderPoints.pageEnd(href, text, end)
+    }
+
     /** The resource (chapter) the page is in -- the book guide's spoiler limit
      *  is the chapter the reader has reached. */
     private val _currentHref = MutableStateFlow<String?>(null)

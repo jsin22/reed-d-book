@@ -1,10 +1,29 @@
 package dev.reedd.ui.reader
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.SuggestionChip
+import androidx.compose.material3.Surface
+import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.Alignment
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -41,26 +60,99 @@ fun GuideSheet(
     guide: GuideDto?,
     loading: Boolean,
     currentHref: String?,
+    chat: List<GuideViewModel.ChatTurn>,
+    onAsk: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
     var tab by rememberSaveable { mutableIntStateOf(0) }
     val currentIndex = guide?.let { BookGuideView.chapterIndexOf(it, currentHref) } ?: 0
 
-    ModalBottomSheet(onDismissRequest = onDismiss) {
-        Column(Modifier.fillMaxWidth().heightIn(min = 320.dp)) {
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
+        Column(Modifier.fillMaxWidth().fillMaxHeight(0.85f).imePadding()) {
             TabRow(selectedTabIndex = tab) {
-                Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text("Story so far") })
-                Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("Characters") })
+                Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text("Ask") })
+                Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("Story so far") })
+                Tab(selected = tab == 2, onClick = { tab = 2 }, text = { Text("Characters") })
             }
             when {
+                tab == 0 -> Ask(chat, onAsk)
                 guide == null && loading -> CircularProgressIndicator(Modifier.padding(32.dp))
                 guide == null -> Message(
                     "This book's guide isn't ready yet. It's prepared on the server after a book is " +
                         "added; it will appear here once you're online and it's done."
                 )
-                tab == 0 -> StorySoFar(guide, currentIndex)
+                tab == 1 -> StorySoFar(guide, currentIndex)
                 else -> Characters(guide, currentIndex)
             }
+        }
+    }
+}
+
+private val SUGGESTIONS = listOf("What just happened?", "Recap this chapter so far", "Who are the main characters so far?")
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun Ask(chat: List<GuideViewModel.ChatTurn>, onAsk: (String) -> Unit) {
+    var draft by rememberSaveable { mutableStateOf("") }
+    val busy = chat.any { it.pending }
+    val listState = rememberLazyListState()
+    LaunchedEffect(chat.size, chat.lastOrNull()?.pending) {
+        if (chat.isNotEmpty()) listState.animateScrollToItem(chat.size - 1)
+    }
+    Column(Modifier.fillMaxSize()) {
+        LazyColumn(
+            state = listState,
+            modifier = Modifier.weight(1f),
+            contentPadding = PaddingValues(20.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            if (chat.isEmpty()) {
+                item {
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Text(
+                            "Ask about characters or what's happening. Answers only use the book " +
+                                "up to where you are, so nothing ahead is spoiled.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            SUGGESTIONS.forEach { s -> SuggestionChip(onClick = { onAsk(s) }, label = { Text(s) }) }
+                        }
+                    }
+                }
+            }
+            items(chat.size) { i ->
+                val turn = chat[i]
+                Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.secondaryContainer,
+                        shape = MaterialTheme.shapes.medium,
+                        modifier = Modifier.align(Alignment.End).widthIn(max = 300.dp),
+                    ) { Text(turn.question, Modifier.padding(10.dp), style = MaterialTheme.typography.bodyMedium) }
+                    when {
+                        turn.pending -> CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                        turn.answer != null -> Text(turn.answer, style = MaterialTheme.typography.bodyMedium)
+                        else -> Text(turn.error.orEmpty(), style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.error)
+                    }
+                }
+            }
+        }
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            OutlinedTextField(
+                value = draft,
+                onValueChange = { draft = it },
+                placeholder = { Text("Ask about the book…") },
+                modifier = Modifier.weight(1f),
+                maxLines = 4,
+            )
+            IconButton(
+                onClick = { onAsk(draft); draft = "" },
+                enabled = draft.isNotBlank() && !busy,
+            ) { Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Ask") }
         }
     }
 }
