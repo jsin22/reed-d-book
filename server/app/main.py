@@ -85,7 +85,7 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, Header, HTTPException, Request, Response, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from pydantic import BaseModel
 
@@ -95,7 +95,7 @@ from .book_metadata import LookupUnavailable, lookup as lookup_book_metadata
 from .book_metadata_store import BookMetadataStore
 from .celery_app import enqueue, revoke
 from .config import get_settings
-from . import live_reading, live_tts_experiment
+from . import dictionary, live_reading, live_tts_experiment
 from .cover_generator import generate_placeholder_cover
 from .cover_lookup import fetch_cover
 from .feedback_status import FeedbackStatus
@@ -884,6 +884,21 @@ def _prune_feedback(directory: Path) -> None:
     for stale in files[MAX_FEEDBACK_FILES:]:
         stale.unlink(missing_ok=True)
     FeedbackStatus(directory).forget_missing({f.name for f in files[:MAX_FEEDBACK_FILES]})
+
+
+@app.get('/api/dictionary/{word}', dependencies=[Depends(require_user)])
+def define_word(word: str, candidates: list[str] = Query(default=[])):
+    """A word the app's own (frequency-cut) dictionary did not have, looked up
+    in the full one (E-8). `candidates` are the inflection forms the app would
+    try itself, most likely first -- see app/dictionary.py. 404 when no form is
+    in the dictionary; 503 when the full dictionary has not been built here."""
+    try:
+        found = dictionary.lookup(get_settings().dictionary_path, word, candidates)
+    except dictionary.DictionaryUnavailable:
+        raise HTTPException(status_code=503, detail='the full dictionary is not installed on this server')
+    if found is None:
+        raise HTTPException(status_code=404, detail=f'no definition for {word!r}')
+    return found
 
 
 @app.get('/api/jobs/{job_id}/log', response_class=PlainTextResponse)

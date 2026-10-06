@@ -65,6 +65,13 @@ class Settings:
         return self.data_dir / 'crashes'
 
     @property
+    def dictionary_path(self) -> Path:
+        """The full Wiktionary dictionary the app falls back to for words its
+        own bundled copy does not have (E-8) -- built by
+        `tools/build_dictionary_wiktionary.py` with no frequency cutoff."""
+        return self.data_dir / 'dictionary' / 'full.db'
+
+    @property
     def feedback_dir(self) -> Path:
         """Bug reports and feature requests posted by the app -- see
         `POST /api/feedback` in app/main.py. Same shape as [crashes_dir]
