@@ -71,6 +71,11 @@ matter, a table of contents, a license or similar, return an empty summary \
 and no characters."""
 
 
+class UnusableReply(book_ai.BookAIError):
+    """The model answered, but not with a usable guide entry -- worth one
+    more try, unlike a transport error book_ai has already retried."""
+
+
 def guide_path(job_id: str) -> Path:
     return JobStore(get_settings().jobs_dir).job_dir(job_id) / GUIDE_FILENAME
 
@@ -147,10 +152,17 @@ def _parse_chapter_reply(text: str) -> dict:
     rendering of the guide."""
     try:
         parsed = json.loads(text)
-    except (json.JSONDecodeError, TypeError) as e:
-        raise book_ai.BookAIError('the guide reply was not JSON') from e
+    except (json.JSONDecodeError, TypeError):
+        # Seen live (Supermarket, chapter 7): a valid object followed by stray
+        # closing brackets. Take the first complete object and ignore the rest;
+        # a code-fenced reply gets the same treatment.
+        start = text.find('{') if isinstance(text, str) else -1
+        try:
+            parsed, _end = json.JSONDecoder().raw_decode(text[start:]) if start >= 0 else (None, 0)
+        except json.JSONDecodeError as e:
+            raise UnusableReply('the guide reply was not JSON') from e
     if not isinstance(parsed, dict):
-        raise book_ai.BookAIError('the guide reply was not a JSON object')
+        raise UnusableReply('the guide reply was not a JSON object')
     summary = parsed.get('summary')
     characters = []
     for c in parsed.get('characters') or []:
@@ -210,8 +222,15 @@ def build(job_id: str, generate=book_ai.generate) -> dict:
                 prompt = _PROMPT.format(known=_format_known(known), number=i + 1,
                                         text=chapter['text'][:MAX_CHAPTER_CHARS])
                 last_call = time.monotonic()
-                reply = generate(SYSTEM_PROMPT, prompt, json_output=True)
-                entry.update(status=DONE, **_parse_chapter_reply(reply))
+                try:
+                    parsed = _parse_chapter_reply(generate(SYSTEM_PROMPT, prompt, json_output=True))
+                except UnusableReply:
+                    # An unusable reply is usually a one-off; ask once more
+                    # before giving up on the chapter (and so the whole build).
+                    time.sleep(MIN_CALL_INTERVAL_S)
+                    last_call = time.monotonic()
+                    parsed = _parse_chapter_reply(generate(SYSTEM_PROMPT, prompt, json_output=True))
+                entry.update(status=DONE, **parsed)
             _save(path, guide)
             done += 1
             store.update(job_id, guide={'status': RUNNING, 'chapters_done': done, 'total': total, 'error': None})

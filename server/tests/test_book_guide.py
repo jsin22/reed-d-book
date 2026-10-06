@@ -105,10 +105,22 @@ class BookGuideTest(ApiTestCase):
         self.assertIn('BRAVO-TEXT', self.prompts[0])
         self.assertEqual(['', 'One.', 'Two.', 'Three.'], [c['summary'] for c in guide['chapters']])
 
-    def test_a_reply_that_is_not_json_stops_the_build_with_an_error(self):
+    def test_two_unusable_replies_in_a_row_stop_the_build_with_an_error(self):
         with self.assertRaises(book_ai.BookAIError):
-            book_guide.build(self.job_id, generate=self.model(['Sure! Here is a summary...']))
+            book_guide.build(self.job_id, generate=self.model(['Sure! Here is a summary...', 'Still not JSON']))
         self.assertEqual('error', self.store.read(self.job_id)['guide']['status'])
+
+    def test_one_unusable_reply_is_retried(self):
+        guide = book_guide.build(self.job_id, generate=self.model(
+            ['oops', reply('One.'), reply('Two.'), reply('Three.')]))
+        self.assertEqual(['', 'One.', 'Two.', 'Three.'], [c['summary'] for c in guide['chapters']])
+
+    def test_trailing_junk_after_a_valid_object_is_ignored(self):
+        # Live, Supermarket chapter 7: a complete object, then stray brackets.
+        parsed = book_guide._parse_chapter_reply(reply('Flynn rests.') + '\n}\n]\n}')
+        self.assertEqual('Flynn rests.', parsed['summary'])
+        fenced = book_guide._parse_chapter_reply('```json\n' + reply('Fenced.') + '\n```')
+        self.assertEqual('Fenced.', fenced['summary'])
 
     def test_bad_fields_in_a_reply_are_dropped_not_trusted(self):
         parsed = book_guide._parse_chapter_reply(json.dumps({
