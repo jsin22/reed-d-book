@@ -990,6 +990,19 @@ class FeedbackTest(ApiTestCase):
         response = self.client.post(f'/api/admin/feedback/{name}/status', json={'fixed': True})
         self.assertEqual(403, response.status_code)
 
+    def test_dashboard_lists_and_marks_feedback_without_a_token(self):
+        name = self.client.post('/api/feedback?feedback_type=bug', content=b'Broken').json()['stored']
+        del self.client.headers['Authorization']
+
+        entries = self.client.get('/admin/dashboard/feedback').json()['entries']
+        self.assertEqual([name], [e['name'] for e in entries])
+
+        marked = self.client.post(f'/admin/dashboard/feedback/{name}/status', json={'fixed': True})
+        self.assertEqual(200, marked.status_code)
+        self.assertIsNotNone(self.client.get('/admin/dashboard/feedback').json()['entries'][0]['fixed_at'])
+        missing = self.client.post('/admin/dashboard/feedback/users.json/status', json={'fixed': True})
+        self.assertEqual(404, missing.status_code)
+
     def test_pruning_feedback_also_drops_its_fixed_status(self):
         from app import main
         name = self._submit_as_admin()

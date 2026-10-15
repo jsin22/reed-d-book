@@ -900,10 +900,9 @@ def list_feedback(limit: int = 20):
 @app.get('/api/admin/feedback/entries', dependencies=[Depends(require_admin)])
 def list_feedback_entries(limit: int = 100):
     """The same submissions as `list_feedback`, one JSON object each, for the
-    diagnostics dashboard's Feedback tab. Still admin-only: the dashboard
-    itself is reachable through Tailscale Funnel with no auth, so the tab
-    asks for an admin token and sends it rather than this data riding along
-    with the unauthenticated page."""
+    diagnostics dashboard's Feedback tab (via dashboard_feedback, which
+    serves it without a token on the tailnet-only /admin path). Admin-only
+    here because /api is public through Tailscale Funnel."""
     settings = get_settings()
     if not settings.feedback_dir.is_dir():
         return {'entries': []}
@@ -1179,6 +1178,18 @@ def dashboard_storage():
     return {'jobs': rows, 'total_bytes': sum(r['total_bytes'] for r in rows)}
 
 
+@app.get('/admin/dashboard/feedback')
+def dashboard_feedback():
+    """The Feedback tab's data, without a token: /admin is tailnet-only (see
+    tools/funnel-hide-dashboard.sh), unlike /api/admin/feedback/entries."""
+    return list_feedback_entries()
+
+
+@app.post('/admin/dashboard/feedback/{name}/status')
+def dashboard_feedback_status(name: str, body: FeedbackStatusBody):
+    return set_feedback_status(name, body)
+
+
 @app.get('/admin/dashboard', response_class=HTMLResponse)
 def dashboard_page():
     return _DASHBOARD_HTML
@@ -1352,11 +1363,6 @@ _DASHBOARD_HTML = f"""<!doctype html>
     </table>
   </section>
   <section id="feedback">
-    <form class="fb-bar" id="fb-auth">
-      <input id="fb-token" type="password" placeholder="Admin API token" autocomplete="off">
-      <button type="submit">Load</button>
-      <button type="button" id="fb-forget">Forget token</button>
-    </form>
     <div class="fb-bar" id="fb-filters" hidden>
       <button class="chip active" data-state="open">Open</button>
       <button class="chip" data-state="fixed">Fixed</button>
@@ -1368,7 +1374,7 @@ _DASHBOARD_HTML = f"""<!doctype html>
       <button class="chip" data-kind="other">Other</button>
       <button id="fb-refresh">Refresh</button>
     </div>
-    <div id="fb-list" class="empty">Enter an admin token to load feedback.</div>
+    <div id="fb-list" class="empty">Loading…</div>
   </section>
 </main>
 <script>
@@ -1513,20 +1519,12 @@ _DASHBOARD_HTML = f"""<!doctype html>
   }})();
 
   // -- Feedback -----------------------------------------------------------
-  // This page is reachable through Tailscale Funnel with no auth, so
-  // feedback is not served with it: the tab fetches the admin-only
-  // /api/admin/feedback/entries with a token typed in here, remembered in
-  // this browser's localStorage only.
+  // Served from the tailnet-only /admin path, so no token needed.
   (function () {{
-    const TOKEN_KEY = 'reedd-admin-token';
-    const tokenEl = document.getElementById('fb-token');
     const listEl = document.getElementById('fb-list');
     const filtersEl = document.getElementById('fb-filters');
     const TYPE_LABELS = {{bug: 'Bug', feature: 'Feature', other: 'Other'}};
     let entries = [], kind = 'all', state = 'open';
-
-    function getToken() {{ try {{ return localStorage.getItem(TOKEN_KEY) || ''; }} catch (e) {{ return ''; }} }}
-    function setToken(t) {{ try {{ t ? localStorage.setItem(TOKEN_KEY, t) : localStorage.removeItem(TOKEN_KEY); }} catch (e) {{}} }}
 
     function esc(s) {{
       return String(s).replace(/[&<>"']/g, c => ({{'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}})[c]);
@@ -1567,13 +1565,10 @@ _DASHBOARD_HTML = f"""<!doctype html>
     }}
 
     function load() {{
-      const token = getToken();
-      if (!token) return;
       listEl.className = 'loading';
       listEl.textContent = 'Loading…';
-      fetch('/api/admin/feedback/entries', {{headers: {{Authorization: `Bearer ${{token}}`}}}})
+      fetch('/admin/dashboard/feedback')
         .then(r => {{
-          if (r.status === 401 || r.status === 403) throw new Error('That token is not an admin token.');
           if (!r.ok) throw new Error(`Server error (${{r.status}}).`);
           return r.json();
         }})
@@ -1581,19 +1576,6 @@ _DASHBOARD_HTML = f"""<!doctype html>
         .catch(err => {{ listEl.className = 'empty'; listEl.textContent = err.message || 'Could not load feedback.'; }});
     }}
 
-    document.getElementById('fb-auth').addEventListener('submit', ev => {{
-      ev.preventDefault();
-      setToken(tokenEl.value.trim());
-      tokenEl.value = '';
-      load();
-    }});
-    document.getElementById('fb-forget').addEventListener('click', () => {{
-      setToken('');
-      entries = [];
-      filtersEl.hidden = true;
-      listEl.className = 'empty';
-      listEl.textContent = 'Enter an admin token to load feedback.';
-    }});
     document.getElementById('fb-refresh').addEventListener('click', load);
     for (const chip of filtersEl.querySelectorAll('.chip')) {{
       const group = chip.dataset.kind ? 'kind' : 'state';
@@ -1611,9 +1593,9 @@ _DASHBOARD_HTML = f"""<!doctype html>
       const entry = entries.find(e => e.name === btn.dataset.name);
       if (!entry) return;
       btn.disabled = true;
-      fetch(`/api/admin/feedback/${{encodeURIComponent(entry.name)}}/status`, {{
+      fetch(`/admin/dashboard/feedback/${{encodeURIComponent(entry.name)}}/status`, {{
         method: 'POST',
-        headers: {{Authorization: `Bearer ${{getToken()}}`, 'Content-Type': 'application/json'}},
+        headers: {{'Content-Type': 'application/json'}},
         body: JSON.stringify({{fixed: !entry.fixed_at}}),
       }})
         .then(r => {{ if (!r.ok) throw new Error(); return r.json(); }})
