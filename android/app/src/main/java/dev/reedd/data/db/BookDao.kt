@@ -277,6 +277,9 @@ interface BookDao {
     @Query("UPDATE books SET statusOverride = :status WHERE id = :id")
     suspend fun setStatusOverride(id: String, status: String?)
 
+    @Query("UPDATE books SET rating = :rating WHERE id = :id")
+    suspend fun setRating(id: String, rating: Int?)
+
     /**
      * Written while audio plays, so it is deliberately the narrowest statement
      * here: it fires every few seconds and must not touch anything else.

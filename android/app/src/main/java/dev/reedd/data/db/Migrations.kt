@@ -350,3 +350,10 @@ val MIGRATION_17_18 = object : Migration(17, 18) {
         db.execSQL("UPDATE books SET finishedOverride = NULL")
     }
 }
+
+/** [BookEntity.rating]: null (unrated) for every existing book. */
+val MIGRATION_18_19 = object : Migration(18, 19) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE books ADD COLUMN rating INTEGER")
+    }
+}

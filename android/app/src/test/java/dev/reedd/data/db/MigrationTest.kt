@@ -83,6 +83,7 @@ class MigrationTest {
                 MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7,
                 MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12,
                 MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18,
+                MIGRATION_18_19,
             )
             .allowMainThreadQueries()
             .build()
@@ -550,6 +551,29 @@ class MigrationTest {
             assertEquals("FINISHED", db.books().get("done")!!.statusOverride)
             assertNull(db.books().get("pinned")!!.statusOverride)
             assertNull(db.books().get("auto")!!.statusOverride)
+        } finally {
+            db.close()
+        }
+    }
+
+    @Test
+    fun `MIGRATION_18_19 leaves existing books unrated`() = runTest {
+        createVersion(18).use { old ->
+            old.execSQL(
+                """
+                INSERT INTO books (id, epubPath, originalFilename, title, sizeBytes, addedAt,
+                                   jobProgress, jobChaptersDone, jobMissing, uploadedBytes,
+                                   downloadState, downloadedBytes, downloadTotalBytes)
+                VALUES ('b1', '/e', 'Book.epub', 'Book', 1, 1, 0, 0, 0, 0, 'NONE', 0, 0)
+                """.trimIndent()
+            )
+        }
+
+        val db = openMigrated()
+        try {
+            assertNull(db.books().get("b1")!!.rating)
+            db.books().setRating("b1", 4)
+            assertEquals(4, db.books().get("b1")!!.rating)
         } finally {
             db.close()
         }

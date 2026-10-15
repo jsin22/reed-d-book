@@ -166,6 +166,8 @@ class BookRepository(
 
     suspend fun setStatusOverride(bookId: String, status: String?) = bookDao.setStatusOverride(bookId, status)
 
+    suspend fun setRating(bookId: String, rating: Int?) = bookDao.setRating(bookId, rating)
+
 
     /**
      * Delete the book locally, and its job on the server if it still has one.

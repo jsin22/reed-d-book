@@ -252,6 +252,7 @@ fun LibraryScreen(
                             onDeleteDownloaded = { viewModel.deleteLocalContent(book.id) },
                             onRetryConversion = { viewModel.retryConversion(book.id) },
                             onCancel = { viewModel.cancelConversion(book.id) },
+                            onRate = { rating -> viewModel.setRating(book.id, rating) },
                         )
                     }
                 }
@@ -452,6 +453,7 @@ private fun BookCard(
     onDeleteDownloaded: () -> Unit,
     onRetryConversion: () -> Unit,
     onCancel: () -> Unit,
+    onRate: (Int?) -> Unit,
 ) {
     var showMenu by remember { mutableStateOf(false) }
 
@@ -464,88 +466,99 @@ private fun BookCard(
                     onLongClick = onLongClick?.let { { showMenu = true } },
                 )
         ) {
-            Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                Cover(book, Modifier.size(width = 56.dp, height = 80.dp))
-                Column(
-                    Modifier
-                        .padding(start = 12.dp)
-                        .weight(1f)
-                ) {
-                    Text(
-                        book.title,
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    book.author?.let {
-                        Text(
-                            it,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                    // Blank once a book has never been sent for conversion (no
-                    // engine/voice chosen yet), rather than showing a stray "·".
-                    val engineVoice = listOfNotNull(book.engine, book.voice).joinToString(" · ")
-                    if (engineVoice.isNotEmpty()) {
-                        Text(
-                            engineVoice,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                    Row(
-                        Modifier.padding(top = 8.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
+            Column(Modifier.padding(12.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Cover(book, Modifier.size(width = 64.dp, height = 96.dp))
+                    Column(
+                        Modifier
+                            .padding(start = 12.dp)
+                            .weight(1f)
                     ) {
-                        StageChip(book, nowPlaying = nowPlaying, isPlaying = isPlaying)
-                        if (showDetails && onLongClick != null &&
-                            (book.stage() == BookStage.FAILED || book.stage() == BookStage.LOST)
-                        ) {
+                        Text(
+                            book.title,
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        book.author?.let {
                             Text(
-                                "Details",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.clickable(onClick = onLongClick),
+                                it,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        // Blank once a book has never been sent for conversion (no
+                        // engine/voice chosen yet), rather than showing a stray "·".
+                        val engineVoice = listOfNotNull(book.engine, book.voice).joinToString(" · ")
+                        if (engineVoice.isNotEmpty()) {
+                            Text(
+                                engineVoice,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        Row(
+                            Modifier.padding(top = 8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            StageChip(book, nowPlaying = nowPlaying, isPlaying = isPlaying)
+                            if (showDetails && onLongClick != null &&
+                                (book.stage() == BookStage.FAILED || book.stage() == BookStage.LOST)
+                            ) {
+                                Text(
+                                    "Details",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.clickable(onClick = onLongClick),
+                                )
+                            }
+                        }
+                        // The specific reason, surfaced right here: this is what lets
+                        // the card be self-sufficient (retry included) without a trip
+                        // to Detail, which non-admins cannot reach at all any more.
+                        failureReason(book)?.let {
+                            Text(
+                                it,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.padding(top = 4.dp),
+                            )
+                        }
+                        ProgressLine(book)
+                    }
+                    CardAction(book, onRead = onRead, onOpen = onOpen, onDownload = onDownload, onRetryConversion = onRetryConversion)
+                    if (book.isCancellable()) {
+                        IconButton(onClick = onCancel) {
+                            Icon(Icons.Filled.Close, contentDescription = "Cancel")
+                        }
+                    }
+                    if (book.hasLocalDownload()) {
+                        IconButton(onClick = onDeleteDownloaded) {
+                            Icon(
+                                Icons.Filled.Delete,
+                                contentDescription = "Delete local content",
+                                tint = MaterialTheme.colorScheme.error,
                             )
                         }
                     }
-                    // The specific reason, surfaced right here: this is what lets
-                    // the card be self-sufficient (retry included) without a trip
-                    // to Detail, which non-admins cannot reach at all any more.
-                    failureReason(book)?.let {
-                        Text(
-                            it,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.error,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.padding(top = 4.dp),
-                        )
-                    }
-                    ProgressLine(book)
                 }
-                CardAction(book, onRead = onRead, onOpen = onOpen, onDownload = onDownload, onRetryConversion = onRetryConversion)
-                if (book.isCancellable()) {
-                    IconButton(onClick = onCancel) {
-                        Icon(Icons.Filled.Close, contentDescription = "Cancel")
-                    }
-                }
-                if (book.hasLocalDownload()) {
-                    IconButton(onClick = onDeleteDownloaded) {
-                        Icon(
-                            Icons.Filled.Delete,
-                            contentDescription = "Delete local content",
-                            tint = MaterialTheme.colorScheme.error,
-                        )
-                    }
-                }
+                // Its own full-width row along the bottom: squeezed into the
+                // text column beside the cover, the last typewriter shrank on
+                // narrow phones. The -4dp lines the first glyph up with the
+                // cover's left edge (each has 4dp of touch padding each side).
+                TypewriterRating(
+                    rating = book.rating,
+                    onRate = onRate,
+                    modifier = Modifier.padding(top = 4.dp).offset(x = (-4).dp),
+                )
             }
         }
         // The only way to reach the detail/metadata screen for a book that is

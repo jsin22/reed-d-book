@@ -159,6 +159,11 @@ class LibraryViewModel(
         viewModelScope.launch { repository.setStatusOverride(bookId, previous) }
     }
 
+    /** A tapped typewriter on a library card: 1-5, or null to clear. */
+    fun setRating(bookId: String, rating: Int?) {
+        viewModelScope.launch { repository.setRating(bookId, rating) }
+    }
+
     private fun updateCollapsed(collapsed: Set<String>) {
         viewModelScope.launch { settingsStore.setLibraryViewSettings(libraryView.value.copy(collapsedGroups = collapsed)) }
     }

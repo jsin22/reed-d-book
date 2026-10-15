@@ -164,6 +164,9 @@ data class BookEntity(
      * status is cleared the next time the book is opened. Local to this device.
      */
     val statusOverride: String? = null,
+    /** The reader's own 1-5 rating, set on the library card; null = unrated.
+     *  Local to this device, like [statusOverride]. */
+    val rating: Int? = null,
 
     // -- read-along playback -------------------------------------------------
     /** Where the audiobook resumes, in milliseconds. */
